@@ -2,6 +2,10 @@
   "name": "specforge",
   "version": "0.2.0",
   "description": "Local-first markdown workspace for software product planning",
+  "author": {
+    "name": "Teragon Technologies LLC",
+    "email": "csalajan@teragontechnologies.com"
+  },
   "main": "dist/electron/main.js",
   "private": true,
   "packageManager": "npm@11.12.1",
