@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="utf-8">
+  <title>SpecForge</title>
+  <link rel="icon" type="image/x-icon" href="favicon.ico">
+  <base href="./">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!--
+    CSP: connect-src is narrow because the renderer never talks to AI providers
+    directly anymore. OpenAI-compatible chat + embeddings now run in the main
+    process (electron/ipc/ai.ts) and reach the renderer over IPC events, which
+    sidesteps CORS entirely. We only keep localhost in connect-src for the
+    `ng serve` HMR socket in dev. script-src / style-src stay locked to self +
+    inline (Angular/Tailwind inject style). worker-src keeps blob: for web
+    workers spawned by editor/markdown tooling.
+  -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data:; connect-src 'self' ws://localhost:* http://localhost:*; worker-src 'self' blob:">
+</head>
+<body class="dark">
+  <app-root></app-root>
+</body>
+</html>

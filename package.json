@@ -1,0 +1,124 @@
+{
+  "name": "specforge",
+  "version": "0.2.0",
+  "description": "Local-first markdown workspace for software product planning",
+  "main": "dist/electron/main.js",
+  "private": true,
+  "packageManager": "npm@11.12.1",
+  "scripts": {
+    "ng": "ng",
+    "start": "concurrently -k -n NG,ELECTRON -c blue,magenta \"npm run start:angular\" \"npm run start:electron\"",
+    "start:angular": "ng serve --port 4200",
+    "start:electron": "wait-on http://localhost:4200 && npm run build:electron && cross-env SPECFORGE_DEV=1 electron .",
+    "build:angular": "ng build --configuration production",
+    "build:electron": "node scripts/build-electron.mjs",
+    "build": "npm run build:angular && npm run build:electron",
+    "watch": "ng build --watch --configuration development",
+    "test": "ng test",
+    "package": "npm run build && electron-builder --publish never",
+    "package:win": "npm run build && electron-builder --win --publish never",
+    "package:mac": "npm run build && electron-builder --mac --publish never",
+    "package:linux": "npm run build && electron-builder --linux --publish never",
+    "release": "npm run build && electron-builder --publish always"
+  },
+  "build": {
+    "appId": "com.specforge.app",
+    "productName": "SpecForge",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/electron/**/*",
+      "dist/angular/**/*",
+      "node_modules/**/*"
+    ],
+    "extraMetadata": {
+      "main": "dist/electron/main.js"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "CraigSalajan",
+        "repo": "specforge"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "notarize": true
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "azureSignOptions": {
+        "publisherName": "Teragon Technologies",
+        "endpoint": "https://eus.codesigning.azure.net/",
+        "codeSigningAccountName": "teragon-technologies",
+        "certificateProfileName": "specforge"
+      }
+    },
+    "linux": {
+      "category": "Development",
+      "target": [
+        "AppImage",
+        "deb"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  },
+  "dependencies": {
+    "@angular/common": "^21.2.0",
+    "@angular/compiler": "^21.2.0",
+    "@angular/core": "^21.2.0",
+    "@angular/forms": "^21.2.0",
+    "@angular/platform-browser": "^21.2.0",
+    "@angular/router": "^21.2.0",
+    "@codemirror/commands": "^6.10.3",
+    "@codemirror/lang-markdown": "^6.5.0",
+    "@codemirror/language": "^6.12.3",
+    "@codemirror/state": "^6.6.0",
+    "@codemirror/view": "^6.43.0",
+    "@lezer/markdown": "^1.6.4",
+    "chokidar": "^5.0.0",
+    "codemirror-live-markdown": "^0.5.1-alpha.1",
+    "diff": "^9.0.0",
+    "electron-updater": "^6.8.3",
+    "highlight.js": "^11.11.1",
+    "lowlight": "^3.3.0",
+    "marked": "^18.0.4",
+    "rxjs": "~7.8.0",
+    "tslib": "^2.3.0"
+  },
+  "devDependencies": {
+    "@angular/build": "^21.2.13",
+    "@angular/cli": "^21.2.13",
+    "@angular/compiler-cli": "^21.2.0",
+    "@tailwindcss/postcss": "^4.3.0",
+    "@types/node": "^25.9.1",
+    "concurrently": "^10.0.0",
+    "cross-env": "^10.1.0",
+    "electron": "^42.3.0",
+    "electron-builder": "^26.8.1",
+    "esbuild": "^0.28.0",
+    "jsdom": "^28.0.0",
+    "postcss": "^8.5.15",
+    "prettier": "^3.8.1",
+    "tailwindcss": "^4.3.0",
+    "typescript": "~5.9.2",
+    "vitest": "^4.0.8",
+    "wait-on": "^9.0.10"
+  }
+}

@@ -1,0 +1,295 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --color-surface-0: #0b0d10;
+  --color-surface-1: #11141a;
+  --color-surface-2: #161a22;
+  --color-surface-3: #1e242e;
+  --color-border-subtle: #232a35;
+  --color-border-strong: #2f3744;
+  --color-text-primary: #e6e9ef;
+  --color-text-secondary: #9aa3b2;
+  --color-text-muted: #6b7384;
+  --color-accent: #6366f1;
+  --color-accent-hover: #818cf8;
+  --color-danger: #ef4444;
+  --font-mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+}
+
+html, body {
+  height: 100%;
+  margin: 0;
+  background: var(--color-surface-0);
+  color: var(--color-text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 16px;
+  overflow: hidden;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--color-border-strong); border-radius: 5px; }
+::-webkit-scrollbar-thumb:hover { background: #3a4453; }
+
+.prose-ai h1, .prose-ai h2, .prose-ai h3 { font-weight: 600; margin: 0.4em 0 0.3em; }
+.prose-ai h1 { font-size: 1.25em; }
+.prose-ai h2 { font-size: 1.1em; }
+.prose-ai h3 { font-size: 1.0em; }
+.prose-ai p { margin: 0.4em 0; }
+.prose-ai ul, .prose-ai ol { margin: 0.4em 0; padding-left: 1.4em; }
+.prose-ai li { margin: 0.15em 0; }
+.prose-ai code { font-family: var(--font-mono); background: var(--color-surface-3); padding: 0.05em 0.3em; border-radius: 3px; font-size: 0.88em; }
+.prose-ai pre { background: var(--color-surface-3); padding: 0.6em; border-radius: 4px; overflow-x: auto; }
+.prose-ai pre code { background: none; padding: 0; }
+.prose-ai blockquote { border-left: 2px solid var(--color-border-strong); padding-left: 0.8em; margin: 0.4em 0; color: var(--color-text-secondary); }
+.prose-ai a { color: var(--color-accent-hover); text-decoration: underline; }
+.prose-ai table { border-collapse: collapse; margin: 0.6em 0; }
+.prose-ai th, .prose-ai td { border: 1px solid var(--color-border-subtle); padding: 0.3em 0.6em; }
+
+/* ── CodeMirror live-markdown editor theming ─────────────────────────────
+   codemirror-live-markdown styles markdown inline via .cm-header-1..6 +
+   .cm-heading-line (headings), .cm-strong / .cm-emphasis / .cm-strikethrough,
+   .cm-code (inline code), .cm-codeblock-* (fences), .cm-link, and
+   .cm-formatting-block / .cm-formatting-inline for the raw syntax marks it
+   hides and reveals around the cursor.
+
+   The package's built-in theme colors every element through shadcn-style
+   variables whose DEFAULTS are LIGHT-theme values — near-black headings/bold
+   (`--foreground` → 220 9% 9%) and a near-white inline-code background
+   (`--muted` → 220 14% 96%) — which are invisible or glaring on our dark UI.
+   Rather than fight the package's per-rule specificity, we define those
+   variables on .cm-editor so every default resolves to the SpecForge palette.
+   The package wraps each var in hsl(), so values MUST be `H S% L%` triplets
+   (a hex value here would produce invalid CSS — the README's hex examples are
+   stale against this build). Triplets below approximate our hex palette. */
+.cm-editor {
+  height: 100%;
+  --foreground: 220 20% 92%;        /* body + default text   ≈ #e6e9ef */
+  --md-heading: 222 25% 96%;        /* headings, slightly brighter for pop */
+  --md-bold: 220 20% 92%;           /* bold text             ≈ #e6e9ef */
+  --md-italic: 220 20% 92%;         /* italic text           ≈ #e6e9ef */
+  --muted-foreground: 217 13% 65%;  /* dimmed / revealed marks ≈ #9aa3b2 */
+  --muted: 220 21% 11%;             /* inline-code background ≈ surface-2 #161a22 */
+  --primary: 234 89% 74%;           /* links                 ≈ accent-hover #818cf8 */
+  --md-link: 234 89% 74%;
+  --border: 217 17% 18%;            /* table / rule borders  ≈ border-strong */
+  --background: 220 22% 5%;         /* widget surfaces       ≈ surface-0 #0b0d10 */
+}
+.cm-editor .cm-scroller { font-family: inherit; }
+
+/* Inline code: package sets background + radius via --muted; pin our mono font
+   and tighten size so it matches .prose-preview. */
+.cm-editor .cm-code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  background: var(--color-surface-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+  color: var(--color-accent-hover);
+}
+
+/* Lists: the package treats the list marker (-, *, 1.) as a block formatting
+   mark and HIDES it on every non-cursor line (font-size: 0.01em; opacity: 0)
+   without drawing a substitute glyph — so bullets and numbers disappear. We
+   reveal the marker on non-heading lines (heading '#' marks stay hidden so
+   headings read clean). NOTE: this surfaces the literal markdown marker
+   (source-style "- " / "1."), not a rendered • glyph; faithful rendered
+   bullets would require a custom CodeMirror widget the alpha package lacks. */
+.cm-editor .cm-line:not(.cm-heading-line) .cm-formatting-block {
+  font-size: inherit;
+  opacity: 1;
+  width: auto;
+  margin-right: 0.3em;
+  color: var(--color-text-secondary);
+}
+
+/* ── GFM feature elements (tableField, codeBlockField, linkPlugin,
+   imageField) ────────────────────────────────────────────────────────────
+   Class names below were verified against the literal cm-* strings emitted in
+   codemirror-live-markdown/dist/index.js. Properties we set directly
+   (backgrounds / borders / radii) use the hex palette vars; the package's own
+   hsl()-wrapped color vars stay defined on .cm-editor above. */
+
+/* Fenced code blocks (rendered widget shown when the cursor is outside the
+   fence). Inline code is already styled by .cm-editor .cm-code above. */
+.cm-editor .cm-codeblock-widget {
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 8px;
+  padding: 0.8em 0.9em 0.6em;
+  margin: 0.2em 0;
+  overflow-x: auto;
+}
+.cm-editor .cm-codeblock-widget,
+.cm-editor .cm-codeblock-line,
+.cm-editor .cm-codeblock-source {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  color: var(--color-text-primary);
+}
+/* Source-mode fence lines (cursor inside): give the block a subtle surface so
+   the code region reads as a unit while editing. */
+.cm-editor .cm-codeblock-line { background: var(--color-surface-1); }
+.cm-editor .cm-codeblock-line-numbers { color: var(--color-text-muted); }
+/* Hide the literal ``` fence lines the widget re-draws inside the rendered code
+   box so it reads like a standard code block. The real fence markers stay in the
+   source and reappear when the cursor enters the block to edit it. */
+.cm-editor .cm-codeblock-fence { display: none; }
+.cm-editor .cm-codeblock-copy {
+  background: var(--color-surface-3);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 5px;
+  padding: 0.15em 0.5em;
+  font-size: 0.75em;
+  cursor: pointer;
+}
+.cm-editor .cm-codeblock-copy:hover { color: var(--color-text-primary); background: var(--color-border-subtle); }
+.cm-editor .cm-codeblock-copy-success { color: #34d399; }
+
+/* highlight.js token colors. The package emits hljs-* classes inside rendered
+   code blocks but ships no theme CSS, so we supply a compact dark palette that
+   reads well on --color-surface-2. (Token classes verified from the bundle.) */
+.cm-editor .hljs-keyword,
+.cm-editor .hljs-selector-tag,
+.cm-editor .hljs-literal,
+.cm-editor .hljs-operator { color: var(--color-accent-hover); }
+.cm-editor .hljs-string,
+.cm-editor .hljs-selector-class,
+.cm-editor .hljs-selector-id { color: #6ee7a8; }
+.cm-editor .hljs-comment { color: var(--color-text-muted); font-style: italic; }
+.cm-editor .hljs-number,
+.cm-editor .hljs-meta { color: #f0a868; }
+.cm-editor .hljs-title,
+.cm-editor .hljs-function,
+.cm-editor .hljs-name { color: #7dd3fc; }
+.cm-editor .hljs-attr,
+.cm-editor .hljs-attribute,
+.cm-editor .hljs-variable,
+.cm-editor .hljs-params { color: var(--color-text-primary); }
+.cm-editor .hljs-built_in,
+.cm-editor .hljs-class,
+.cm-editor .hljs-punctuation { color: var(--color-text-secondary); }
+
+/* Tables (rendered HTML widget: <table> with header row + cells). */
+.cm-editor .cm-table-widget {
+  border-collapse: collapse;
+  margin: 0.3em 0;
+  max-width: 100%;
+}
+.cm-editor .cm-table-cell {
+  border: 1px solid var(--color-border-subtle);
+  padding: 0.35em 0.7em;
+  color: var(--color-text-primary);
+}
+.cm-editor .cm-table-widget tr:first-child .cm-table-cell {
+  background: var(--color-surface-2);
+  font-weight: 600;
+}
+.cm-editor .cm-table-toolbar { display: flex; gap: 0.4em; margin-bottom: 0.2em; }
+.cm-editor .cm-table-toggle,
+.cm-editor .cm-table-source-toggle {
+  background: var(--color-surface-3);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 5px;
+  padding: 0.1em 0.5em;
+  font-size: 0.75em;
+  cursor: pointer;
+}
+.cm-editor .cm-table-source { font-family: var(--font-mono); color: var(--color-text-secondary); }
+
+/* Inline markdown rendered inside the rich table widget cells (marked.parseInline
+   output): match the editor's inline-code chip and link styling so code/links in
+   table cells look like everywhere else. */
+.cm-editor .cm-table-widget code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  background: var(--color-surface-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: 4px;
+  padding: 0.05em 0.3em;
+  color: var(--color-accent-hover);
+}
+.cm-editor .cm-table-widget a { color: var(--color-accent-hover); text-decoration: underline; }
+.cm-editor .cm-table-widget strong { font-weight: 700; }
+
+/* Links / wikilinks (URL hidden by linkPlugin; only the text widget shows). */
+.cm-editor .cm-link,
+.cm-editor .cm-link-widget,
+.cm-editor .cm-wikilink,
+.cm-editor .cm-wikilink-widget {
+  color: var(--color-accent-hover);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.cm-editor .cm-link-source,
+.cm-editor .cm-wikilink-source { color: var(--color-text-muted); }
+.cm-editor .cm-link-preview {
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border-subtle);
+  color: var(--color-text-secondary);
+  border-radius: 6px;
+  padding: 0.3em 0.5em;
+}
+
+/* Images (imageField widget with loading / error states). */
+.cm-editor .cm-image-widget { display: inline-block; max-width: 100%; }
+.cm-editor .cm-image-widget img { max-width: 100%; height: auto; border-radius: 6px; }
+.cm-editor .cm-image-alt { color: var(--color-text-secondary); font-style: italic; }
+.cm-editor .cm-image-info { color: var(--color-text-muted); font-size: 0.8em; }
+.cm-editor .cm-image-loading { color: var(--color-text-muted); font-size: 0.85em; }
+.cm-editor .cm-image-error,
+.cm-editor .cm-image-error-icon { color: var(--color-danger); font-size: 0.85em; }
+.cm-editor .cm-image-source { color: var(--color-text-muted); }
+
+/* Strikethrough + ==highlight==. cm-strong / cm-emphasis are already
+   color-driven via --md-bold / --md-italic on .cm-editor; here we add the
+   text-decoration / background the package leaves unstyled on dark. */
+.cm-editor .cm-strikethrough { text-decoration: line-through; color: var(--color-text-muted); }
+.cm-editor .cm-strong { font-weight: 700; }
+.cm-editor .cm-emphasis { font-style: italic; }
+.cm-editor .cm-highlight { background: rgba(240, 168, 104, 0.25); border-radius: 3px; padding: 0 0.1em; }
+
+/* PACKAGE LIMITATIONS (this 0.5.1-alpha build):
+   - Blockquotes (`>`): no dedicated cm- class is emitted, so there is no
+     reliable hook to draw a quote border / muted text in the live editor; quote
+     lines render as ordinary body text with the leading `>` shown as a
+     formatting mark. The read-only .prose-preview / .prose-ai surfaces below DO
+     style blockquotes.
+   - Horizontal rules (`---`) and GFM task-list checkboxes (`- [ ]` / `- [x]`):
+     no dedicated class either. With GFM parsing on they render as readable
+     source text via the body / list-marker styling above, but the package ships
+     no widget to draw an actual rule or checkbox. */
+
+.prose-preview { font-size: 1rem; line-height: 1.6; max-width: 900px; }
+.prose-preview h1 { font-size: 1.9em; font-weight: 700; margin: 0.6em 0 0.4em; border-bottom: 1px solid var(--color-border-subtle); padding-bottom: 0.3em; }
+.prose-preview h2 { font-size: 1.5em; font-weight: 600; margin: 1em 0 0.4em; }
+.prose-preview h3 { font-size: 1.2em; font-weight: 600; margin: 1em 0 0.3em; }
+.prose-preview h4, .prose-preview h5, .prose-preview h6 { font-weight: 600; margin: 1em 0 0.3em; }
+.prose-preview p { margin: 0.6em 0; }
+.prose-preview ul, .prose-preview ol { margin: 0.6em 0; padding-left: 1.6em; }
+.prose-preview li { margin: 0.2em 0; }
+.prose-preview a { color: var(--color-accent-hover); text-decoration: underline; }
+.prose-preview code { font-family: var(--font-mono); background: var(--color-surface-2); padding: 0.1em 0.3em; border-radius: 3px; font-size: 0.9em; }
+.prose-preview pre { background: var(--color-surface-2); padding: 1em; border-radius: 6px; overflow-x: auto; }
+.prose-preview pre code { background: none; padding: 0; font-size: 0.85em; }
+.prose-preview blockquote { border-left: 3px solid var(--color-border-strong); padding-left: 1em; color: var(--color-text-secondary); margin: 0.8em 0; }
+.prose-preview hr { border: none; border-top: 1px solid var(--color-border-subtle); margin: 1.5em 0; }
+.prose-preview table { border-collapse: collapse; margin: 0.8em 0; }
+.prose-preview th, .prose-preview td { border: 1px solid var(--color-border-subtle); padding: 0.4em 0.8em; }
+.prose-preview th { background: var(--color-surface-2); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
