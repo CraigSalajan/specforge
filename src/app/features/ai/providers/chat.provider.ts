@@ -6,9 +6,33 @@
  * surface returns the final assembled string.
  */
 
+export interface ToolFunctionDef {
+  name: string;
+  description?: string;
+  parameters?: Record<string, unknown>;
+}
+
+export interface ToolDef {
+  type: 'function';
+  function: ToolFunctionDef;
+}
+
+export interface ToolCall {
+  id: string;
+  type: 'function';
+  function: { name: string; arguments: string };
+}
+
 export interface ChatMessage {
-  role: 'system' | 'user' | 'assistant';
-  content: string;
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  /** Null only on an assistant message that carries tool_calls and no text. */
+  content: string | null;
+  /** Present on an assistant message that requested tool invocations. */
+  tool_calls?: ToolCall[];
+  /** Present on a `tool`-role message, referencing the call it answers. */
+  tool_call_id?: string;
+  /** Tool name (for `tool`-role messages). */
+  name?: string;
 }
 
 export interface ChatOptions {
@@ -24,6 +48,10 @@ export interface ChatOptions {
    * structured file proposals.
    */
   jsonObject?: boolean;
+  /** Function-calling tool schemas offered to the model for this call. */
+  tools?: ToolDef[];
+  /** Tool-choice policy. Defaults to 'auto' when tools are present. */
+  toolChoice?: 'auto' | 'none' | 'required';
   /** Abort the request mid-stream. */
   signal?: AbortSignal;
 }
@@ -33,9 +61,19 @@ export interface ChatChunk {
   delta: string;
   /** True on the final chunk after the stream completes. */
   done: boolean;
+  /** Assembled tool calls; only set on the final `done` chunk. */
+  toolCalls?: ToolCall[];
+  /** Provider finish reason; only set on the final `done` chunk. */
+  finishReason?: string;
+}
+
+export interface ChatCompleteResult {
+  content: string | null;
+  toolCalls?: ToolCall[];
+  finishReason?: string;
 }
 
 export interface ChatProvider {
   chat(messages: ChatMessage[], opts?: ChatOptions): AsyncIterable<ChatChunk>;
-  chatComplete(messages: ChatMessage[], opts?: ChatOptions): Promise<string>;
+  chatComplete(messages: ChatMessage[], opts?: ChatOptions): Promise<ChatCompleteResult>;
 }

@@ -6,10 +6,13 @@ import { VaultService } from '../../core/vault.service';
 import { AiProviderService } from './providers/ai-provider.service';
 import { RetrievalService } from './providers/retrieval.service';
 import { ChatService, type UiChatMessage } from './chat.service';
-import { assembleSystemMessage, type PinnedFile } from './prompts/system-context';
+import { assembleSystemMessage, TOOL_USAGE_PROMPT, type PinnedFile } from './prompts/system-context';
 import { findCommand, type PlanningCommandId } from './prompts';
-import type { ChatMessage } from './providers/chat.provider';
+import type { ChatMessage, ToolCall } from './providers/chat.provider';
 import { absToRel, canonicalRelPath, relToAbs, sanitizeFilename } from './providers/path-utils';
+import { FileChangeService } from './file-change.service';
+import { ToolRegistryService } from './tools/tool-registry.service';
+import { SkillRegistryService } from './skills/skill-registry.service';
 
 /**
  * System instruction appended when the renderer infers an edit-intent turn.
@@ -76,6 +79,14 @@ interface CommandResponseJson {
   content?: string;
 }
 
+/** Outcome of a staged proposal once the user resolves the confirm modal. */
+export type ProposalOutcome =
+  | { applied: true; relPath: string; absPath: string | null }
+  | { applied: false };
+
+/** Upper bound on agentic tool rounds per Ask-mode turn (loop safety). */
+const MAX_TOOL_ROUNDS = 8;
+
 /**
  * Orchestrates a single chat turn: retrieves context, composes the system
  * prompt, streams the assistant response, and (for planning commands)
@@ -92,14 +103,49 @@ export class AiOrchestratorService {
   private readonly providers = inject(AiProviderService);
   private readonly retrieval = inject(RetrievalService);
   private readonly chat = inject(ChatService);
+  private readonly fileChange = inject(FileChangeService);
+  private readonly tools = inject(ToolRegistryService);
+  private readonly skillRegistry = inject(SkillRegistryService);
 
   private readonly _pendingProposal = signal<FileProposal | null>(null);
   readonly pendingProposal = this._pendingProposal.asReadonly();
 
+  /** Resolver for the in-flight proposal promise, settled by the modal. */
+  private pendingResolver: ((outcome: ProposalOutcome) => void) | null = null;
+
   private abortController: AbortController | null = null;
+
+  /**
+   * Stages a proposal in the confirm modal and resolves once the user applies
+   * or cancels it. Used by the tool loop so an Ask-mode turn can await user
+   * confirmation before continuing the round-trip.
+   */
+  proposeAndAwait(proposal: FileProposal): Promise<ProposalOutcome> {
+    // Settle any prior in-flight proposal as not-applied before replacing it,
+    // so a stale resolver can never linger.
+    this.settlePending({ applied: false });
+    this._pendingProposal.set(proposal);
+    return new Promise<ProposalOutcome>((resolve) => {
+      this.pendingResolver = resolve;
+    });
+  }
+
+  /** Called by the modal on apply/cancel to clear and settle the proposal. */
+  resolveProposal(outcome: ProposalOutcome): void {
+    this._pendingProposal.set(null);
+    this.settlePending(outcome);
+  }
+
+  private settlePending(outcome: ProposalOutcome): void {
+    const resolver = this.pendingResolver;
+    this.pendingResolver = null;
+    if (resolver) resolver(outcome);
+  }
 
   clearPendingProposal(): void {
     this._pendingProposal.set(null);
+    // A dismissed proposal must never leave the tool loop hanging.
+    this.settlePending({ applied: false });
   }
 
   stop(): void {
@@ -107,6 +153,11 @@ export class AiOrchestratorService {
       this.abortController.abort();
       this.abortController = null;
     }
+    // An aborted turn with the modal still open must both close the modal and
+    // release the awaiting loop — otherwise a stale proposal dialog lingers on
+    // screen after Stop while the loop unwinds.
+    this._pendingProposal.set(null);
+    this.settlePending({ applied: false });
   }
 
   /**
@@ -133,6 +184,15 @@ export class AiOrchestratorService {
         ? canonicalRelPath(absToRel(vaultPath, activeAbs))
         : null;
     const isEdit = mode === 'edit' && editTargetRel !== null;
+
+    // Ask-mode turns with tools enabled go through the agentic tool loop so the
+    // model can create files via the `write_file` tool. Edit-mode turns keep the
+    // existing JSON-proposal path untouched. Tools are skipped when disabled in
+    // settings, which makes behavior identical to the legacy plain-chat path.
+    if (!isEdit && this.settings.aiToolsEnabled()) {
+      await this.runWithTools({ userContent: content, scope });
+      return;
+    }
 
     await this.run({
       userContent: content,
@@ -173,6 +233,236 @@ export class AiOrchestratorService {
       defaultFolder: cmd.defaultFolder,
       defaultTitle: cmd.label,
     });
+  }
+
+  /**
+   * Ask-mode turn with native function-calling. Streams the assistant reply
+   * and, when the model emits `tool_calls`, executes each tool, stages any
+   * resulting proposal in the confirm modal, feeds the tool results back, and
+   * re-invokes the model — bounded by {@link MAX_TOOL_ROUNDS}.
+   *
+   * OpenAI ordering contract: every assistant message that carries `tool_calls`
+   * is immediately followed by exactly one `tool`-role message per
+   * `tool_call_id` before the next model call.
+   */
+  private async runWithTools(opts: {
+    userContent: string;
+    scope: ContextScope;
+  }): Promise<void> {
+    const session = this.chat.activeSession();
+    if (!session) return;
+    if (!this.providers.isConfigured()) {
+      this.chat.setError('No API key configured. Open Settings to add one.');
+      return;
+    }
+
+    const vaultPath = this.vault.vaultPath();
+    if (!vaultPath) {
+      this.chat.setError('Pick a vault before chatting.');
+      return;
+    }
+
+    const userUi: UiChatMessage = {
+      id: null,
+      role: 'user',
+      content: opts.userContent,
+      streaming: false,
+      error: null,
+      createdAt: Date.now(),
+    };
+    this.chat.appendLocal(userUi);
+    await this.chat.persistMessage(session.id, 'user', opts.userContent);
+
+    const assistantUi: UiChatMessage = {
+      id: null,
+      role: 'assistant',
+      content: '',
+      streaming: true,
+      error: null,
+      citations: [],
+      createdAt: Date.now(),
+    };
+    this.chat.appendLocal(assistantUi);
+    this.chat.setStreaming(true);
+    this.chat.setError(null);
+
+    const controller = new AbortController();
+    this.abortController = controller;
+
+    try {
+      // Base conversation: system prompt (with tool guidance) + persisted turns.
+      const convo = await this.composeMessages({
+        scope: opts.scope,
+        userContent: opts.userContent,
+        additionalInstructions: TOOL_USAGE_PROMPT,
+        vaultPath,
+      });
+
+      // Per-tool gating: drop schemas for tools the user disabled so they are
+      // never advertised to the model. The global `ai.toolsEnabled` switch
+      // (checked by the caller) still acts as the master gate above this.
+      const disabledTools = new Set(this.settings.disabledTools());
+      const toolSchemas = this.tools
+        .schemas()
+        .filter((schema) => !disabledTools.has(schema.function.name));
+      let finalText = '';
+
+      for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+        let roundText = '';
+        let toolCalls: ToolCall[] | undefined;
+
+        for await (const chunk of this.providers.chat.chat(convo, {
+          signal: controller.signal,
+          tools: toolSchemas,
+          toolChoice: 'auto',
+        })) {
+          if (chunk.delta) {
+            roundText += chunk.delta;
+            // Show streamed text live; on rounds after a tool call the bubble
+            // continues to accumulate into the same assistant message.
+            this.chat.updateLastAssistant({ content: finalText + roundText });
+          }
+          if (chunk.done) {
+            toolCalls = chunk.toolCalls;
+            break;
+          }
+        }
+
+        finalText += roundText;
+
+        // No tool calls: this is the final natural-language reply.
+        if (!toolCalls || toolCalls.length === 0) break;
+
+        // Record the assistant's tool-call message (content may be null).
+        convo.push({
+          role: 'assistant',
+          content: roundText.length > 0 ? roundText : null,
+          tool_calls: toolCalls,
+        });
+
+        // Execute each call in order and append exactly one tool message per id.
+        for (const call of toolCalls) {
+          // Defensive: OpenAI always sends a non-empty `id`, but a stray delta
+          // (or a non-conformant proxy) could yield a tool call without one.
+          // Synthesize a stable id so the follow-up request never emits a
+          // `tool_call_id:''` that the model/endpoint would reject, and so the
+          // assistant(tool_calls) → tool ordering contract still holds.
+          if (!call.id) {
+            const synthId = `call_${round}_${toolCalls.indexOf(call)}`;
+            const repaired: ToolCall = { ...call, id: synthId };
+            // Point the assistant message's matching tool_call at the synth id
+            // too, so both sides reference the same identifier.
+            call.id = synthId;
+            const toolMsg = await this.executeToolCall(repaired, {
+              sessionId: session.id,
+              vaultPath,
+            });
+            convo.push(toolMsg);
+            continue;
+          }
+          const toolMsg = await this.executeToolCall(call, {
+            sessionId: session.id,
+            vaultPath,
+          });
+          convo.push(toolMsg);
+        }
+        // Loop continues: re-invoke the model with the tool results appended.
+      }
+
+      const displayContent =
+        finalText.trim().length > 0
+          ? finalText
+          : 'Done.';
+
+      this.chat.updateLastAssistant({ content: displayContent, streaming: false });
+
+      const persisted = await this.chat.persistMessage(
+        session.id,
+        'assistant',
+        displayContent,
+      );
+      if (persisted) {
+        this.chat.updateLastAssistant({ id: persisted.id });
+      }
+    } catch (err) {
+      const isAbort = err instanceof DOMException && err.name === 'AbortError';
+      const message = isAbort
+        ? 'Stopped.'
+        : err instanceof Error
+          ? err.message
+          : String(err);
+      this.chat.updateLastAssistant({
+        error: isAbort ? null : message,
+        streaming: false,
+      });
+      if (!isAbort) this.chat.setError(message);
+    } finally {
+      this.abortController = null;
+      this.chat.setStreaming(false);
+    }
+
+    void this.chat.refreshSessions();
+    void this.indexFreshFile(vaultPath);
+  }
+
+  /**
+   * Runs a single tool call: dispatches to the registered tool, and if it
+   * stages a proposal, opens the confirm modal and waits for the user. The
+   * modal performs the actual write + undo recording on accept — the
+   * orchestrator never writes to disk itself. Returns the `tool`-role message
+   * to feed back to the model.
+   */
+  private async executeToolCall(
+    call: ToolCall,
+    ctx: { sessionId: number | null; vaultPath: string },
+  ): Promise<ChatMessage> {
+    const name = call.function.name;
+
+    // Per-tool gating guard: even though disabled tools aren't advertised, a
+    // model could still hallucinate a call to one. Refuse to dispatch it.
+    if (this.settings.disabledTools().includes(name)) {
+      return {
+        role: 'tool',
+        tool_call_id: call.id,
+        name,
+        content: `Error: tool "${name}" is disabled.`,
+      };
+    }
+
+    const tool = this.tools.get(name);
+    if (!tool) {
+      return {
+        role: 'tool',
+        tool_call_id: call.id,
+        name,
+        content: `Error: unknown tool "${name}".`,
+      };
+    }
+
+    const result = await tool.execute(call, ctx);
+
+    // Validation error (or any non-proposal result): pass content straight back.
+    if (!result.proposal) {
+      return {
+        role: 'tool',
+        tool_call_id: call.id,
+        name,
+        content: result.content,
+      };
+    }
+
+    // Stage the proposal in the confirm modal and wait for the user.
+    const outcome = await this.proposeAndAwait(result.proposal);
+    const content = outcome.applied
+      ? `Created ${outcome.relPath}.`
+      : 'The user rejected this file creation. Do not retry; acknowledge briefly and continue.';
+
+    return {
+      role: 'tool',
+      tool_call_id: call.id,
+      name,
+      content,
+    };
   }
 
   private async run(opts: {
@@ -236,11 +526,11 @@ export class AiOrchestratorService {
 
       let accumulated = '';
       if (opts.expectsFileProposal) {
-        const text = await this.providers.chat.chatComplete(messages, {
+        const result = await this.providers.chat.chatComplete(messages, {
           jsonObject: true,
           signal: controller.signal,
         });
-        accumulated = text;
+        accumulated = result.content ?? '';
       } else {
         for await (const chunk of this.providers.chat.chat(messages, {
           signal: controller.signal,
@@ -377,6 +667,7 @@ export class AiOrchestratorService {
       maxContextChars: maxChars,
       additionalInstructions: opts.additionalInstructions ?? undefined,
       pinnedFiles,
+      availableSkills: this.skillRegistry.enabled(),
     });
 
     this.chat.updateLastAssistant({ citations });

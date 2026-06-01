@@ -1,5 +1,6 @@
 import type {
   AiChatCompleteRequest,
+  AiChatCompleteResult,
   AiChatRequestOptions,
   AiChatStreamRequest,
   AiEmbedRequest,
@@ -8,7 +9,14 @@ import type {
   AiStreamDoneEvent,
   AiStreamErrorEvent,
 } from '../../../shared/types';
-import type { ChatChunk, ChatMessage, ChatOptions, ChatProvider } from './chat.provider';
+import type {
+  ChatChunk,
+  ChatCompleteResult,
+  ChatMessage,
+  ChatOptions,
+  ChatProvider,
+  ToolCall,
+} from './chat.provider';
 import type { EmbeddingProvider } from './embedding.provider';
 
 export interface OpenAiCompatibleConfig {
@@ -28,7 +36,7 @@ export type OpenAiConfigGetter = () => OpenAiCompatibleConfig;
 export interface AiIpcAdapter {
   aiChatStream(req: AiChatStreamRequest): Promise<void>;
   aiChatAbort(streamId: string): Promise<void>;
-  aiChatComplete(req: AiChatCompleteRequest): Promise<string>;
+  aiChatComplete(req: AiChatCompleteRequest): Promise<AiChatCompleteResult>;
   aiEmbed(req: AiEmbedRequest): Promise<AiEmbedResponse>;
   onAiStreamChunk(cb: (evt: AiStreamChunkEvent) => void): () => void;
   onAiStreamDone(cb: (evt: AiStreamDoneEvent) => void): () => void;
@@ -40,6 +48,10 @@ function toRequestOptions(opts: ChatOptions): AiChatRequestOptions | undefined {
   if (opts.temperature !== undefined) out.temperature = opts.temperature;
   if (opts.maxTokens !== undefined) out.maxTokens = opts.maxTokens;
   if (opts.jsonObject) out.responseFormat = { type: 'json_object' };
+  if (opts.tools && opts.tools.length > 0) {
+    out.tools = opts.tools;
+    out.toolChoice = opts.toolChoice ?? 'auto';
+  }
   return Object.keys(out).length === 0 ? undefined : out;
 }
 
@@ -70,7 +82,7 @@ export class OpenAiCompatibleChatProvider implements ChatProvider {
     // queue so the consumer's `for await` sleeps until the next event.
     type Pending =
       | { kind: 'chunk'; delta: string }
-      | { kind: 'done'; finishReason?: string }
+      | { kind: 'done'; finishReason?: string; toolCalls?: ToolCall[] }
       | { kind: 'error'; message: string };
 
     const queue: Pending[] = [];
@@ -94,7 +106,7 @@ export class OpenAiCompatibleChatProvider implements ChatProvider {
     });
     const offDone = this.ipc.onAiStreamDone((evt) => {
       if (evt.streamId !== streamId) return;
-      push({ kind: 'done', finishReason: evt.finishReason });
+      push({ kind: 'done', finishReason: evt.finishReason, toolCalls: evt.toolCalls });
     });
     const offError = this.ipc.onAiStreamError((evt) => {
       if (evt.streamId !== streamId) return;
@@ -168,7 +180,12 @@ export class OpenAiCompatibleChatProvider implements ChatProvider {
         if (next.kind === 'chunk') {
           if (next.delta) yield { delta: next.delta, done: false };
         } else if (next.kind === 'done') {
-          yield { delta: '', done: true };
+          yield {
+            delta: '',
+            done: true,
+            toolCalls: next.toolCalls,
+            finishReason: next.finishReason,
+          };
           break;
         } else {
           if (opts.signal?.aborted || next.message === 'Aborted') {
@@ -185,7 +202,10 @@ export class OpenAiCompatibleChatProvider implements ChatProvider {
     }
   }
 
-  async chatComplete(messages: ChatMessage[], opts: ChatOptions = {}): Promise<string> {
+  async chatComplete(
+    messages: ChatMessage[],
+    opts: ChatOptions = {},
+  ): Promise<ChatCompleteResult> {
     const cfg = this.getConfig();
     if (!cfg.apiKey) throw new Error('No API key configured. Open Settings to add one.');
 
@@ -208,7 +228,11 @@ export class OpenAiCompatibleChatProvider implements ChatProvider {
     if (opts.signal?.aborted) {
       throw new DOMException('Aborted', 'AbortError');
     }
-    return result;
+    return {
+      content: result.content,
+      toolCalls: result.toolCalls,
+      finishReason: result.finishReason,
+    };
   }
 }
 

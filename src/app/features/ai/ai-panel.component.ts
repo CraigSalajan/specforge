@@ -9,6 +9,8 @@ import {
   viewChild,
 } from '@angular/core';
 import { FormsModule } from '@angular/forms';
+import { DomSanitizer, type SafeHtml } from '@angular/platform-browser';
+import DOMPurify from 'dompurify';
 import { marked } from 'marked';
 import { type ChatSession } from '../../shared/types';
 import { VaultService } from '../../core/vault.service';
@@ -254,6 +256,15 @@ export class AiPanelComponent {
   private readonly providers = inject(AiProviderService);
   private readonly inputDialog = inject(InputDialogService);
   private readonly confirmDialog = inject(ConfirmDialogService);
+  private readonly sanitizer = inject(DomSanitizer);
+
+  /**
+   * Memo cache for rendered assistant markdown, keyed by the raw content
+   * string. The template binding calls `renderAssistant` on every change
+   * detection cycle (e.g. every composer keystroke); without this we would
+   * re-parse and re-sanitize every message's markdown each pass.
+   */
+  private readonly renderCache = new Map<string, SafeHtml>();
 
   readonly commands = PLANNING_COMMANDS;
 
@@ -425,9 +436,20 @@ export class AiPanelComponent {
     }));
   }
 
-  renderAssistant(content: string): string {
-    if (!content) return '';
-    return marked.parse(content, { async: false }) as string;
+  renderAssistant(content: string): SafeHtml {
+    if (!content) return this.sanitizer.bypassSecurityTrustHtml('');
+    const cached = this.renderCache.get(content);
+    if (cached) return cached;
+    // Parse the markdown, then strip anything unsafe with DOMPurify before
+    // trusting it. AI output can echo file/user content, so we sanitize the
+    // HTML ourselves and bypass Angular's sanitizer — this keeps it XSS-safe
+    // while stopping Angular from re-sanitizing partial-markdown streams and
+    // logging "sanitizing HTML stripped some content" every change cycle.
+    const html = marked.parse(content, { async: false }) as string;
+    const clean = DOMPurify.sanitize(html);
+    const safe = this.sanitizer.bypassSecurityTrustHtml(clean);
+    this.renderCache.set(content, safe);
+    return safe;
   }
 
   onSessionSelect(value: string): void {

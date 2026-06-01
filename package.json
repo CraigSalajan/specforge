@@ -1,6 +1,6 @@
 {
   "name": "specforge",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Local-first markdown workspace for software product planning",
   "author": {
     "name": "Teragon Technologies LLC",
@@ -23,7 +23,7 @@
     "package:win": "npm run build && electron-builder --win --publish never",
     "package:mac": "npm run build && electron-builder --mac --publish never",
     "package:linux": "npm run build && electron-builder --linux --publish never",
-    "release": "npm run build && electron-builder --publish always"
+    "release": "cross-env SPECFORGE_RELEASE=1 npm run build && electron-builder --publish always"
   },
   "build": {
     "appId": "com.specforge.app",
@@ -99,6 +99,7 @@
     "chokidar": "^5.0.0",
     "codemirror-live-markdown": "^0.5.1-alpha.1",
     "diff": "^9.0.0",
+    "dompurify": "^3.4.7",
     "electron-updater": "^6.8.3",
     "highlight.js": "^11.11.1",
     "lowlight": "^3.3.0",
@@ -111,6 +112,7 @@
     "@angular/cli": "^21.2.13",
     "@angular/compiler-cli": "^21.2.0",
     "@tailwindcss/postcss": "^4.3.0",
+    "@types/dompurify": "^3.0.5",
     "@types/node": "^25.9.1",
     "concurrently": "^10.0.0",
     "cross-env": "^10.1.0",

@@ -1,6 +1,7 @@
 import { Injectable } from '@angular/core';
 import type {
   AiChatCompleteRequest,
+  AiChatCompleteResult,
   AiChatStreamRequest,
   AiEmbedRequest,
   AiEmbedResponse,
@@ -21,6 +22,7 @@ import type {
   IndexStatus,
   PendingChunkRef,
   PersistedChatMessage,
+  SkillMeta,
   SpecForgeApi,
 } from '../shared/types';
 
@@ -213,7 +215,7 @@ export class IpcService {
     return this.requireApi().aiChatAbort(streamId);
   }
 
-  aiChatComplete(req: AiChatCompleteRequest): Promise<string> {
+  aiChatComplete(req: AiChatCompleteRequest): Promise<AiChatCompleteResult> {
     return this.requireApi().aiChatComplete(req);
   }
 
@@ -231,5 +233,27 @@ export class IpcService {
 
   onAiStreamError(cb: (evt: AiStreamErrorEvent) => void): () => void {
     return this.requireApi().onAiStreamError(cb);
+  }
+
+  // AI Skills
+  skillsList(vaultPath?: string): Promise<SkillMeta[]> {
+    return this.requireApi().skillsList(vaultPath);
+  }
+
+  skillsReadBody(origin: 'global' | 'local', name: string, vaultPath?: string): Promise<string> {
+    return this.requireApi().skillsReadBody(origin, name, vaultPath);
+  }
+
+  skillsReadResource(
+    origin: 'global' | 'local',
+    name: string,
+    resourceRelPath: string,
+    vaultPath?: string,
+  ): Promise<string> {
+    return this.requireApi().skillsReadResource(origin, name, resourceRelPath, vaultPath);
+  }
+
+  skillsOpenFolder(scope: 'global' | 'local', vaultPath?: string): Promise<void> {
+    return this.requireApi().skillsOpenFolder(scope, vaultPath);
   }
 }

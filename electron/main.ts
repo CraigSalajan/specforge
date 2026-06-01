@@ -11,9 +11,16 @@ import { registerChatHandlers } from './ipc/chats';
 import { registerEmbeddingHandlers } from './ipc/embeddings';
 import { registerAiHistoryHandlers } from './ipc/ai-history';
 import { registerAiHandlers, disposeAiHandlers } from './ipc/ai';
+import { registerSkillsHandlers } from './ipc/skills';
 import { getDb, closeDb } from './db/index';
 
 const isDev = process.env['SPECFORGE_DEV'] === '1';
+
+// Replaced at build time by esbuild `define`. True only in production builds published to
+// GitHub via `npm run release` (CI). Local dev/build/package leave it false so DevTools remain
+// available for debugging.
+declare const __SPECFORGE_PRODUCTION_RELEASE__: boolean;
+const isProductionRelease = __SPECFORGE_PRODUCTION_RELEASE__;
 
 function resolveIndexFile(): string {
   // Built layout: dist/electron/main.js + dist/angular/browser/index.html
@@ -61,6 +68,9 @@ async function createWindow(): Promise<void> {
       nodeIntegration: false,
       sandbox: false,
       webSecurity: true,
+      // Hard-disable the DevTools backend in published production builds. This stops auto-open
+      // and makes F12 / Ctrl+Shift+I / the default menu's "Toggle Developer Tools" no-ops.
+      devTools: !isProductionRelease,
     },
   });
 
@@ -103,6 +113,7 @@ app.whenReady().then(async () => {
   registerEmbeddingHandlers();
   registerAiHistoryHandlers();
   registerAiHandlers();
+  registerSkillsHandlers();
 
   await createWindow();
 

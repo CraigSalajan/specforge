@@ -95,3 +95,30 @@ export function absToRel(vaultPath: string, absPath: string): string {
   }
   return normAbs.slice(normVault.length).replace(/^\/+/, '');
 }
+
+/** Minimal shape of a vault tree node (mirrors `FileNode` from shared/types). */
+interface TreeNode {
+  path: string;
+  isDirectory: boolean;
+  children?: TreeNode[];
+}
+
+/**
+ * Depth-first flattens a vault `FileNode[]` tree into vault-relative paths of
+ * all non-directory files, relativizing each node's absolute `path` against
+ * the vault root. Directory nodes contribute their children but not themselves.
+ */
+export function flattenTreeToRelPaths(vaultPath: string, nodes: readonly TreeNode[]): string[] {
+  const out: string[] = [];
+  const walk = (list: readonly TreeNode[]): void => {
+    for (const node of list) {
+      if (node.isDirectory) {
+        if (node.children && node.children.length > 0) walk(node.children);
+      } else {
+        out.push(absToRel(vaultPath, node.path));
+      }
+    }
+  };
+  walk(nodes);
+  return out;
+}

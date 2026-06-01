@@ -13,7 +13,12 @@ import { UiStateService } from '../../core/ui-state.service';
 import { VaultService } from '../../core/vault.service';
 import { IndexService } from '../../core/index.service';
 import { EmbeddingIndexerService } from '../ai/providers/indexing.service';
-import type { Settings, Theme } from '../../shared/types';
+import { ToolRegistryService } from '../ai/tools/tool-registry.service';
+import { SkillRegistryService } from '../ai/skills/skill-registry.service';
+import { IpcService } from '../../core/ipc.service';
+import type { Settings, SkillMeta, Theme } from '../../shared/types';
+
+type SettingsSection = 'workspace' | 'ai' | 'index' | 'tools' | 'skills';
 
 @Component({
   selector: 'app-settings-modal',
@@ -26,7 +31,7 @@ import type { Settings, Theme } from '../../shared/types';
         class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
         (click)="close()">
         <div
-          class="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-lg border border-border-subtle bg-surface-1 shadow-2xl"
+          class="flex h-[85vh] w-full max-w-3xl flex-col overflow-hidden rounded-lg border border-border-subtle bg-surface-1 shadow-2xl"
           (click)="$event.stopPropagation()">
           <header class="flex items-center justify-between border-b border-border-subtle bg-surface-2 px-4 py-2.5">
             <div class="flex items-center gap-2">
@@ -41,8 +46,25 @@ import type { Settings, Theme } from '../../shared/types';
               (click)="close()">×</button>
           </header>
 
-          <div class="flex-1 overflow-y-auto px-5 py-4">
-            <section class="mb-6">
+          <div class="flex min-h-0 flex-1">
+            <nav class="flex w-44 shrink-0 flex-col gap-0.5 border-r border-border-subtle bg-surface-2 p-2">
+              @for (item of sections; track item.id) {
+                <button
+                  type="button"
+                  class="w-full rounded px-3 py-1.5 text-left text-sm transition-colors"
+                  [class.bg-surface-3]="activeSection() === item.id"
+                  [class.text-text-primary]="activeSection() === item.id"
+                  [class.text-text-secondary]="activeSection() !== item.id"
+                  [class.hover:bg-surface-3]="activeSection() !== item.id"
+                  [class.hover:text-text-primary]="activeSection() !== item.id"
+                  [attr.aria-current]="activeSection() === item.id ? 'page' : null"
+                  (click)="activeSection.set(item.id)">{{ item.label }}</button>
+              }
+            </nav>
+
+            <div class="min-h-0 flex-1 overflow-y-auto bg-surface-1 px-5 py-4">
+            @if (activeSection() === 'workspace') {
+            <section>
               <h3 class="mb-3 text-xs font-semibold uppercase tracking-wider text-text-muted">Workspace</h3>
 
               <div class="mb-3">
@@ -72,8 +94,10 @@ import type { Settings, Theme } from '../../shared/types';
                 </select>
               </div>
             </section>
+            }
 
-            <section class="mb-6">
+            @if (activeSection() === 'ai') {
+            <section>
               <h3 class="mb-3 text-xs font-semibold uppercase tracking-wider text-text-muted">AI Provider</h3>
 
               <div class="mb-3">
@@ -138,6 +162,18 @@ import type { Settings, Theme } from '../../shared/types';
                   (ngModelChange)="patch({ 'ai.embeddingsEnabled': $event })" />
               </div>
 
+              <div class="mb-3 flex items-center justify-between rounded border border-border-subtle bg-surface-2 px-3 py-2">
+                <div>
+                  <div class="text-xs text-text-primary">Enable AI tools</div>
+                  <div class="text-xs text-text-muted">Let the assistant create markdown files via function calling. Each write is confirmed.</div>
+                </div>
+                <input
+                  type="checkbox"
+                  class="h-4 w-4 cursor-pointer"
+                  [ngModel]="draft()['ai.toolsEnabled']"
+                  (ngModelChange)="patch({ 'ai.toolsEnabled': $event })" />
+              </div>
+
               <div class="mb-3 grid grid-cols-2 gap-3">
                 <div>
                   <label class="mb-1 block text-xs text-text-secondary">Retrieval top-K</label>
@@ -163,8 +199,10 @@ import type { Settings, Theme } from '../../shared/types';
                 </div>
               </div>
             </section>
+            }
 
-            <section class="mb-2">
+            @if (activeSection() === 'index') {
+            <section>
               <h3 class="mb-3 text-xs font-semibold uppercase tracking-wider text-text-muted">Index</h3>
 
               <div class="mb-3 flex items-center justify-between rounded border border-border-subtle bg-surface-2 px-3 py-2">
@@ -213,6 +251,101 @@ import type { Settings, Theme } from '../../shared/types';
                 </button>
               </div>
             </section>
+            }
+
+            @if (activeSection() === 'tools') {
+            <section>
+              <h3 class="mb-1 text-xs font-semibold uppercase tracking-wider text-text-muted">Tools</h3>
+              <p class="mb-3 text-xs text-text-muted">Enable or disable individual tools the assistant can use.</p>
+
+              @for (tool of toolList; track tool.name) {
+                <div class="mb-2 flex items-center justify-between rounded border border-border-subtle bg-surface-2 px-3 py-2">
+                  <label
+                    class="flex-1 cursor-pointer pr-3"
+                    [attr.for]="'tool-' + tool.name">
+                    <div class="font-mono text-xs text-text-primary">{{ tool.name }}</div>
+                    @if (tool.schema.function.description) {
+                      <div class="text-xs text-text-muted">{{ tool.schema.function.description }}</div>
+                    }
+                  </label>
+                  <input
+                    type="checkbox"
+                    class="h-4 w-4 cursor-pointer"
+                    [id]="'tool-' + tool.name"
+                    [checked]="!draft()['ai.disabledTools'].includes(tool.name)"
+                    (change)="toggleTool(tool.name, $any($event.target).checked)" />
+                </div>
+              } @empty {
+                <p class="text-xs text-text-muted">No tools are registered.</p>
+              }
+            </section>
+            }
+
+            @if (activeSection() === 'skills') {
+            <section>
+              <h3 class="mb-1 text-xs font-semibold uppercase tracking-wider text-text-muted">Skills</h3>
+              <p class="mb-3 text-xs text-text-muted">Specialized instruction sets the assistant can load on demand. Global skills are shared; vault skills live inside the open vault.</p>
+
+              <div class="mb-3 flex items-center justify-between rounded border border-border-subtle bg-surface-2 px-3 py-2">
+                <div>
+                  <div class="text-xs text-text-primary">Enable skills</div>
+                  <div class="text-xs text-text-muted">Advertise available skills to the assistant so it can load their instructions.</div>
+                </div>
+                <input
+                  type="checkbox"
+                  class="h-4 w-4 cursor-pointer"
+                  [ngModel]="draft()['skills.enabled']"
+                  (ngModelChange)="patch({ 'skills.enabled': $event })" />
+              </div>
+
+              <div class="mb-3 flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  class="rounded border border-border-subtle bg-surface-2 px-3 py-1.5 text-xs text-text-secondary hover:bg-surface-3 hover:text-text-primary"
+                  (click)="reloadSkills()">Reload</button>
+                <button
+                  type="button"
+                  class="rounded border border-border-subtle bg-surface-2 px-3 py-1.5 text-xs text-text-secondary hover:bg-surface-3 hover:text-text-primary"
+                  (click)="openGlobalSkillsFolder()">Open global skills folder</button>
+                <button
+                  type="button"
+                  class="rounded border border-border-subtle bg-surface-2 px-3 py-1.5 text-xs text-text-secondary hover:bg-surface-3 hover:text-text-primary disabled:opacity-50"
+                  [disabled]="!vault.vaultPath()"
+                  (click)="openLocalSkillsFolder()">Open vault skills folder</button>
+              </div>
+
+              @if (!vault.vaultPath()) {
+                <p class="mb-3 text-xs text-text-muted">Open a vault to manage local skills.</p>
+              }
+
+              @for (skill of skillRegistry.skills(); track skill.origin + ':' + skill.name) {
+                <div class="mb-2 flex items-center justify-between rounded border border-border-subtle bg-surface-2 px-3 py-2">
+                  <label
+                    class="flex-1 cursor-pointer pr-3"
+                    [attr.for]="'skill-' + skill.origin + '-' + skill.name">
+                    <div class="flex items-center gap-2">
+                      <span class="font-mono text-xs text-text-primary">{{ skill.name }}</span>
+                      <span class="rounded border border-border-subtle bg-surface-2 px-1.5 text-xs text-text-muted">
+                        {{ skill.origin === 'global' ? 'Global' : 'Local' }}
+                      </span>
+                    </div>
+                    @if (skill.description) {
+                      <div class="text-xs text-text-muted">{{ skill.description }}</div>
+                    }
+                  </label>
+                  <input
+                    type="checkbox"
+                    class="h-4 w-4 cursor-pointer"
+                    [id]="'skill-' + skill.origin + '-' + skill.name"
+                    [checked]="isSkillEnabledInDraft(skill)"
+                    (change)="toggleSkill(skill, $any($event.target).checked)" />
+                </div>
+              } @empty {
+                <p class="text-xs text-text-muted">No skills found.</p>
+              }
+            </section>
+            }
+            </div>
           </div>
 
           <footer class="flex items-center justify-end gap-2 border-t border-border-subtle bg-surface-2 px-4 py-2.5">
@@ -234,9 +367,25 @@ import type { Settings, Theme } from '../../shared/types';
 export class SettingsModalComponent {
   private readonly settings = inject(SettingsService);
   private readonly ui = inject(UiStateService);
-  private readonly vault = inject(VaultService);
+  protected readonly vault = inject(VaultService);
   private readonly indexer = inject(IndexService);
   private readonly embeddingIndexer = inject(EmbeddingIndexerService);
+  private readonly toolRegistry = inject(ToolRegistryService);
+  protected readonly skillRegistry = inject(SkillRegistryService);
+  private readonly ipc = inject(IpcService);
+
+  /** Tools are static after construction, so a plain readonly snapshot is fine. */
+  readonly toolList = this.toolRegistry.list();
+
+  readonly sections: ReadonlyArray<{ id: SettingsSection; label: string }> = [
+    { id: 'workspace', label: 'Workspace' },
+    { id: 'ai', label: 'AI Provider' },
+    { id: 'index', label: 'Index' },
+    { id: 'tools', label: 'Tools' },
+    { id: 'skills', label: 'Skills' },
+  ];
+
+  readonly activeSection = signal<SettingsSection>('workspace');
 
   readonly isOpen = this.ui.settingsOpen;
   readonly saving = this.settings.saving;
@@ -278,6 +427,10 @@ export class SettingsModalComponent {
           this._draftVaultPath.set(this.settings.vaultPath());
           this._initialJson.set(JSON.stringify(current));
           this._showApiKey.set(false);
+          this.activeSection.set('workspace');
+          // Refresh the skill list so the Skills section reflects what is on
+          // disk right now (a skill could have been added since last open).
+          void this.skillRegistry.reload();
         });
       }
       this.wasOpen = open;
@@ -286,6 +439,80 @@ export class SettingsModalComponent {
 
   patch(partial: Partial<Settings>): void {
     this._draft.update((d) => ({ ...d, ...partial }));
+  }
+
+  /**
+   * Toggles a tool's enabled state in the draft's disabled-tools list. We store
+   * the DISABLED set, so enabling removes the name and disabling adds it. The
+   * change flows through `patch` so it participates in the dirty/Save snapshot.
+   */
+  toggleTool(name: string, enabled: boolean): void {
+    const current = this._draft()['ai.disabledTools'];
+    const next = enabled
+      ? current.filter((n) => n !== name)
+      : current.includes(name)
+        ? current
+        : [...current, name];
+    this.patch({ 'ai.disabledTools': next });
+  }
+
+  /**
+   * Whether a skill's checkbox should read as enabled, computed from the DRAFT
+   * (not the registry's committed `enabled()`), so the checkbox state stays
+   * consistent with what Save will persist. Global skills key off the disabled
+   * name array; local skills key off the per-vault map.
+   */
+  isSkillEnabledInDraft(skill: SkillMeta): boolean {
+    if (skill.origin === 'global') {
+      return !this._draft()['skills.disabledGlobal'].includes(skill.name);
+    }
+    const vaultPath = this.vault.vaultPath();
+    if (!vaultPath) return true;
+    const disabled = this._draft()['skills.disabledLocal'][vaultPath] ?? [];
+    return !disabled.includes(skill.name);
+  }
+
+  /**
+   * Toggles a skill's enabled state in the draft. Mirrors {@link toggleTool}:
+   * we store the DISABLED set, so enabling removes the name and disabling adds
+   * it. Local skills are scoped to the current vault path. Flows through
+   * `patch` so it participates in the dirty/Save snapshot.
+   */
+  toggleSkill(skill: SkillMeta, enabled: boolean): void {
+    if (skill.origin === 'global') {
+      const current = this._draft()['skills.disabledGlobal'];
+      const next = enabled
+        ? current.filter((n) => n !== skill.name)
+        : current.includes(skill.name)
+          ? current
+          : [...current, skill.name];
+      this.patch({ 'skills.disabledGlobal': next });
+      return;
+    }
+
+    const vaultPath = this.vault.vaultPath();
+    if (!vaultPath) return;
+    const map = this._draft()['skills.disabledLocal'];
+    const current = map[vaultPath] ?? [];
+    const updated = enabled
+      ? current.filter((n) => n !== skill.name)
+      : current.includes(skill.name)
+        ? current
+        : [...current, skill.name];
+    const next: Record<string, string[]> = { ...map, [vaultPath]: updated };
+    this.patch({ 'skills.disabledLocal': next });
+  }
+
+  async reloadSkills(): Promise<void> {
+    await this.skillRegistry.reload();
+  }
+
+  async openGlobalSkillsFolder(): Promise<void> {
+    await this.ipc.skillsOpenFolder('global');
+  }
+
+  async openLocalSkillsFolder(): Promise<void> {
+    await this.ipc.skillsOpenFolder('local', this.vault.vaultPath() ?? undefined);
   }
 
   asTheme(value: string): Theme {

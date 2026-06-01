@@ -331,7 +331,10 @@ export class FileChangeProposalComponent {
       if (openAfter && absPath) {
         this.vault.setActiveFile(absPath);
       }
-      this.orchestrator.clearPendingProposal();
+      // Settle any awaiting tool loop with the final (possibly user-edited)
+      // path. For non-tool (JSON-proposal) turns there is no awaiter and this
+      // simply clears the modal.
+      this.orchestrator.resolveProposal({ applied: true, relPath, absPath });
     } catch (err) {
       this._applyError.set('Failed to apply change: ' + (err instanceof Error ? err.message : String(err)));
     } finally {
@@ -350,7 +353,8 @@ export class FileChangeProposalComponent {
         afterContent: proposal.content,
       });
     }
-    this.orchestrator.clearPendingProposal();
+    // Release any awaiting tool loop as rejected; also clears the modal.
+    this.orchestrator.resolveProposal({ applied: false });
   }
 
   private async refreshCollision(relPath: string): Promise<void> {

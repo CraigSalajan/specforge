@@ -10,6 +10,18 @@ import { IpcService } from './ipc.service';
 
 const LEGACY_VAULT_KEY = 'specforge.vaultPath';
 
+/**
+ * Validates a parsed `skills.disabledLocal` value: a record mapping vault path
+ * strings to arrays of disabled skill names. Used to reject malformed stored
+ * JSON before it reaches the typed settings model.
+ */
+function isDisabledLocalMap(value: unknown): value is Record<string, string[]> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  return Object.values(value as Record<string, unknown>).every(
+    (v) => Array.isArray(v) && v.every((entry) => typeof entry === 'string'),
+  );
+}
+
 @Injectable({ providedIn: 'root' })
 export class SettingsService {
   private readonly ipc = inject(IpcService);
@@ -29,8 +41,13 @@ export class SettingsService {
   readonly aiChatModel = computed(() => this._settings()['ai.chatModel']);
   readonly aiEmbeddingModel = computed(() => this._settings()['ai.embeddingModel']);
   readonly aiEmbeddingsEnabled = computed(() => this._settings()['ai.embeddingsEnabled']);
+  readonly aiToolsEnabled = computed(() => this._settings()['ai.toolsEnabled']);
+  readonly disabledTools = computed(() => this._settings()['ai.disabledTools']);
   readonly aiTopK = computed(() => this._settings()['ai.topK']);
   readonly aiMaxContextChars = computed(() => this._settings()['ai.maxContextChars']);
+  readonly skillsEnabled = computed(() => this._settings()['skills.enabled']);
+  readonly disabledGlobalSkills = computed(() => this._settings()['skills.disabledGlobal']);
+  readonly disabledLocalSkills = computed(() => this._settings()['skills.disabledLocal']);
   readonly leftPaneWidth = computed(() => this._settings()['ui.leftPaneWidth']);
   readonly rightPaneWidth = computed(() => this._settings()['ui.rightPaneWidth']);
 
@@ -124,6 +141,53 @@ export class SettingsService {
       case 'ai.embeddingsEnabled':
         target['ai.embeddingsEnabled'] = raw === 'true';
         return;
+      case 'ai.toolsEnabled':
+        // Default-on: only an explicit 'false' disables tools.
+        target['ai.toolsEnabled'] = raw !== 'false';
+        return;
+      case 'ai.disabledTools': {
+        // Stored as a JSON array of tool names. Parse defensively: any
+        // malformed value falls back to "no tools disabled" (all enabled).
+        try {
+          const parsed: unknown = JSON.parse(raw);
+          target['ai.disabledTools'] =
+            Array.isArray(parsed) && parsed.every((v) => typeof v === 'string')
+              ? (parsed as string[])
+              : [];
+        } catch {
+          target['ai.disabledTools'] = [];
+        }
+        return;
+      }
+      case 'skills.enabled':
+        // Default-on: only an explicit 'false' disables skills.
+        target['skills.enabled'] = raw !== 'false';
+        return;
+      case 'skills.disabledGlobal': {
+        // Stored as a JSON array of skill names. Parse defensively: any
+        // malformed value falls back to "no skills disabled" (all enabled).
+        try {
+          const parsed: unknown = JSON.parse(raw);
+          target['skills.disabledGlobal'] =
+            Array.isArray(parsed) && parsed.every((v) => typeof v === 'string')
+              ? (parsed as string[])
+              : [];
+        } catch {
+          target['skills.disabledGlobal'] = [];
+        }
+        return;
+      }
+      case 'skills.disabledLocal': {
+        // Stored as a JSON object mapping vault path -> disabled skill names.
+        // Parse defensively: any malformed value falls back to an empty map.
+        try {
+          const parsed: unknown = JSON.parse(raw);
+          target['skills.disabledLocal'] = isDisabledLocalMap(parsed) ? parsed : {};
+        } catch {
+          target['skills.disabledLocal'] = {};
+        }
+        return;
+      }
       case 'ai.topK': {
         const n = Number.parseInt(raw, 10);
         target['ai.topK'] = Number.isFinite(n) && n > 0 ? n : DEFAULT_SETTINGS['ai.topK'];
@@ -168,8 +232,13 @@ export class SettingsService {
       'ai.chatModel': s['ai.chatModel'],
       'ai.embeddingModel': s['ai.embeddingModel'],
       'ai.embeddingsEnabled': s['ai.embeddingsEnabled'] ? 'true' : 'false',
+      'ai.toolsEnabled': s['ai.toolsEnabled'] ? 'true' : 'false',
+      'ai.disabledTools': JSON.stringify(s['ai.disabledTools'] ?? []),
       'ai.topK': String(s['ai.topK']),
       'ai.maxContextChars': String(s['ai.maxContextChars']),
+      'skills.enabled': s['skills.enabled'] ? 'true' : 'false',
+      'skills.disabledGlobal': JSON.stringify(s['skills.disabledGlobal'] ?? []),
+      'skills.disabledLocal': JSON.stringify(s['skills.disabledLocal'] ?? {}),
       'ui.leftPaneWidth': String(s['ui.leftPaneWidth']),
       'ui.rightPaneWidth': String(s['ui.rightPaneWidth']),
     };

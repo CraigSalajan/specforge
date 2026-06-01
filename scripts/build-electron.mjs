@@ -14,6 +14,11 @@ const common = {
   sourcemap: true,
   external: ['electron', 'chokidar', 'fsevents', 'electron-updater'],
   logLevel: 'info',
+  define: {
+    // Baked `true` only by `npm run release` (the CI-published GitHub builds), which sets
+    // SPECFORGE_RELEASE=1. Local builds/packaging leave it false so DevTools stay available.
+    __SPECFORGE_PRODUCTION_RELEASE__: JSON.stringify(process.env.SPECFORGE_RELEASE === '1'),
+  },
 };
 
 await build({

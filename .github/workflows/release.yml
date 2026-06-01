@@ -25,6 +25,14 @@ jobs:
             exit 1
           fi
 
+      - name: Ensure CHANGELOG has an entry for this version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if ! grep -q "^## \[$VERSION\]" CHANGELOG.md; then
+            echo "::error::No CHANGELOG.md section found for $VERSION. Add a '## [$VERSION] - <date>' entry."
+            exit 1
+          fi
+
   release:
     needs: verify-version
     strategy:
@@ -59,3 +67,24 @@ jobs:
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+
+  release-notes:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract notes and update draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          awk -v v="$VERSION" '
+            index($0, "## [" v "]")==1 {f=1; next}
+            f && (index($0,"## [")==1 || substr($0,1,1)=="[") {exit}
+            f {print}
+          ' CHANGELOG.md > notes.md
+          echo "----- generated notes.md -----"
+          cat notes.md
+          gh release edit "$GITHUB_REF_NAME" --notes-file notes.md

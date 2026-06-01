@@ -42,17 +42,43 @@ const IpcChannels = {
   AiStreamChunk: 'specforge:ai-stream-chunk',
   AiStreamDone: 'specforge:ai-stream-done',
   AiStreamError: 'specforge:ai-stream-error',
+  SkillsList: 'specforge:skills-list',
+  SkillsReadBody: 'specforge:skills-read-body',
+  SkillsReadResource: 'specforge:skills-read-resource',
+  SkillsOpenFolder: 'specforge:skills-open-folder',
 } as const;
 
+interface AiToolFunctionDefDto {
+  name: string;
+  description?: string;
+  parameters?: Record<string, unknown>;
+}
+
+interface AiToolDefDto {
+  type: 'function';
+  function: AiToolFunctionDefDto;
+}
+
+interface AiToolCallDto {
+  id: string;
+  type: 'function';
+  function: { name: string; arguments: string };
+}
+
 interface AiChatMessageDto {
-  role: 'system' | 'user' | 'assistant';
-  content: string;
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: string | null;
+  tool_calls?: AiToolCallDto[];
+  tool_call_id?: string;
+  name?: string;
 }
 
 interface AiChatRequestOptionsDto {
   temperature?: number;
   maxTokens?: number;
   responseFormat?: { type: 'json_object' };
+  tools?: AiToolDefDto[];
+  toolChoice?: 'auto' | 'none' | 'required';
 }
 
 interface AiChatStreamRequestDto {
@@ -92,6 +118,13 @@ interface AiStreamChunkEventDto {
 
 interface AiStreamDoneEventDto {
   streamId: string;
+  finishReason?: string;
+  toolCalls?: AiToolCallDto[];
+}
+
+interface AiChatCompleteResultDto {
+  content: string | null;
+  toolCalls?: AiToolCallDto[];
   finishReason?: string;
 }
 
@@ -190,7 +223,7 @@ const api = {
     ipcRenderer.invoke(IpcChannels.AiChatStream, req),
   aiChatAbort: (streamId: string): Promise<void> =>
     ipcRenderer.invoke(IpcChannels.AiChatAbort, streamId),
-  aiChatComplete: (req: AiChatCompleteRequestDto): Promise<string> =>
+  aiChatComplete: (req: AiChatCompleteRequestDto): Promise<AiChatCompleteResultDto> =>
     ipcRenderer.invoke(IpcChannels.AiChatComplete, req),
   aiEmbed: (req: AiEmbedRequestDto): Promise<AiEmbedResponseDto> =>
     ipcRenderer.invoke(IpcChannels.AiEmbed, req),
@@ -209,6 +242,19 @@ const api = {
     ipcRenderer.on(IpcChannels.AiStreamError, handler);
     return () => ipcRenderer.removeListener(IpcChannels.AiStreamError, handler);
   },
+
+  // AI Skills
+  skillsList: (vaultPath?: string) => ipcRenderer.invoke(IpcChannels.SkillsList, vaultPath),
+  skillsReadBody: (origin: 'global' | 'local', name: string, vaultPath?: string) =>
+    ipcRenderer.invoke(IpcChannels.SkillsReadBody, origin, name, vaultPath),
+  skillsReadResource: (
+    origin: 'global' | 'local',
+    name: string,
+    resourceRelPath: string,
+    vaultPath?: string,
+  ) => ipcRenderer.invoke(IpcChannels.SkillsReadResource, origin, name, resourceRelPath, vaultPath),
+  skillsOpenFolder: (scope: 'global' | 'local', vaultPath?: string) =>
+    ipcRenderer.invoke(IpcChannels.SkillsOpenFolder, scope, vaultPath),
 };
 
 contextBridge.exposeInMainWorld('specforge', api);

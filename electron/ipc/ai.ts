@@ -1,4 +1,9 @@
 import { ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron';
+import {
+  accumulateToolCallDeltas,
+  assembleToolCalls,
+  type StreamToolCallDelta,
+} from './tool-call-accumulator';
 
 const Channels = {
   ChatStream: 'specforge:ai-chat-stream',
@@ -10,15 +15,37 @@ const Channels = {
   StreamError: 'specforge:ai-stream-error',
 } as const;
 
+interface ToolFunctionDef {
+  name: string;
+  description?: string;
+  parameters?: Record<string, unknown>;
+}
+
+interface ToolDef {
+  type: 'function';
+  function: ToolFunctionDef;
+}
+
+interface ToolCall {
+  id: string;
+  type: 'function';
+  function: { name: string; arguments: string };
+}
+
 interface ChatMessage {
-  role: 'system' | 'user' | 'assistant';
-  content: string;
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: string | null;
+  tool_calls?: ToolCall[];
+  tool_call_id?: string;
+  name?: string;
 }
 
 interface ChatRequestOptions {
   temperature?: number;
   maxTokens?: number;
   responseFormat?: { type: 'json_object' };
+  tools?: ToolDef[];
+  tool_choice?: 'auto' | 'none' | 'required';
 }
 
 interface ChatStreamRequest {
@@ -53,16 +80,22 @@ interface EmbedResponse {
 
 interface ChatCompletionStreamPayload {
   choices?: Array<{
-    delta?: { content?: string };
+    delta?: { content?: string; tool_calls?: StreamToolCallDelta[] };
     finish_reason?: string | null;
   }>;
 }
 
 interface ChatCompletionResponse {
   choices?: Array<{
-    message?: { content?: string };
+    message?: { content?: string | null; tool_calls?: ToolCall[] };
     finish_reason?: string | null;
   }>;
+}
+
+interface ChatCompleteResult {
+  content: string | null;
+  toolCalls?: ToolCall[];
+  finishReason?: string;
 }
 
 interface EmbeddingsResponsePayload {
@@ -96,13 +129,24 @@ function assertMessages(value: unknown): ChatMessage[] {
       throw new Error(`messages[${i}] is not an object`);
     }
     const msg = m as Partial<ChatMessage>;
-    if (msg.role !== 'system' && msg.role !== 'user' && msg.role !== 'assistant') {
+    if (
+      msg.role !== 'system' &&
+      msg.role !== 'user' &&
+      msg.role !== 'assistant' &&
+      msg.role !== 'tool'
+    ) {
       throw new Error(`messages[${i}].role is invalid`);
     }
-    if (typeof msg.content !== 'string') {
+    const hasToolCalls = Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0;
+    // Content may be null on an assistant message that only carries tool_calls.
+    if (typeof msg.content !== 'string' && !(msg.content === null && hasToolCalls)) {
       throw new Error(`messages[${i}].content must be a string`);
     }
-    return { role: msg.role, content: msg.content };
+    const out: ChatMessage = { role: msg.role, content: msg.content ?? null };
+    if (hasToolCalls) out.tool_calls = msg.tool_calls;
+    if (typeof msg.tool_call_id === 'string') out.tool_call_id = msg.tool_call_id;
+    if (typeof msg.name === 'string') out.name = msg.name;
+    return out;
   });
 }
 
@@ -128,6 +172,10 @@ function buildChatBody(
   if (options?.temperature !== undefined) body['temperature'] = options.temperature;
   if (options?.maxTokens !== undefined) body['max_tokens'] = options.maxTokens;
   if (options?.responseFormat) body['response_format'] = options.responseFormat;
+  if (options?.tools && options.tools.length > 0) {
+    body['tools'] = options.tools;
+    body['tool_choice'] = options.tool_choice ?? 'auto';
+  }
   return body;
 }
 
@@ -177,6 +225,10 @@ async function handleChatStream(
   // events; everything from here is event-driven.
   void (async (): Promise<void> => {
     let finishReason: string | undefined;
+    // Accumulates streamed tool_call fragments by their `index`. OpenAI emits
+    // the `id`/`function.name` once and then streams `function.arguments` in
+    // pieces, all keyed by the same index.
+    const toolAccumulator = new Map<number, { id: string; name: string; args: string }>();
     try {
       const body = buildChatBody(model, messages, req.options, true);
       const res = await fetch(`${trimBaseUrl(baseUrl)}/chat/completions`, {
@@ -220,9 +272,11 @@ async function handleChatStream(
             }
             try {
               const json = JSON.parse(payload) as ChatCompletionStreamPayload;
-              const delta = json.choices?.[0]?.delta?.content ?? '';
-              const fr = json.choices?.[0]?.finish_reason ?? null;
+              const choice = json.choices?.[0];
+              const delta = choice?.delta?.content ?? '';
+              const fr = choice?.finish_reason ?? null;
               if (fr) finishReason = fr;
+              accumulateToolCallDeltas(toolAccumulator, choice?.delta?.tool_calls);
               if (delta) {
                 safeSend(sender, Channels.StreamChunk, { streamId, delta });
               }
@@ -239,7 +293,9 @@ async function handleChatStream(
         }
       }
 
-      safeSend(sender, Channels.StreamDone, { streamId, finishReason });
+      const toolCalls = assembleToolCalls(toolAccumulator);
+
+      safeSend(sender, Channels.StreamDone, { streamId, finishReason, toolCalls });
     } catch (err) {
       const message =
         err instanceof Error
@@ -266,7 +322,7 @@ async function handleChatAbort(_event: IpcMainInvokeEvent, streamId: unknown): P
 async function handleChatComplete(
   _event: IpcMainInvokeEvent,
   req: ChatCompleteRequest,
-): Promise<string> {
+): Promise<ChatCompleteResult> {
   if (!req || typeof req !== 'object') throw new Error('Invalid request payload');
   const baseUrl = assertNonEmptyString(req.baseUrl, 'baseUrl');
   const apiKey = assertNonEmptyString(req.apiKey, 'apiKey');
@@ -291,7 +347,13 @@ async function handleChatComplete(
   }
 
   const json = (await res.json()) as ChatCompletionResponse;
-  return json.choices?.[0]?.message?.content ?? '';
+  const choice = json.choices?.[0];
+  const toolCalls = choice?.message?.tool_calls;
+  return {
+    content: choice?.message?.content ?? '',
+    toolCalls: toolCalls && toolCalls.length > 0 ? toolCalls : undefined,
+    finishReason: choice?.finish_reason ?? undefined,
+  };
 }
 
 async function handleEmbed(_event: IpcMainInvokeEvent, req: EmbedRequest): Promise<EmbedResponse> {

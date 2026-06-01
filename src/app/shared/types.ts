@@ -46,6 +46,12 @@ export const IpcChannels = {
   AiStreamChunk: 'specforge:ai-stream-chunk',
   AiStreamDone: 'specforge:ai-stream-done',
   AiStreamError: 'specforge:ai-stream-error',
+
+  // AI Skills
+  SkillsList: 'specforge:skills-list',
+  SkillsReadBody: 'specforge:skills-read-body',
+  SkillsReadResource: 'specforge:skills-read-resource',
+  SkillsOpenFolder: 'specforge:skills-open-folder',
 } as const;
 
 export type IpcChannel = (typeof IpcChannels)[keyof typeof IpcChannels];
@@ -124,6 +130,21 @@ export interface IndexSearchHit {
 
 export type SearchResult = IndexSearchHit;
 
+/**
+ * Metadata for a discovered AI skill (a folder with a SKILL.md + optional
+ * bundled reference files). `origin` distinguishes global skills (under
+ * userData) from local per-vault skills; `dir` is the absolute folder path and
+ * `resources` are forward-slash relative paths of bundled `.md`/`.txt`/`.json`
+ * files (excluding the top-level SKILL.md).
+ */
+export interface SkillMeta {
+  name: string;
+  description: string;
+  origin: 'global' | 'local';
+  dir: string;
+  resources: string[];
+}
+
 export type Theme = 'dark' | 'light';
 
 /**
@@ -143,8 +164,13 @@ export interface Settings {
   'ai.chatModel': string;
   'ai.embeddingModel': string;
   'ai.embeddingsEnabled': boolean;
+  'ai.toolsEnabled': boolean;
+  'ai.disabledTools': string[];
   'ai.topK': number;
   'ai.maxContextChars': number;
+  'skills.enabled': boolean;
+  'skills.disabledGlobal': string[];
+  'skills.disabledLocal': Record<string, string[]>;
   'ui.leftPaneWidth': number;
   'ui.rightPaneWidth': number;
 }
@@ -157,8 +183,13 @@ export const DEFAULT_SETTINGS: Settings = {
   'ai.chatModel': 'gpt-4o-mini',
   'ai.embeddingModel': 'text-embedding-3-small',
   'ai.embeddingsEnabled': false,
+  'ai.toolsEnabled': true,
+  'ai.disabledTools': [],
   'ai.topK': 6,
   'ai.maxContextChars': 12000,
+  'skills.enabled': true,
+  'skills.disabledGlobal': [],
+  'skills.disabledLocal': {},
   'ui.leftPaneWidth': 256,
   'ui.rightPaneWidth': 320,
 };
@@ -171,8 +202,13 @@ export const SETTINGS_KEYS = [
   'ai.chatModel',
   'ai.embeddingModel',
   'ai.embeddingsEnabled',
+  'ai.toolsEnabled',
+  'ai.disabledTools',
   'ai.topK',
   'ai.maxContextChars',
+  'skills.enabled',
+  'skills.disabledGlobal',
+  'skills.disabledLocal',
   'ui.leftPaneWidth',
   'ui.rightPaneWidth',
 ] as const;
@@ -247,15 +283,37 @@ export interface AiHistoryRecordInput {
 // Phase 4: main-side AI HTTP request / event payloads.
 // `ChatMessage` is duplicated here (instead of imported from the providers
 // folder) to keep `shared/types.ts` free of feature imports.
+export interface AiToolFunctionDef {
+  name: string;
+  description?: string;
+  parameters?: Record<string, unknown>;
+}
+
+export interface AiToolDef {
+  type: 'function';
+  function: AiToolFunctionDef;
+}
+
+export interface AiToolCall {
+  id: string;
+  type: 'function';
+  function: { name: string; arguments: string };
+}
+
 export interface AiChatMessage {
-  role: 'system' | 'user' | 'assistant';
-  content: string;
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: string | null;
+  tool_calls?: AiToolCall[];
+  tool_call_id?: string;
+  name?: string;
 }
 
 export interface AiChatRequestOptions {
   temperature?: number;
   maxTokens?: number;
   responseFormat?: { type: 'json_object' };
+  tools?: AiToolDef[];
+  toolChoice?: 'auto' | 'none' | 'required';
 }
 
 export interface AiChatStreamRequest {
@@ -295,6 +353,13 @@ export interface AiStreamChunkEvent {
 
 export interface AiStreamDoneEvent {
   streamId: string;
+  finishReason?: string;
+  toolCalls?: AiToolCall[];
+}
+
+export interface AiChatCompleteResult {
+  content: string | null;
+  toolCalls?: AiToolCall[];
   finishReason?: string;
 }
 
@@ -376,11 +441,22 @@ export interface SpecForgeApi {
   // Phase 4: main-side AI HTTP (CORS-free)
   aiChatStream: (req: AiChatStreamRequest) => Promise<void>;
   aiChatAbort: (streamId: string) => Promise<void>;
-  aiChatComplete: (req: AiChatCompleteRequest) => Promise<string>;
+  aiChatComplete: (req: AiChatCompleteRequest) => Promise<AiChatCompleteResult>;
   aiEmbed: (req: AiEmbedRequest) => Promise<AiEmbedResponse>;
   onAiStreamChunk: (cb: (evt: AiStreamChunkEvent) => void) => () => void;
   onAiStreamDone: (cb: (evt: AiStreamDoneEvent) => void) => () => void;
   onAiStreamError: (cb: (evt: AiStreamErrorEvent) => void) => () => void;
+
+  // AI Skills
+  skillsList: (vaultPath?: string) => Promise<SkillMeta[]>;
+  skillsReadBody: (origin: 'global' | 'local', name: string, vaultPath?: string) => Promise<string>;
+  skillsReadResource: (
+    origin: 'global' | 'local',
+    name: string,
+    resourceRelPath: string,
+    vaultPath?: string,
+  ) => Promise<string>;
+  skillsOpenFolder: (scope: 'global' | 'local', vaultPath?: string) => Promise<void>;
 }
 
 declare global {
