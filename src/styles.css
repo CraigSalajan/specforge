@@ -35,20 +35,30 @@ html, body {
 ::-webkit-scrollbar-thumb { background: var(--color-border-strong); border-radius: 5px; }
 ::-webkit-scrollbar-thumb:hover { background: #3a4453; }
 
-.prose-ai h1, .prose-ai h2, .prose-ai h3 { font-weight: 600; margin: 0.4em 0 0.3em; }
-.prose-ai h1 { font-size: 1.25em; }
-.prose-ai h2 { font-size: 1.1em; }
-.prose-ai h3 { font-size: 1.0em; }
-.prose-ai p { margin: 0.4em 0; }
-.prose-ai ul, .prose-ai ol { margin: 0.4em 0; padding-left: 1.4em; }
-.prose-ai li { margin: 0.15em 0; }
+/* Rendered AI markdown (chat bubbles). Hierarchy via weight + spacing with
+   modest size steps; generous heading top margins give streamed answers a
+   clear vertical rhythm instead of a wall of text. */
+.prose-ai h1, .prose-ai h2, .prose-ai h3, .prose-ai h4, .prose-ai h5, .prose-ai h6 { font-weight: 600; margin: 1.2em 0 0.4em; }
+.prose-ai h1 { font-size: 1.3em; }
+.prose-ai h2 { font-size: 1.15em; }
+.prose-ai h3 { font-size: 1.05em; }
+.prose-ai p { margin: 0.65em 0; }
+.prose-ai > :first-child { margin-top: 0; }
+.prose-ai > :last-child { margin-bottom: 0; }
+.prose-ai ul, .prose-ai ol { margin: 0.65em 0; padding-left: 1.4em; }
+.prose-ai li { margin: 0.3em 0; }
+.prose-ai li ul, .prose-ai li ol { margin: 0.25em 0; }
+.prose-ai li > p { margin: 0.25em 0; }
+.prose-ai del { text-decoration: line-through; color: var(--color-text-muted); }
+.prose-ai hr { border: none; border-top: 1px solid var(--color-border-subtle); margin: 1.25em 0; }
 .prose-ai code { font-family: var(--font-mono); background: var(--color-surface-3); padding: 0.05em 0.3em; border-radius: 3px; font-size: 0.88em; }
-.prose-ai pre { background: var(--color-surface-3); padding: 0.6em; border-radius: 4px; overflow-x: auto; }
+.prose-ai pre { background: var(--color-surface-3); border: 1px solid var(--color-border-subtle); padding: 0.75em 0.9em; border-radius: 4px; overflow-x: auto; margin: 0.65em 0; }
 .prose-ai pre code { background: none; padding: 0; }
-.prose-ai blockquote { border-left: 2px solid var(--color-border-strong); padding-left: 0.8em; margin: 0.4em 0; color: var(--color-text-secondary); }
+.prose-ai blockquote { border-left: 2px solid var(--color-border-strong); padding-left: 0.8em; margin: 0.65em 0; color: var(--color-text-secondary); }
 .prose-ai a { color: var(--color-accent-hover); text-decoration: underline; }
-.prose-ai table { border-collapse: collapse; margin: 0.6em 0; }
+.prose-ai table { border-collapse: collapse; margin: 0.65em 0; }
 .prose-ai th, .prose-ai td { border: 1px solid var(--color-border-subtle); padding: 0.3em 0.6em; }
+.prose-ai th { background: var(--color-surface-3); }
 
 /* ── CodeMirror live-markdown editor theming ─────────────────────────────
    codemirror-live-markdown styles markdown inline via .cm-header-1..6 +
@@ -262,10 +272,31 @@ html, body {
      lines render as ordinary body text with the leading `>` shown as a
      formatting mark. The read-only .prose-preview / .prose-ai surfaces below DO
      style blockquotes.
-   - Horizontal rules (`---`) and GFM task-list checkboxes (`- [ ]` / `- [x]`):
-     no dedicated class either. With GFM parsing on they render as readable
-     source text via the body / list-marker styling above, but the package ships
-     no widget to draw an actual rule or checkbox. */
+   - Horizontal rules (`---`): no dedicated class either. With GFM parsing on
+     they render as readable source text via the body styling above, but the
+     package ships no widget to draw an actual rule.
+   - GFM task-list checkboxes (`- [ ]` / `- [x]`): same gap in the package, but
+     the in-repo taskListField (task-list-field.ts) replaces the marker with a
+     real checkbox, styled below. */
+
+/* GFM task-list checkboxes in the editor (in-repo taskListField,
+   task-list-field.ts): the widget swaps the `[ ]` / `[x]` marker for a native
+   checkbox on lines the cursor isn't on. Same dark-theme treatment as the
+   .prose-ai / .prose-preview checkboxes below — color-scheme renders the
+   native control dark, accent-color ties the checked state to the single
+   indigo accent. Sized just under the text and sat on the baseline with a
+   small optical nudge so it reads as part of the line, not a form control. */
+.cm-editor input.cm-task-checkbox {
+  color-scheme: dark;
+  accent-color: var(--color-accent);
+  width: 0.9em;
+  height: 0.9em;
+  margin: 0;
+  vertical-align: baseline;
+  position: relative;
+  top: 0.1em;
+  cursor: pointer;
+}
 
 .prose-preview { font-size: 1rem; line-height: 1.6; max-width: 900px; }
 .prose-preview h1 { font-size: 1.9em; font-weight: 700; margin: 0.6em 0 0.4em; border-bottom: 1px solid var(--color-border-subtle); padding-bottom: 0.3em; }
@@ -280,10 +311,31 @@ html, body {
 .prose-preview pre { background: var(--color-surface-2); padding: 1em; border-radius: 6px; overflow-x: auto; }
 .prose-preview pre code { background: none; padding: 0; font-size: 0.85em; }
 .prose-preview blockquote { border-left: 3px solid var(--color-border-strong); padding-left: 1em; color: var(--color-text-secondary); margin: 0.8em 0; }
+.prose-preview del { text-decoration: line-through; color: var(--color-text-muted); }
 .prose-preview hr { border: none; border-top: 1px solid var(--color-border-subtle); margin: 1.5em 0; }
 .prose-preview table { border-collapse: collapse; margin: 0.8em 0; }
 .prose-preview th, .prose-preview td { border: 1px solid var(--color-border-subtle); padding: 0.4em 0.8em; }
 .prose-preview th { background: var(--color-surface-2); }
+
+/* GFM task lists (chat + proposal preview): drop the list bullet and pull the
+   item into the marker gutter so the checkbox sits where the bullet would,
+   keeping task text aligned with sibling list items. The negative margins
+   mirror each surface's ul/ol padding-left. color-scheme makes the native
+   checkbox render dark-theme; accent-color ties the checked state to the
+   single indigo accent. */
+.prose-ai li:has(> input[type="checkbox"]),
+.prose-ai li:has(> p:first-child > input[type="checkbox"]) { list-style: none; margin-left: -1.4em; }
+.prose-preview li:has(> input[type="checkbox"]),
+.prose-preview li:has(> p:first-child > input[type="checkbox"]) { list-style: none; margin-left: -1.6em; }
+.prose-ai input[type="checkbox"],
+.prose-preview input[type="checkbox"] {
+  color-scheme: dark;
+  accent-color: var(--color-accent);
+  width: 0.9em;
+  height: 0.9em;
+  margin-right: 0.45em;
+  vertical-align: middle;
+}
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {

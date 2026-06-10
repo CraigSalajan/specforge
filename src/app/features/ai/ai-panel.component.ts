@@ -11,8 +11,8 @@ import {
 import { FormsModule } from '@angular/forms';
 import { DomSanitizer, type SafeHtml } from '@angular/platform-browser';
 import DOMPurify from 'dompurify';
-import { marked } from 'marked';
-import { type ChatSession } from '../../shared/types';
+import { Marked } from 'marked';
+import { type AiErrorInfo, type ChatSession } from '../../shared/types';
 import { VaultService } from '../../core/vault.service';
 import { UiStateService } from '../../core/ui-state.service';
 import { InputDialogService } from '../../core/input-dialog.service';
@@ -113,7 +113,7 @@ import {
             <p class="text-xs text-text-secondary">Start a conversation, or pick a planning command below.</p>
           </div>
         } @else {
-          @for (msg of messages(); track $index; let i = $index) {
+          @for (msg of messages(); track $index; let i = $index; let last = $last) {
             <div class="mb-3 flex flex-col gap-1">
               <div class="text-xs font-semibold uppercase tracking-wider text-text-muted">
                 {{ msg.role === 'user' ? 'You' : 'Assistant' }}
@@ -123,7 +123,7 @@ import {
               </div>
               @if (msg.role === 'assistant') {
                 <div
-                  class="prose-ai rounded border border-border-subtle bg-surface-2 px-3 py-2 text-base leading-relaxed"
+                  class="prose-ai rounded border border-border-subtle bg-surface-2 px-3 py-2 text-sm leading-relaxed"
                   [innerHTML]="renderAssistant(msg.content)"></div>
                 @if (msg.citations && msg.citations.length > 0) {
                   <div class="flex flex-wrap gap-1.5">
@@ -136,11 +136,34 @@ import {
                     }
                   </div>
                 }
-                @if (msg.error) {
-                  <p class="text-sm text-danger">Error: {{ msg.error }}</p>
+                @if (msg.error; as e) {
+                  <div class="rounded border border-border-subtle bg-surface-2 px-3 py-2 text-xs">
+                    <p
+                      [class.text-amber-400]="e.retryable"
+                      [class.text-danger]="!e.retryable">{{ errorCopy(e) }}</p>
+                    @if (errorDetail(e); as detail) {
+                      <p class="mt-1 text-text-muted">{{ detail }}</p>
+                    }
+                    @if ((e.retryable && retryAvailable() && last) || e.code === 'auth') {
+                      <div class="mt-2 flex items-center gap-2">
+                        @if (e.retryable && retryAvailable() && last) {
+                          <button
+                            type="button"
+                            class="rounded border border-border-subtle px-2 py-0.5 text-xs font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                            (click)="onRetry()">Retry</button>
+                        }
+                        @if (e.code === 'auth') {
+                          <button
+                            type="button"
+                            class="rounded border border-border-subtle px-2 py-0.5 text-xs font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                            (click)="onOpenSettings()">Open Settings</button>
+                        }
+                      </div>
+                    }
+                  </div>
                 }
               } @else {
-                <div class="whitespace-pre-wrap rounded border border-border-subtle bg-surface-3 px-3 py-2 text-base leading-relaxed text-text-primary">{{ msg.content }}</div>
+                <div class="whitespace-pre-wrap rounded border border-border-subtle bg-surface-3 px-3 py-2 text-sm leading-relaxed text-text-primary">{{ msg.content }}</div>
               }
             </div>
           }
@@ -240,8 +263,36 @@ import {
             to propose changes to the active file.
           </p>
         }
-        @if (error(); as err) {
-          <p class="mt-1 text-sm text-danger">{{ err }}</p>
+        @if (composerError(); as ce) {
+          <div class="mt-2 flex items-start justify-between gap-2 rounded border border-border-subtle bg-surface-1 px-2.5 py-1.5">
+            <div class="min-w-0 text-xs">
+              <p
+                [class.text-amber-400]="ce.retryable"
+                [class.text-danger]="!ce.retryable">{{ ce.text }}</p>
+              @if (ce.detail) {
+                <p class="mt-0.5 text-text-muted">{{ ce.detail }}</p>
+              }
+            </div>
+            <div class="flex shrink-0 items-center gap-1.5">
+              @if (ce.retryable && retryAvailable()) {
+                <button
+                  type="button"
+                  class="rounded border border-border-subtle px-2 py-0.5 text-xs font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                  (click)="onRetry()">Retry</button>
+              }
+              @if (ce.auth) {
+                <button
+                  type="button"
+                  class="rounded border border-border-subtle px-2 py-0.5 text-xs font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                  (click)="onOpenSettings()">Open Settings</button>
+              }
+              <button
+                type="button"
+                class="rounded px-1.5 py-0.5 text-xs text-text-secondary hover:bg-surface-3 hover:text-text-primary"
+                title="Dismiss"
+                (click)="dismissComposerError()">×</button>
+            </div>
+          </div>
         }
       </div>
     </div>
@@ -257,6 +308,13 @@ export class AiPanelComponent {
   private readonly inputDialog = inject(InputDialogService);
   private readonly confirmDialog = inject(ConfirmDialogService);
   private readonly sanitizer = inject(DomSanitizer);
+
+  // Dedicated Marked instance (same pattern as PdfExportService) so chat-only
+  // options never leak into the global `marked` used by the proposal preview /
+  // rich-table renderers. `breaks: true` turns the single newlines AI prose
+  // favors into line breaks instead of collapsing them into one monolithic
+  // paragraph.
+  private readonly marked = new Marked({ gfm: true, breaks: true });
 
   /**
    * Memo cache for rendered assistant markdown, keyed by the raw content
@@ -274,6 +332,36 @@ export class AiPanelComponent {
   readonly streaming = this.chat.streaming;
   readonly error = this.chat.error;
   readonly fileChangeUndoing = this.fileChange.undoing;
+
+  /** True when the orchestrator retains a failed turn that Retry can re-run. */
+  readonly retryAvailable = this.orchestrator.retryAvailable;
+
+  /**
+   * Composer-area error surface. Prefers the structured error of the last
+   * failed turn; falls back to the legacy string channel (pre-flight guards
+   * like "Pick a vault…", session load failures) which carries no code.
+   */
+  readonly composerError = computed<{
+    text: string;
+    detail: string | null;
+    retryable: boolean;
+    auth: boolean;
+  } | null>(() => {
+    const info = this.chat.turnError();
+    if (info) {
+      return {
+        text: this.errorCopy(info),
+        detail: this.errorDetail(info),
+        retryable: info.retryable,
+        auth: info.code === 'auth',
+      };
+    }
+    const legacy = this.error();
+    if (legacy) {
+      return { text: legacy, detail: null, retryable: false, auth: false };
+    }
+    return null;
+  });
 
   readonly apiConfigured = this.providers.isConfigured;
 
@@ -445,7 +533,7 @@ export class AiPanelComponent {
     // HTML ourselves and bypass Angular's sanitizer — this keeps it XSS-safe
     // while stopping Angular from re-sanitizing partial-markdown streams and
     // logging "sanitizing HTML stripped some content" every change cycle.
-    const html = marked.parse(content, { async: false }) as string;
+    const html = this.marked.parse(content, { async: false }) as string;
     const clean = DOMPurify.sanitize(html);
     const safe = this.sanitizer.bypassSecurityTrustHtml(clean);
     this.renderCache.set(content, safe);
@@ -729,6 +817,58 @@ export class AiPanelComponent {
 
   onOpenSettings(): void {
     this.ui.openSettings();
+  }
+
+  /**
+   * Friendly first line for a failed turn, keyed by error code. The raw
+   * provider message (already parsed + truncated in the main process) is
+   * relegated to {@link errorDetail} so the lead line stays calm and scannable.
+   */
+  errorCopy(e: AiErrorInfo): string {
+    switch (e.code) {
+      case 'auth':
+        return 'Authentication failed — check your API key.';
+      case 'rate_limit': {
+        const secs = e.retryAfterMs !== undefined ? Math.ceil(e.retryAfterMs / 1000) : 0;
+        return secs > 0
+          ? `Rate limited — try again in about ${secs}s.`
+          : 'Rate limited by the provider.';
+      }
+      case 'network':
+        return 'Could not reach the provider.';
+      case 'timeout':
+        return 'The request timed out.';
+      case 'server':
+        return e.status !== undefined
+          ? `The provider had a server error (HTTP ${e.status}).`
+          : 'The provider had a server error.';
+      case 'bad_request':
+        return 'The provider rejected the request.';
+      case 'unknown':
+        return e.message.trim().length > 0 ? e.message : 'Something went wrong.';
+    }
+  }
+
+  /**
+   * Secondary diagnostic line: the classified message, suppressed when it
+   * would just repeat the friendly copy (and always for `unknown`, whose
+   * message already is the copy).
+   */
+  errorDetail(e: AiErrorInfo): string | null {
+    if (e.code === 'unknown') return null;
+    const detail = e.message.trim();
+    if (detail.length === 0 || detail === this.errorCopy(e)) return null;
+    return detail;
+  }
+
+  /** Re-runs the last failed turn without re-sending the user message. */
+  onRetry(): void {
+    void this.orchestrator.retryLastFailed();
+  }
+
+  dismissComposerError(): void {
+    this.chat.setTurnError(null);
+    this.chat.setError(null);
   }
 
   dismissActionMessage(): void {

@@ -12,6 +12,8 @@ import {
   viewChild,
 } from '@angular/core';
 import { FormsModule } from '@angular/forms';
+import { DomSanitizer, type SafeHtml } from '@angular/platform-browser';
+import DOMPurify from 'dompurify';
 import { marked } from 'marked';
 import { diffLines } from 'diff';
 import { AiOrchestratorService } from './ai-orchestrator.service';
@@ -175,6 +177,7 @@ export class FileChangeProposalComponent {
   private readonly fileChange = inject(FileChangeService);
   private readonly vault = inject(VaultService);
   private readonly injector = inject(Injector);
+  private readonly sanitizer = inject(DomSanitizer);
 
   private readonly dialogPanel = viewChild<ElementRef<HTMLElement>>('dialogPanel');
   private readonly pathInput = viewChild<ElementRef<HTMLInputElement>>('pathInput');
@@ -210,10 +213,15 @@ export class FileChangeProposalComponent {
     return true;
   });
 
-  readonly renderedPreview = computed(() => {
+  readonly renderedPreview = computed<SafeHtml>(() => {
     const p = this.proposal();
-    if (!p) return '';
-    return marked.parse(p.content, { async: false }) as string;
+    if (!p) return this.sanitizer.bypassSecurityTrustHtml('');
+    // Parse the markdown, then strip anything unsafe with DOMPurify before
+    // trusting it — the same pipeline as the chat renderer. Binding the raw
+    // parse output would route through Angular's built-in sanitizer, which
+    // silently strips GFM task-list checkboxes (<input>) from the preview.
+    const html = marked.parse(p.content, { async: false }) as string;
+    return this.sanitizer.bypassSecurityTrustHtml(DOMPurify.sanitize(html));
   });
 
   readonly diff = computed<DiffLine[]>(() => {
