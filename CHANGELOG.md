@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-09
+
+### Added
+
+- Export documents to PDF: right-click a file in the vault and select "Export to PDF…", or use the "Export PDF" button in the editor header. The document renders with syntax highlighting and the SpecForge dark theme.
+- The editor now auto-saves about a second after you stop typing (on by default — toggle it in Settings → Workspace). Switching files, closing the vault, or closing the window flushes unsaved changes first, and with auto-save off SpecForge prompts you to save instead of silently discarding edits.
+- Custom skill directories: point SpecForge at any folder of skills from Settings → Skills. Skills are discovered in nested subfolders (`<dir>/<skill>/SKILL.md` at any depth), show up alongside global and vault skills with their own enable/disable toggles, and vault-local skills still win on name collisions.
+- Task checkboxes render in the editor: `- [ ]` and `- [x]` become real checkboxes you can click to toggle, and the markdown source reappears when your cursor is on the line.
+
+### Changed
+
+- AI chat replies are much easier to read: proper heading rhythm, breathing room between paragraphs and list items, styled tables, code blocks, horizontal rules, and preserved line breaks instead of one dense wall of text.
+- When an AI request fails, SpecForge now shows a friendly, specific message instead of a raw provider error — authentication problems offer **Open Settings**, transient failures (rate limits, network drops, server errors) offer **Retry**, and the partial reply is kept. Requests also time out cleanly instead of hanging forever on a dead connection.
+
+### Fixed
+
+- `~~strikethrough~~` now renders correctly in chat replies.
+- Markdown task checkboxes render properly in chat replies and in AI file-change previews (they were stripped or unstyled before).
+- Rapidly switching files can no longer write one file's content into another or lose edits made while a save was in flight.
+- The assistant now says honestly when it stops after exhausting its tool-call budget instead of reporting "Done."
+
 ## [0.2.2] - 2026-06-01
 
 ### Added
@@ -30,6 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - DevTools are disabled in published production builds (F12 / Ctrl+Shift+I and the "Toggle Developer Tools" menu item are no-ops in official release builds). Local development and self-built packages keep DevTools available.
 
-[Unreleased]: https://github.com/CraigSalajan/specforge/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/CraigSalajan/specforge/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/CraigSalajan/specforge/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/CraigSalajan/specforge/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/CraigSalajan/specforge/releases/tag/v0.2.1
