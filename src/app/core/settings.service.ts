@@ -36,6 +36,7 @@ export class SettingsService {
 
   readonly theme = computed<Theme>(() => this._settings().theme);
   readonly vaultPath = computed<string | null>(() => this._settings().vaultPath);
+  readonly editorAutoSave = computed(() => this._settings()['editor.autoSave']);
   readonly aiBaseUrl = computed(() => this._settings()['ai.baseUrl']);
   readonly aiApiKey = computed(() => this._settings()['ai.apiKey']);
   readonly aiChatModel = computed(() => this._settings()['ai.chatModel']);
@@ -46,8 +47,10 @@ export class SettingsService {
   readonly aiTopK = computed(() => this._settings()['ai.topK']);
   readonly aiMaxContextChars = computed(() => this._settings()['ai.maxContextChars']);
   readonly skillsEnabled = computed(() => this._settings()['skills.enabled']);
+  readonly skillDirectories = computed(() => this._settings()['skills.directories']);
   readonly disabledGlobalSkills = computed(() => this._settings()['skills.disabledGlobal']);
   readonly disabledLocalSkills = computed(() => this._settings()['skills.disabledLocal']);
+  readonly disabledUserSkills = computed(() => this._settings()['skills.disabledUser']);
   readonly leftPaneWidth = computed(() => this._settings()['ui.leftPaneWidth']);
   readonly rightPaneWidth = computed(() => this._settings()['ui.rightPaneWidth']);
 
@@ -138,6 +141,10 @@ export class SettingsService {
       case 'theme':
         target.theme = raw === 'light' ? 'light' : 'dark';
         return;
+      case 'editor.autoSave':
+        // Default-on: only an explicit 'false' disables auto-save.
+        target['editor.autoSave'] = raw !== 'false';
+        return;
       case 'ai.embeddingsEnabled':
         target['ai.embeddingsEnabled'] = raw === 'true';
         return;
@@ -163,6 +170,21 @@ export class SettingsService {
         // Default-on: only an explicit 'false' disables skills.
         target['skills.enabled'] = raw !== 'false';
         return;
+      case 'skills.directories': {
+        // Stored as a JSON array of absolute directory paths. Parse
+        // defensively: any malformed value falls back to "no extra
+        // directories".
+        try {
+          const parsed: unknown = JSON.parse(raw);
+          target['skills.directories'] =
+            Array.isArray(parsed) && parsed.every((v) => typeof v === 'string')
+              ? (parsed as string[])
+              : [];
+        } catch {
+          target['skills.directories'] = [];
+        }
+        return;
+      }
       case 'skills.disabledGlobal': {
         // Stored as a JSON array of skill names. Parse defensively: any
         // malformed value falls back to "no skills disabled" (all enabled).
@@ -185,6 +207,21 @@ export class SettingsService {
           target['skills.disabledLocal'] = isDisabledLocalMap(parsed) ? parsed : {};
         } catch {
           target['skills.disabledLocal'] = {};
+        }
+        return;
+      }
+      case 'skills.disabledUser': {
+        // Stored as a JSON array of skill names (skills from user-configured
+        // directories). Parse defensively: any malformed value falls back to
+        // "no skills disabled" (all enabled).
+        try {
+          const parsed: unknown = JSON.parse(raw);
+          target['skills.disabledUser'] =
+            Array.isArray(parsed) && parsed.every((v) => typeof v === 'string')
+              ? (parsed as string[])
+              : [];
+        } catch {
+          target['skills.disabledUser'] = [];
         }
         return;
       }
@@ -227,6 +264,7 @@ export class SettingsService {
     return {
       vaultPath: s.vaultPath ?? '',
       theme: s.theme,
+      'editor.autoSave': s['editor.autoSave'] ? 'true' : 'false',
       'ai.baseUrl': s['ai.baseUrl'],
       'ai.apiKey': s['ai.apiKey'],
       'ai.chatModel': s['ai.chatModel'],
@@ -237,8 +275,10 @@ export class SettingsService {
       'ai.topK': String(s['ai.topK']),
       'ai.maxContextChars': String(s['ai.maxContextChars']),
       'skills.enabled': s['skills.enabled'] ? 'true' : 'false',
+      'skills.directories': JSON.stringify(s['skills.directories'] ?? []),
       'skills.disabledGlobal': JSON.stringify(s['skills.disabledGlobal'] ?? []),
       'skills.disabledLocal': JSON.stringify(s['skills.disabledLocal'] ?? {}),
+      'skills.disabledUser': JSON.stringify(s['skills.disabledUser'] ?? []),
       'ui.leftPaneWidth': String(s['ui.leftPaneWidth']),
       'ui.rightPaneWidth': String(s['ui.rightPaneWidth']),
     };

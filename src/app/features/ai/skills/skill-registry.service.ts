@@ -12,9 +12,9 @@ import type { SkillMeta } from '../../../shared/types';
  * whenever the active vault changes (local skills live inside the vault).
  *
  * Enablement is layered on top of the raw list: a master switch
- * (`skills.enabled`) plus per-origin disable sets (global by name, local by
- * vault path). `enabled()` is what the orchestrator advertises to the model;
- * `skills()` is the full raw list used by settings UI.
+ * (`skills.enabled`) plus per-origin disable sets (global and user by name,
+ * local by vault path). `enabled()` is what the orchestrator advertises to the
+ * model; `skills()` is the full raw list used by settings UI.
  */
 @Injectable({ providedIn: 'root' })
 export class SkillRegistryService {
@@ -73,10 +73,19 @@ export class SkillRegistryService {
     return this.enabled().find((s) => s.name === name);
   }
 
-  /** Enablement check that ignores the master switch (used by `enabled`). */
+  /**
+   * Enablement check that ignores the master switch (used by `enabled`).
+   * Global and user-directory skills are keyed by name (user-dir skills are
+   * merged by name across directories in main, so a name disable applies to
+   * whichever directory currently provides that skill); local skills are
+   * keyed per vault path.
+   */
   private isEnabledWith(skill: SkillMeta): boolean {
     if (skill.origin === 'global') {
       return !this.settings.disabledGlobalSkills().includes(skill.name);
+    }
+    if (skill.origin === 'user') {
+      return !this.settings.disabledUserSkills().includes(skill.name);
     }
     const vaultPath = this.vault.vaultPath();
     if (!vaultPath) return true;

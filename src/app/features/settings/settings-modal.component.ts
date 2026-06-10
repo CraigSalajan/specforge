@@ -93,6 +93,18 @@ type SettingsSection = 'workspace' | 'ai' | 'index' | 'tools' | 'skills';
                   <option value="light">Light</option>
                 </select>
               </div>
+
+              <div class="mb-3 flex items-center justify-between rounded border border-border-subtle bg-surface-2 px-3 py-2">
+                <div>
+                  <div class="text-xs text-text-primary">Auto-save</div>
+                  <div class="text-xs text-text-muted">Save changes automatically after you stop typing and when switching files. When off, you are prompted before unsaved changes would be lost.</div>
+                </div>
+                <input
+                  type="checkbox"
+                  class="h-4 w-4 cursor-pointer"
+                  [ngModel]="draft()['editor.autoSave']"
+                  (ngModelChange)="patch({ 'editor.autoSave': $event })" />
+              </div>
             </section>
             }
 
@@ -284,7 +296,7 @@ type SettingsSection = 'workspace' | 'ai' | 'index' | 'tools' | 'skills';
             @if (activeSection() === 'skills') {
             <section>
               <h3 class="mb-1 text-xs font-semibold uppercase tracking-wider text-text-muted">Skills</h3>
-              <p class="mb-3 text-xs text-text-muted">Specialized instruction sets the assistant can load on demand. Global skills are shared; vault skills live inside the open vault.</p>
+              <p class="mb-3 text-xs text-text-muted">Specialized instruction sets the assistant can load on demand. Global skills are shared; vault skills live inside the open vault; custom skills come from the directories you add below.</p>
 
               <div class="mb-3 flex items-center justify-between rounded border border-border-subtle bg-surface-2 px-3 py-2">
                 <div>
@@ -296,6 +308,29 @@ type SettingsSection = 'workspace' | 'ai' | 'index' | 'tools' | 'skills';
                   class="h-4 w-4 cursor-pointer"
                   [ngModel]="draft()['skills.enabled']"
                   (ngModelChange)="patch({ 'skills.enabled': $event })" />
+              </div>
+
+              <div class="mb-3">
+                <label class="mb-1 block text-xs text-text-secondary">Skill directories</label>
+                @for (dir of draft()['skills.directories']; track dir) {
+                  <div class="mb-1.5 flex items-center gap-2">
+                    <input
+                      type="text"
+                      readonly
+                      class="flex-1 cursor-not-allowed rounded border border-border-subtle bg-surface-2 px-2 py-1.5 font-mono text-xs text-text-secondary"
+                      [value]="dir" />
+                    <button
+                      type="button"
+                      class="rounded px-2 py-0.5 text-sm text-text-muted hover:bg-surface-3 hover:text-text-primary"
+                      [attr.aria-label]="'Remove directory ' + dir"
+                      (click)="removeSkillDirectory(dir)">×</button>
+                  </div>
+                }
+                <button
+                  type="button"
+                  class="rounded border border-border-subtle bg-surface-2 px-3 py-1.5 text-xs text-text-secondary hover:bg-surface-3 hover:text-text-primary"
+                  (click)="addSkillDirectory()">Add directory…</button>
+                <p class="mt-1 text-xs text-text-muted">Extra folders scanned for skills, including nested subfolders. Applied on save.</p>
               </div>
 
               <div class="mb-3 flex flex-wrap items-center gap-2">
@@ -325,8 +360,10 @@ type SettingsSection = 'workspace' | 'ai' | 'index' | 'tools' | 'skills';
                     [attr.for]="'skill-' + skill.origin + '-' + skill.name">
                     <div class="flex items-center gap-2">
                       <span class="font-mono text-xs text-text-primary">{{ skill.name }}</span>
-                      <span class="rounded border border-border-subtle bg-surface-2 px-1.5 text-xs text-text-muted">
-                        {{ skill.origin === 'global' ? 'Global' : 'Local' }}
+                      <span
+                        class="rounded border border-border-subtle bg-surface-2 px-1.5 text-xs text-text-muted"
+                        [title]="skill.dir">
+                        {{ originLabel(skill.origin) }}
                       </span>
                     </div>
                     @if (skill.description) {
@@ -456,15 +493,25 @@ export class SettingsModalComponent {
     this.patch({ 'ai.disabledTools': next });
   }
 
+  /** Human label for a skill's origin badge. */
+  originLabel(origin: SkillMeta['origin']): string {
+    if (origin === 'global') return 'Global';
+    if (origin === 'user') return 'Custom';
+    return 'Local';
+  }
+
   /**
    * Whether a skill's checkbox should read as enabled, computed from the DRAFT
    * (not the registry's committed `enabled()`), so the checkbox state stays
-   * consistent with what Save will persist. Global skills key off the disabled
-   * name array; local skills key off the per-vault map.
+   * consistent with what Save will persist. Global and user-directory skills
+   * key off their disabled name arrays; local skills key off the per-vault map.
    */
   isSkillEnabledInDraft(skill: SkillMeta): boolean {
     if (skill.origin === 'global') {
       return !this._draft()['skills.disabledGlobal'].includes(skill.name);
+    }
+    if (skill.origin === 'user') {
+      return !this._draft()['skills.disabledUser'].includes(skill.name);
     }
     const vaultPath = this.vault.vaultPath();
     if (!vaultPath) return true;
@@ -475,18 +522,22 @@ export class SettingsModalComponent {
   /**
    * Toggles a skill's enabled state in the draft. Mirrors {@link toggleTool}:
    * we store the DISABLED set, so enabling removes the name and disabling adds
-   * it. Local skills are scoped to the current vault path. Flows through
-   * `patch` so it participates in the dirty/Save snapshot.
+   * it. Global and user-directory skills are keyed by name; local skills are
+   * scoped to the current vault path. Flows through `patch` so it participates
+   * in the dirty/Save snapshot.
    */
   toggleSkill(skill: SkillMeta, enabled: boolean): void {
-    if (skill.origin === 'global') {
-      const current = this._draft()['skills.disabledGlobal'];
+    if (skill.origin === 'global' || skill.origin === 'user') {
+      const key = skill.origin === 'global' ? 'skills.disabledGlobal' : 'skills.disabledUser';
+      const current = this._draft()[key];
       const next = enabled
         ? current.filter((n) => n !== skill.name)
         : current.includes(skill.name)
           ? current
           : [...current, skill.name];
-      this.patch({ 'skills.disabledGlobal': next });
+      this.patch(key === 'skills.disabledGlobal'
+        ? { 'skills.disabledGlobal': next }
+        : { 'skills.disabledUser': next });
       return;
     }
 
@@ -501,6 +552,24 @@ export class SettingsModalComponent {
         : [...current, skill.name];
     const next: Record<string, string[]> = { ...map, [vaultPath]: updated };
     this.patch({ 'skills.disabledLocal': next });
+  }
+
+  /**
+   * Opens the OS folder picker and appends the chosen directory to the draft's
+   * skill-directory list (de-duplicated). Persisted on Save; the skills list
+   * reloads then so newly discovered skills appear.
+   */
+  async addSkillDirectory(): Promise<void> {
+    const dir = await this.ipc.selectDirectory();
+    if (!dir) return;
+    const current = this._draft()['skills.directories'];
+    if (current.includes(dir)) return;
+    this.patch({ 'skills.directories': [...current, dir] });
+  }
+
+  removeSkillDirectory(dir: string): void {
+    const current = this._draft()['skills.directories'];
+    this.patch({ 'skills.directories': current.filter((d) => d !== dir) });
   }
 
   async reloadSkills(): Promise<void> {
@@ -567,8 +636,15 @@ export class SettingsModalComponent {
   }
 
   async onSave(): Promise<void> {
+    const initial = JSON.parse(this._initialJson()) as Settings;
+    const dirsChanged =
+      JSON.stringify(initial['skills.directories']) !==
+      JSON.stringify(this._draft()['skills.directories']);
     await this.settings.update(this._draft());
     this._initialJson.set(JSON.stringify(this._draft()));
+    // Main reads skills.directories from the DB, so a directory change only
+    // takes effect after the save above; refresh the discovered list now.
+    if (dirsChanged) void this.skillRegistry.reload();
     this.close();
   }
 
