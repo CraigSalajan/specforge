@@ -1,7 +1,7 @@
 import { vi, type MockInstance } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { signal } from '@angular/core';
-import { EMPTY_CONTEXT_SCOPE } from '../../shared/types';
+import { EMPTY_CONTEXT_SCOPE, type AiErrorInfo } from '../../shared/types';
 import { IpcService } from '../../core/ipc.service';
 import { SettingsService } from '../../core/settings.service';
 import { VaultService } from '../../core/vault.service';
@@ -10,13 +10,21 @@ import { RetrievalService } from './providers/retrieval.service';
 import { ChatService, type UiChatMessage } from './chat.service';
 import { FileChangeService } from './file-change.service';
 import { ToolRegistryService } from './tools/tool-registry.service';
+import { SkillRegistryService } from './skills/skill-registry.service';
 import type {
   ChatChunk,
   ChatMessage,
   ChatOptions,
   ChatProvider,
 } from './providers/chat.provider';
+import { AiHarnessError } from './providers/ai-harness-error';
 import { AiOrchestratorService, type ProposalOutcome } from './ai-orchestrator.service';
+
+/**
+ * One scripted model round: either a plain chunk sequence, or a sequence that
+ * throws after its chunks (simulating a provider failure / abort mid-stream).
+ */
+type ScriptedRound = ChatChunk[] | { chunks: ChatChunk[]; thenThrow: unknown };
 
 /**
  * A scripted chat provider: each call to `chat()` yields the next pre-programmed
@@ -25,9 +33,9 @@ import { AiOrchestratorService, type ProposalOutcome } from './ai-orchestrator.s
  */
 class FakeChatProvider implements ChatProvider {
   readonly calls: Array<{ messages: ChatMessage[]; opts?: ChatOptions }> = [];
-  private rounds: ChatChunk[][] = [];
+  private rounds: ScriptedRound[] = [];
 
-  setRounds(rounds: ChatChunk[][]): void {
+  setRounds(rounds: ScriptedRound[]): void {
     this.rounds = rounds;
   }
 
@@ -36,10 +44,15 @@ class FakeChatProvider implements ChatProvider {
     // between rounds, so we must capture a copy at call time.
     const index = this.calls.length;
     this.calls.push({ messages: messages.map((m) => ({ ...m })), opts });
-    const chunks = this.rounds[index] ?? [{ delta: '', done: true }];
+    const round = this.rounds[index] ?? [{ delta: '', done: true }];
+    const chunks = Array.isArray(round) ? round : round.chunks;
+    const thenThrow = Array.isArray(round) ? undefined : round.thenThrow;
     return (async function* () {
       for (const chunk of chunks) {
         yield chunk;
+      }
+      if (thenThrow !== undefined) {
+        throw thenThrow;
       }
     })();
   }
@@ -86,11 +99,13 @@ describe('AiOrchestratorService.runWithTools', () => {
   let messagesSig: ReturnType<typeof signal<UiChatMessage[]>>;
   let proposeSpy: MockInstance | undefined;
   let persistCalls: Array<{ role: string; content: string }>;
+  let lastTurnError: AiErrorInfo | null;
 
   function setup(): void {
     provider = new FakeChatProvider();
     messagesSig = signal<UiChatMessage[]>([]);
     persistCalls = [];
+    lastTurnError = null;
 
     // Typed as a structural stand-in; signal-typed members make a strict
     // Partial<ChatService> awkward, so we assert through unknown at injection.
@@ -98,10 +113,22 @@ describe('AiOrchestratorService.runWithTools', () => {
       activeSession: () => ({ id: 7 }),
       contextScope: () => EMPTY_CONTEXT_SCOPE,
       messages: messagesSig.asReadonly(),
+      streaming: () => false,
       appendLocal: (m: UiChatMessage) => messagesSig.update((cur) => [...cur, m]),
-      updateLastAssistant: () => undefined,
+      // Merge patches into the trailing assistant message (mirroring the real
+      // service) so tests can assert streamed content / attached errors.
+      updateLastAssistant: (patch: Partial<UiChatMessage>) =>
+        messagesSig.update((cur) => {
+          if (cur.length === 0) return cur;
+          const last = cur[cur.length - 1];
+          if (last.role !== 'assistant') return cur;
+          return [...cur.slice(0, -1), { ...last, ...patch }];
+        }),
       setStreaming: () => undefined,
       setError: () => undefined,
+      setTurnError: (e: AiErrorInfo | null) => {
+        lastTurnError = e;
+      },
       persistMessage: async (_id: number, role: string, content: string) => {
         persistCalls.push({ role, content });
         return null;
@@ -125,6 +152,7 @@ describe('AiOrchestratorService.runWithTools', () => {
             aiMaxContextChars: () => 8000,
             aiTopK: () => 5,
             aiToolsEnabled: () => true,
+            disabledTools: () => [],
           },
         },
         {
@@ -138,6 +166,17 @@ describe('AiOrchestratorService.runWithTools', () => {
         { provide: RetrievalService, useValue: { retrieve: async () => [] } },
         { provide: ChatService, useValue: chatStub },
         { provide: FileChangeService, useValue: {} },
+        // Without this stub the real root-provided registry is constructed
+        // against the bare SettingsService stub above; `enabled()` then throws
+        // (settings.skillsEnabled is undefined) and the orchestrator aborts
+        // before ever calling the provider.
+        {
+          provide: SkillRegistryService,
+          useValue: {
+            enabled: () => [],
+            find: () => undefined,
+          } as unknown as SkillRegistryService,
+        },
       ],
     });
 
@@ -232,5 +271,137 @@ describe('AiOrchestratorService.runWithTools', () => {
     expect(proposeSpy).not.toHaveBeenCalled();
     const lastAssistant = persistCalls.filter((c) => c.role === 'assistant').pop();
     expect(lastAssistant?.content).toBe('Here is your answer.');
+  });
+
+  it('surfaces an honest, retryable notice when the tool-round cap is exhausted (no fake "Done.")', async () => {
+    // Every round requests another tool call, so the cap (8) cuts the turn off.
+    provider.setRounds(Array.from({ length: 8 }, () => toolCallChunk()));
+    proposeSpy = vi.spyOn(orchestrator, 'proposeAndAwait').mockImplementation(
+      async (): Promise<ProposalOutcome> => ({ applied: false }),
+    );
+
+    await runTools();
+
+    expect(provider.calls.length).toBe(8);
+
+    const last = messagesSig()[messagesSig().length - 1];
+    expect(last.role).toBe('assistant');
+    expect(last.streaming).toBe(false);
+    expect(last.error?.retryable).toBe(true);
+    expect(last.error?.message).toContain('tool rounds');
+
+    // The cap notice is retryable and never persisted as a normal reply.
+    expect(orchestrator.retryAvailable()).toBe(true);
+    expect(persistCalls.filter((c) => c.role === 'assistant')).toEqual([]);
+    expect(persistCalls.some((c) => c.content === 'Done.')).toBe(false);
+  });
+
+  it('attaches the structured error to the failed bubble and persists the partial text', async () => {
+    const info: AiErrorInfo = {
+      code: 'rate_limit',
+      status: 429,
+      retryAfterMs: 2000,
+      retryable: true,
+      message: 'Rate limit exceeded',
+    };
+    provider.setRounds([
+      { chunks: [{ delta: 'Partial answer', done: false }], thenThrow: new AiHarnessError(info) },
+    ]);
+
+    await runTools();
+
+    const last = messagesSig()[messagesSig().length - 1];
+    expect(last.error).toEqual(info);
+    expect(last.streaming).toBe(false);
+    expect(last.content).toBe('Partial answer');
+
+    // The structured error reaches the composer surface unchanged…
+    expect(lastTurnError).toEqual(info);
+    // …the turn is retryable, and the non-empty partial is persisted as a
+    // normal assistant message (no DB migration for failed turns).
+    expect(orchestrator.retryAvailable()).toBe(true);
+    expect(persistCalls.filter((c) => c.role === 'assistant')).toEqual([
+      { role: 'assistant', content: 'Partial answer' },
+    ]);
+  });
+
+  it('skips persistence for a failed turn with no partial text', async () => {
+    provider.setRounds([
+      {
+        chunks: [],
+        thenThrow: new AiHarnessError({
+          code: 'network',
+          retryable: true,
+          message: 'Could not reach the provider.',
+        }),
+      },
+    ]);
+
+    await runTools();
+
+    expect(messagesSig()[messagesSig().length - 1].error?.code).toBe('network');
+    expect(persistCalls.filter((c) => c.role === 'assistant')).toEqual([]);
+  });
+
+  it('retryLastFailed re-runs without re-appending or re-persisting the user message, reusing the failed bubble', async () => {
+    provider.setRounds([
+      {
+        chunks: [],
+        thenThrow: new AiHarnessError({
+          code: 'server',
+          status: 500,
+          retryable: true,
+          message: 'Internal server error',
+        }),
+      },
+      assistantTextChunk('Recovered.'),
+    ]);
+
+    await runTools();
+
+    expect(orchestrator.retryAvailable()).toBe(true);
+    expect(messagesSig().length).toBe(2); // user + failed assistant bubble
+    expect(persistCalls.filter((c) => c.role === 'user').length).toBe(1);
+
+    await orchestrator.retryLastFailed();
+
+    // Second model call ran, against the same (not duplicated) user turn.
+    expect(provider.calls.length).toBe(2);
+    expect(provider.calls[1].messages.filter((m) => m.role === 'user').length).toBe(1);
+
+    // The failed bubble was reused in place, not appended next to.
+    expect(messagesSig().length).toBe(2);
+    const last = messagesSig()[messagesSig().length - 1];
+    expect(last.content).toBe('Recovered.');
+    expect(last.error).toBeNull();
+    expect(last.streaming).toBe(false);
+
+    // The user message was persisted exactly once; the recovery reply once.
+    expect(persistCalls.filter((c) => c.role === 'user').length).toBe(1);
+    expect(persistCalls.filter((c) => c.role === 'assistant')).toEqual([
+      { role: 'assistant', content: 'Recovered.' },
+    ]);
+    expect(orchestrator.retryAvailable()).toBe(false);
+  });
+
+  it('treats a user Stop (AbortError) as a non-error and keeps the partial text', async () => {
+    provider.setRounds([
+      {
+        chunks: [{ delta: 'partial before stop', done: false }],
+        thenThrow: new DOMException('Aborted', 'AbortError'),
+      },
+    ]);
+
+    await runTools();
+
+    const last = messagesSig()[messagesSig().length - 1];
+    expect(last.error).toBeNull();
+    expect(last.streaming).toBe(false);
+    expect(last.content).toBe('partial before stop');
+
+    // No error surface, no retry affordance, nothing persisted for the turn.
+    expect(lastTurnError).toBeNull();
+    expect(orchestrator.retryAvailable()).toBe(false);
+    expect(persistCalls.filter((c) => c.role === 'assistant')).toEqual([]);
   });
 });

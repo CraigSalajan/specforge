@@ -52,6 +52,9 @@ export const IpcChannels = {
   SkillsReadBody: 'specforge:skills-read-body',
   SkillsReadResource: 'specforge:skills-read-resource',
   SkillsOpenFolder: 'specforge:skills-open-folder',
+
+  // Export
+  ExportPdf: 'specforge:export-pdf',
 } as const;
 
 export type IpcChannel = (typeof IpcChannels)[keyof typeof IpcChannels];
@@ -131,16 +134,23 @@ export interface IndexSearchHit {
 export type SearchResult = IndexSearchHit;
 
 /**
+ * Where a discovered skill comes from: `global` (under userData), `local`
+ * (inside the open vault's `.specforge/skills`), or `user` (one of the
+ * user-configured `skills.directories`).
+ */
+export type SkillOrigin = 'global' | 'local' | 'user';
+
+/**
  * Metadata for a discovered AI skill (a folder with a SKILL.md + optional
- * bundled reference files). `origin` distinguishes global skills (under
- * userData) from local per-vault skills; `dir` is the absolute folder path and
- * `resources` are forward-slash relative paths of bundled `.md`/`.txt`/`.json`
- * files (excluding the top-level SKILL.md).
+ * bundled reference files). `dir` is the absolute folder path and `resources`
+ * are forward-slash relative paths of bundled `.md`/`.txt`/`.json` files
+ * (excluding the top-level SKILL.md). Skill folders may be nested anywhere
+ * under their root (e.g. `<root>/team/nested/skill-name/SKILL.md`).
  */
 export interface SkillMeta {
   name: string;
   description: string;
-  origin: 'global' | 'local';
+  origin: SkillOrigin;
   dir: string;
   resources: string[];
 }
@@ -159,6 +169,7 @@ export type Theme = 'dark' | 'light';
 export interface Settings {
   vaultPath: string | null;
   theme: Theme;
+  'editor.autoSave': boolean;
   'ai.baseUrl': string;
   'ai.apiKey': string;
   'ai.chatModel': string;
@@ -169,8 +180,10 @@ export interface Settings {
   'ai.topK': number;
   'ai.maxContextChars': number;
   'skills.enabled': boolean;
+  'skills.directories': string[];
   'skills.disabledGlobal': string[];
   'skills.disabledLocal': Record<string, string[]>;
+  'skills.disabledUser': string[];
   'ui.leftPaneWidth': number;
   'ui.rightPaneWidth': number;
 }
@@ -178,6 +191,7 @@ export interface Settings {
 export const DEFAULT_SETTINGS: Settings = {
   vaultPath: null,
   theme: 'dark',
+  'editor.autoSave': true,
   'ai.baseUrl': 'https://api.openai.com/v1',
   'ai.apiKey': '',
   'ai.chatModel': 'gpt-4o-mini',
@@ -188,8 +202,10 @@ export const DEFAULT_SETTINGS: Settings = {
   'ai.topK': 6,
   'ai.maxContextChars': 12000,
   'skills.enabled': true,
+  'skills.directories': [],
   'skills.disabledGlobal': [],
   'skills.disabledLocal': {},
+  'skills.disabledUser': [],
   'ui.leftPaneWidth': 256,
   'ui.rightPaneWidth': 320,
 };
@@ -197,6 +213,7 @@ export const DEFAULT_SETTINGS: Settings = {
 export const SETTINGS_KEYS = [
   'vaultPath',
   'theme',
+  'editor.autoSave',
   'ai.baseUrl',
   'ai.apiKey',
   'ai.chatModel',
@@ -207,8 +224,10 @@ export const SETTINGS_KEYS = [
   'ai.topK',
   'ai.maxContextChars',
   'skills.enabled',
+  'skills.directories',
   'skills.disabledGlobal',
   'skills.disabledLocal',
+  'skills.disabledUser',
   'ui.leftPaneWidth',
   'ui.rightPaneWidth',
 ] as const;
@@ -331,6 +350,11 @@ export interface AiChatCompleteRequest {
   model: string;
   messages: AiChatMessage[];
   options?: AiChatRequestOptions;
+  /**
+   * Optional caller-generated id so the renderer can abort a non-streaming
+   * completion through the same abort channel as streams.
+   */
+  requestId?: string;
 }
 
 export interface AiEmbedRequest {
@@ -363,13 +387,71 @@ export interface AiChatCompleteResult {
   finishReason?: string;
 }
 
+/**
+ * Structured classification of an AI request failure. Mirrors
+ * `electron/ipc/ai-error.ts` (kept in sync by hand — `shared/types.ts` stays
+ * free of cross-tree imports by convention).
+ */
+export type AiErrorCode =
+  | 'auth'
+  | 'rate_limit'
+  | 'network'
+  | 'timeout'
+  | 'server'
+  | 'bad_request'
+  | 'unknown';
+
+export interface AiErrorInfo {
+  code: AiErrorCode;
+  /** HTTP status when the provider responded with a non-2xx. */
+  status?: number;
+  /** Parsed `Retry-After` hint for rate-limited requests, in milliseconds. */
+  retryAfterMs?: number;
+  /** True when retrying the same request can plausibly succeed. */
+  retryable: boolean;
+  /** Concise human-readable summary (provider message when available). */
+  message: string;
+}
+
 export interface AiStreamErrorEvent {
   streamId: string;
+  /** Legacy human-readable message ('Aborted' marks a user-initiated stop). */
   message: string;
+  /** Structured classification; absent only for user-initiated aborts. */
+  error?: AiErrorInfo;
+}
+
+/**
+ * Discriminated results for the non-streaming AI handlers. `ipcMain.handle`
+ * rejections are stringified by Electron with an `Error invoking remote
+ * method '…'` prefix, so failures travel as data instead.
+ */
+export type AiChatCompleteIpcResult =
+  | { ok: true; data: AiChatCompleteResult }
+  | { ok: false; error: AiErrorInfo };
+
+export type AiEmbedIpcResult =
+  | { ok: true; data: AiEmbedResponse }
+  | { ok: false; error: AiErrorInfo };
+
+// PDF export. The renderer sends sanitized HTML; the main process shows the
+// save dialog, prints it in a hidden window and writes the file.
+export interface ExportPdfPayload {
+  html: string;
+  title: string;
+  defaultFileName: string;
+}
+
+export interface ExportPdfResult {
+  success: boolean;
+  filePath?: string;
+  canceled?: boolean;
+  error?: string;
 }
 
 export interface SpecForgeApi {
   selectVault: () => Promise<string | null>;
+  selectDirectory: () => Promise<string | null>;
   listFiles: (vaultPath: string) => Promise<FileNode[]>;
   readFile: (path: string) => Promise<string>;
   writeFile: (path: string, content: string) => Promise<void>;
@@ -441,22 +523,25 @@ export interface SpecForgeApi {
   // Phase 4: main-side AI HTTP (CORS-free)
   aiChatStream: (req: AiChatStreamRequest) => Promise<void>;
   aiChatAbort: (streamId: string) => Promise<void>;
-  aiChatComplete: (req: AiChatCompleteRequest) => Promise<AiChatCompleteResult>;
-  aiEmbed: (req: AiEmbedRequest) => Promise<AiEmbedResponse>;
+  aiChatComplete: (req: AiChatCompleteRequest) => Promise<AiChatCompleteIpcResult>;
+  aiEmbed: (req: AiEmbedRequest) => Promise<AiEmbedIpcResult>;
   onAiStreamChunk: (cb: (evt: AiStreamChunkEvent) => void) => () => void;
   onAiStreamDone: (cb: (evt: AiStreamDoneEvent) => void) => () => void;
   onAiStreamError: (cb: (evt: AiStreamErrorEvent) => void) => () => void;
 
   // AI Skills
   skillsList: (vaultPath?: string) => Promise<SkillMeta[]>;
-  skillsReadBody: (origin: 'global' | 'local', name: string, vaultPath?: string) => Promise<string>;
+  skillsReadBody: (origin: SkillOrigin, name: string, vaultPath?: string) => Promise<string>;
   skillsReadResource: (
-    origin: 'global' | 'local',
+    origin: SkillOrigin,
     name: string,
     resourceRelPath: string,
     vaultPath?: string,
   ) => Promise<string>;
   skillsOpenFolder: (scope: 'global' | 'local', vaultPath?: string) => Promise<void>;
+
+  // Export
+  exportPdf: (payload: ExportPdfPayload) => Promise<ExportPdfResult>;
 }
 
 declare global {

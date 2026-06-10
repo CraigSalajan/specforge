@@ -1,10 +1,10 @@
 import { Injectable } from '@angular/core';
 import type {
+  AiChatCompleteIpcResult,
   AiChatCompleteRequest,
-  AiChatCompleteResult,
   AiChatStreamRequest,
+  AiEmbedIpcResult,
   AiEmbedRequest,
-  AiEmbedResponse,
   AiFileChange,
   AiHistoryRecordInput,
   AiMode,
@@ -16,6 +16,8 @@ import type {
   ChatSessionSummary,
   ContextScope,
   EmbeddingUpsertItem,
+  ExportPdfPayload,
+  ExportPdfResult,
   FileChangeEvent,
   FileNode,
   IndexSearchHit,
@@ -23,6 +25,7 @@ import type {
   PendingChunkRef,
   PersistedChatMessage,
   SkillMeta,
+  SkillOrigin,
   SpecForgeApi,
 } from '../shared/types';
 
@@ -43,6 +46,10 @@ export class IpcService {
 
   selectVault(): Promise<string | null> {
     return this.requireApi().selectVault();
+  }
+
+  selectDirectory(): Promise<string | null> {
+    return this.requireApi().selectDirectory();
   }
 
   listFiles(vaultPath: string): Promise<FileNode[]> {
@@ -215,11 +222,11 @@ export class IpcService {
     return this.requireApi().aiChatAbort(streamId);
   }
 
-  aiChatComplete(req: AiChatCompleteRequest): Promise<AiChatCompleteResult> {
+  aiChatComplete(req: AiChatCompleteRequest): Promise<AiChatCompleteIpcResult> {
     return this.requireApi().aiChatComplete(req);
   }
 
-  aiEmbed(req: AiEmbedRequest): Promise<AiEmbedResponse> {
+  aiEmbed(req: AiEmbedRequest): Promise<AiEmbedIpcResult> {
     return this.requireApi().aiEmbed(req);
   }
 
@@ -240,12 +247,12 @@ export class IpcService {
     return this.requireApi().skillsList(vaultPath);
   }
 
-  skillsReadBody(origin: 'global' | 'local', name: string, vaultPath?: string): Promise<string> {
+  skillsReadBody(origin: SkillOrigin, name: string, vaultPath?: string): Promise<string> {
     return this.requireApi().skillsReadBody(origin, name, vaultPath);
   }
 
   skillsReadResource(
-    origin: 'global' | 'local',
+    origin: SkillOrigin,
     name: string,
     resourceRelPath: string,
     vaultPath?: string,
@@ -255,5 +262,10 @@ export class IpcService {
 
   skillsOpenFolder(scope: 'global' | 'local', vaultPath?: string): Promise<void> {
     return this.requireApi().skillsOpenFolder(scope, vaultPath);
+  }
+
+  // Export
+  exportPdf(payload: ExportPdfPayload): Promise<ExportPdfResult> {
+    return this.requireApi().exportPdf(payload);
   }
 }

@@ -4,6 +4,17 @@ import {
   assembleToolCalls,
   type StreamToolCallDelta,
 } from './tool-call-accumulator';
+import {
+  CONNECT_TIMEOUT_MS,
+  RESPONSE_TIMEOUT_MS,
+  STREAM_IDLE_TIMEOUT_MS,
+  abortedInfo,
+  fetchFailureInfo,
+  httpErrorInfo,
+  invalidRequestInfo,
+  timeoutInfo,
+  type AiErrorInfo,
+} from './ai-error';
 
 const Channels = {
   ChatStream: 'specforge:ai-chat-stream',
@@ -63,6 +74,11 @@ interface ChatCompleteRequest {
   model: string;
   messages: ChatMessage[];
   options?: ChatRequestOptions;
+  /**
+   * Optional caller-generated id registered in {@link activeStreams} so the
+   * renderer can abort a non-streaming completion via the ChatAbort channel.
+   */
+  requestId?: string;
 }
 
 interface EmbedRequest {
@@ -98,6 +114,18 @@ interface ChatCompleteResult {
   finishReason?: string;
 }
 
+/**
+ * Discriminated results for the non-streaming handlers. `ipcMain.handle`
+ * rejections are stringified by Electron and prefixed with
+ * `Error invoking remote method '…'`, so failures travel as data instead —
+ * mirrored renderer-side in `src/app/shared/types.ts`.
+ */
+type ChatCompleteIpcResult =
+  | { ok: true; data: ChatCompleteResult }
+  | { ok: false; error: AiErrorInfo };
+
+type EmbedIpcResult = { ok: true; data: EmbedResponse } | { ok: false; error: AiErrorInfo };
+
 interface EmbeddingsResponsePayload {
   data?: Array<{ index: number; embedding: number[] }>;
 }
@@ -108,6 +136,18 @@ interface ActiveStream {
 }
 
 const activeStreams = new Map<string, ActiveStream>();
+
+/** Internal carrier so a classified provider failure survives a `throw`. */
+class AiRequestError extends Error {
+  constructor(readonly info: AiErrorInfo) {
+    super(info.message);
+    this.name = 'AiRequestError';
+  }
+}
+
+function isAbortError(err: unknown): boolean {
+  return err instanceof Error && err.name === 'AbortError';
+}
 
 function trimBaseUrl(url: string): string {
   return url.replace(/\/+$/, '');
@@ -229,8 +269,27 @@ async function handleChatStream(
     // the `id`/`function.name` once and then streams `function.arguments` in
     // pieces, all keyed by the same index.
     const toolAccumulator = new Map<number, { id: string; name: string; args: string }>();
+
+    // Watchdog: aborts the fetch when the provider goes silent — first while
+    // waiting for response headers, then between streamed chunks. `timedOut`
+    // lets the catch block tell a watchdog abort apart from a user Stop.
+    let timedOut: 'connect' | 'idle' | null = null;
+    let watchdog: ReturnType<typeof setTimeout> | null = null;
+    const armWatchdog = (kind: 'connect' | 'idle', ms: number): void => {
+      if (watchdog) clearTimeout(watchdog);
+      watchdog = setTimeout(() => {
+        timedOut = kind;
+        controller.abort();
+      }, ms);
+    };
+    const disarmWatchdog = (): void => {
+      if (watchdog) clearTimeout(watchdog);
+      watchdog = null;
+    };
+
     try {
       const body = buildChatBody(model, messages, req.options, true);
+      armWatchdog('connect', CONNECT_TIMEOUT_MS);
       const res = await fetch(`${trimBaseUrl(baseUrl)}/chat/completions`, {
         method: 'POST',
         headers: {
@@ -240,11 +299,12 @@ async function handleChatStream(
         body: JSON.stringify(body),
         signal: controller.signal,
       });
+      armWatchdog('idle', STREAM_IDLE_TIMEOUT_MS);
 
       if (!res.ok || !res.body) {
         const text = await readErrorBody(res);
-        throw new Error(
-          `Chat request failed: ${res.status} ${res.statusText}${text ? ' — ' + text : ''}`,
+        throw new AiRequestError(
+          httpErrorInfo(res.status, res.statusText, text, res.headers.get('retry-after')),
         );
       }
 
@@ -256,6 +316,7 @@ async function handleChatStream(
       try {
         while (!finished) {
           const { value, done } = await reader.read();
+          armWatchdog('idle', STREAM_IDLE_TIMEOUT_MS);
           if (done) break;
           buffer += decoder.decode(value, { stream: true });
           const newlineIdx = buffer.lastIndexOf('\n');
@@ -297,14 +358,25 @@ async function handleChatStream(
 
       safeSend(sender, Channels.StreamDone, { streamId, finishReason, toolCalls });
     } catch (err) {
-      const message =
-        err instanceof Error
-          ? err.name === 'AbortError'
-            ? 'Aborted'
-            : err.message
-          : String(err);
-      safeSend(sender, Channels.StreamError, { streamId, message });
+      if (err instanceof AiRequestError) {
+        safeSend(sender, Channels.StreamError, {
+          streamId,
+          message: err.info.message,
+          error: err.info,
+        });
+      } else if (isAbortError(err) && timedOut) {
+        const info = timeoutInfo(timedOut);
+        safeSend(sender, Channels.StreamError, { streamId, message: info.message, error: info });
+      } else if (isAbortError(err)) {
+        // User-initiated Stop: the renderer translates this back into an
+        // AbortError and keeps any partial text without surfacing an error.
+        safeSend(sender, Channels.StreamError, { streamId, message: 'Aborted' });
+      } else {
+        const info = fetchFailureInfo(err);
+        safeSend(sender, Channels.StreamError, { streamId, message: info.message, error: info });
+      }
     } finally {
+      disarmWatchdog();
       activeStreams.delete(streamId);
       sender.removeListener('destroyed', cleanupOnSenderDestroyed);
     }
@@ -320,74 +392,149 @@ async function handleChatAbort(_event: IpcMainInvokeEvent, streamId: unknown): P
 }
 
 async function handleChatComplete(
-  _event: IpcMainInvokeEvent,
+  event: IpcMainInvokeEvent,
   req: ChatCompleteRequest,
-): Promise<ChatCompleteResult> {
-  if (!req || typeof req !== 'object') throw new Error('Invalid request payload');
-  const baseUrl = assertNonEmptyString(req.baseUrl, 'baseUrl');
-  const apiKey = assertNonEmptyString(req.apiKey, 'apiKey');
-  const model = assertNonEmptyString(req.model, 'model');
-  const messages = assertMessages(req.messages);
-
-  const body = buildChatBody(model, messages, req.options, false);
-  const res = await fetch(`${trimBaseUrl(baseUrl)}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(body),
-  });
-
-  if (!res.ok) {
-    const text = await readErrorBody(res);
-    throw new Error(
-      `Chat request failed: ${res.status} ${res.statusText}${text ? ' — ' + text : ''}`,
-    );
+): Promise<ChatCompleteIpcResult> {
+  let baseUrl: string;
+  let apiKey: string;
+  let model: string;
+  let messages: ChatMessage[];
+  try {
+    if (!req || typeof req !== 'object') throw new Error('Invalid request payload');
+    baseUrl = assertNonEmptyString(req.baseUrl, 'baseUrl');
+    apiKey = assertNonEmptyString(req.apiKey, 'apiKey');
+    model = assertNonEmptyString(req.model, 'model');
+    messages = assertMessages(req.messages);
+  } catch (err) {
+    return { ok: false, error: invalidRequestInfo(err instanceof Error ? err.message : String(err)) };
   }
 
-  const json = (await res.json()) as ChatCompletionResponse;
-  const choice = json.choices?.[0];
-  const toolCalls = choice?.message?.tool_calls;
-  return {
-    content: choice?.message?.content ?? '',
-    toolCalls: toolCalls && toolCalls.length > 0 ? toolCalls : undefined,
-    finishReason: choice?.finish_reason ?? undefined,
-  };
+  const requestId =
+    typeof req.requestId === 'string' && req.requestId.length > 0 && !activeStreams.has(req.requestId)
+      ? req.requestId
+      : null;
+  const controller = new AbortController();
+  if (requestId) activeStreams.set(requestId, { controller, sender: event.sender });
+
+  let timedOut: 'connect' | 'response' | null = null;
+  let timer = setTimeout(() => {
+    timedOut = 'connect';
+    controller.abort();
+  }, CONNECT_TIMEOUT_MS);
+
+  try {
+    const body = buildChatBody(model, messages, req.options, false);
+    const res = await fetch(`${trimBaseUrl(baseUrl)}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+
+    // Headers arrived: swap the connect watchdog for a body-completion bound.
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      timedOut = 'response';
+      controller.abort();
+    }, RESPONSE_TIMEOUT_MS);
+
+    if (!res.ok) {
+      const text = await readErrorBody(res);
+      return {
+        ok: false,
+        error: httpErrorInfo(res.status, res.statusText, text, res.headers.get('retry-after')),
+      };
+    }
+
+    const json = (await res.json()) as ChatCompletionResponse;
+    const choice = json.choices?.[0];
+    const toolCalls = choice?.message?.tool_calls;
+    return {
+      ok: true,
+      data: {
+        content: choice?.message?.content ?? '',
+        toolCalls: toolCalls && toolCalls.length > 0 ? toolCalls : undefined,
+        finishReason: choice?.finish_reason ?? undefined,
+      },
+    };
+  } catch (err) {
+    if (isAbortError(err)) {
+      return { ok: false, error: timedOut ? timeoutInfo(timedOut) : abortedInfo() };
+    }
+    return { ok: false, error: fetchFailureInfo(err) };
+  } finally {
+    clearTimeout(timer);
+    if (requestId) activeStreams.delete(requestId);
+  }
 }
 
-async function handleEmbed(_event: IpcMainInvokeEvent, req: EmbedRequest): Promise<EmbedResponse> {
-  if (!req || typeof req !== 'object') throw new Error('Invalid request payload');
-  const baseUrl = assertNonEmptyString(req.baseUrl, 'baseUrl');
-  const apiKey = assertNonEmptyString(req.apiKey, 'apiKey');
-  const model = assertNonEmptyString(req.model, 'model');
-  const texts = assertTexts(req.texts);
+async function handleEmbed(_event: IpcMainInvokeEvent, req: EmbedRequest): Promise<EmbedIpcResult> {
+  let baseUrl: string;
+  let apiKey: string;
+  let model: string;
+  let texts: string[];
+  try {
+    if (!req || typeof req !== 'object') throw new Error('Invalid request payload');
+    baseUrl = assertNonEmptyString(req.baseUrl, 'baseUrl');
+    apiKey = assertNonEmptyString(req.apiKey, 'apiKey');
+    model = assertNonEmptyString(req.model, 'model');
+    texts = assertTexts(req.texts);
+  } catch (err) {
+    return { ok: false, error: invalidRequestInfo(err instanceof Error ? err.message : String(err)) };
+  }
 
   if (texts.length === 0) {
-    return { vectors: [], model, dim: 0 };
+    return { ok: true, data: { vectors: [], model, dim: 0 } };
   }
 
-  const res = await fetch(`${trimBaseUrl(baseUrl)}/embeddings`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({ model, input: texts }),
-  });
+  const controller = new AbortController();
+  let timedOut: 'connect' | 'response' | null = null;
+  let timer = setTimeout(() => {
+    timedOut = 'connect';
+    controller.abort();
+  }, CONNECT_TIMEOUT_MS);
 
-  if (!res.ok) {
-    const text = await readErrorBody(res);
-    throw new Error(
-      `Embeddings request failed: ${res.status} ${res.statusText}${text ? ' — ' + text : ''}`,
-    );
+  try {
+    const res = await fetch(`${trimBaseUrl(baseUrl)}/embeddings`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({ model, input: texts }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      timedOut = 'response';
+      controller.abort();
+    }, RESPONSE_TIMEOUT_MS);
+
+    if (!res.ok) {
+      const text = await readErrorBody(res);
+      return {
+        ok: false,
+        error: httpErrorInfo(res.status, res.statusText, text, res.headers.get('retry-after')),
+      };
+    }
+
+    const json = (await res.json()) as EmbeddingsResponsePayload;
+    const data = (json.data ?? []).slice().sort((a, b) => a.index - b.index);
+    const vectors = data.map((d) => d.embedding);
+    const dim = vectors[0]?.length ?? 0;
+    return { ok: true, data: { vectors, model, dim } };
+  } catch (err) {
+    if (isAbortError(err)) {
+      return { ok: false, error: timedOut ? timeoutInfo(timedOut) : abortedInfo() };
+    }
+    return { ok: false, error: fetchFailureInfo(err) };
+  } finally {
+    clearTimeout(timer);
   }
-
-  const json = (await res.json()) as EmbeddingsResponsePayload;
-  const data = (json.data ?? []).slice().sort((a, b) => a.index - b.index);
-  const vectors = data.map((d) => d.embedding);
-  const dim = vectors[0]?.length ?? 0;
-  return { vectors, model, dim };
 }
 
 export function registerAiHandlers(): void {

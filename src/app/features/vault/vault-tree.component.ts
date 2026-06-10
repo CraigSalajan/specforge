@@ -5,6 +5,7 @@ import { VaultService } from '../../core/vault.service';
 import { InputDialogService } from '../../core/input-dialog.service';
 import { ConfirmDialogService } from '../../core/confirm-dialog.service';
 import { ContextMenuService, type ContextMenuItem } from '../../core/context-menu.service';
+import { PdfExportService } from '../../core/pdf-export.service';
 import { FileTreeNodeComponent } from './file-tree-node.component';
 
 @Component({
@@ -93,6 +94,7 @@ export class VaultTreeComponent {
   private readonly inputDialog = inject(InputDialogService);
   private readonly confirmDialog = inject(ConfirmDialogService);
   private readonly contextMenu = inject(ContextMenuService);
+  private readonly pdfExport = inject(PdfExportService);
 
   readonly fileSelected = output<string>();
 
@@ -165,6 +167,7 @@ export class VaultTreeComponent {
         { type: 'item', label: 'New Folder', action: () => this.onCreateFolderInside(parentDir) },
         { type: 'separator' },
         { type: 'item', label: 'Rename', action: () => this.onRename(node.path) },
+        { type: 'item', label: 'Export to PDF…', action: () => this.onExportPdf(node.path) },
         { type: 'item', label: 'Delete', danger: true, action: () => this.onDelete(node.path) },
       ];
     }
@@ -256,6 +259,20 @@ export class VaultTreeComponent {
       await this.vault.refreshTree();
     } catch (err) {
       console.error('Failed to create folder: ' + (err instanceof Error ? err.message : String(err)));
+    }
+  }
+
+  async onExportPdf(path: string): Promise<void> {
+    // The vault only contains .md files, but guard anyway.
+    if (!path.toLowerCase().endsWith('.md')) return;
+    try {
+      const content = await this.ipc.readFile(path);
+      const result = await this.pdfExport.exportMarkdown(content, path);
+      if (!result.success && !result.canceled) {
+        console.error('Failed to export PDF: ' + (result.error ?? 'Unknown error'));
+      }
+    } catch (err) {
+      console.error('Failed to export PDF: ' + (err instanceof Error ? err.message : String(err)));
     }
   }
 

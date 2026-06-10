@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 
 const IpcChannels = {
   SelectVault: 'specforge:select-vault',
+  SelectDirectory: 'specforge:select-directory',
   ListFiles: 'specforge:list-files',
   ReadFile: 'specforge:read-file',
   WriteFile: 'specforge:write-file',
@@ -46,6 +47,7 @@ const IpcChannels = {
   SkillsReadBody: 'specforge:skills-read-body',
   SkillsReadResource: 'specforge:skills-read-resource',
   SkillsOpenFolder: 'specforge:skills-open-folder',
+  ExportPdf: 'specforge:export-pdf',
 } as const;
 
 interface AiToolFunctionDefDto {
@@ -96,6 +98,7 @@ interface AiChatCompleteRequestDto {
   model: string;
   messages: AiChatMessageDto[];
   options?: AiChatRequestOptionsDto;
+  requestId?: string;
 }
 
 interface AiEmbedRequestDto {
@@ -128,13 +131,29 @@ interface AiChatCompleteResultDto {
   finishReason?: string;
 }
 
+interface AiErrorInfoDto {
+  code: 'auth' | 'rate_limit' | 'network' | 'timeout' | 'server' | 'bad_request' | 'unknown';
+  status?: number;
+  retryAfterMs?: number;
+  retryable: boolean;
+  message: string;
+}
+
+type AiChatCompleteIpcResultDto =
+  | { ok: true; data: AiChatCompleteResultDto }
+  | { ok: false; error: AiErrorInfoDto };
+
+type AiEmbedIpcResultDto = { ok: true; data: AiEmbedResponseDto } | { ok: false; error: AiErrorInfoDto };
+
 interface AiStreamErrorEventDto {
   streamId: string;
   message: string;
+  error?: AiErrorInfoDto;
 }
 
 const api = {
   selectVault: (): Promise<string | null> => ipcRenderer.invoke(IpcChannels.SelectVault),
+  selectDirectory: (): Promise<string | null> => ipcRenderer.invoke(IpcChannels.SelectDirectory),
   listFiles: (vaultPath: string) => ipcRenderer.invoke(IpcChannels.ListFiles, vaultPath),
   readFile: (filePath: string) => ipcRenderer.invoke(IpcChannels.ReadFile, filePath),
   writeFile: (filePath: string, content: string) =>
@@ -223,9 +242,9 @@ const api = {
     ipcRenderer.invoke(IpcChannels.AiChatStream, req),
   aiChatAbort: (streamId: string): Promise<void> =>
     ipcRenderer.invoke(IpcChannels.AiChatAbort, streamId),
-  aiChatComplete: (req: AiChatCompleteRequestDto): Promise<AiChatCompleteResultDto> =>
+  aiChatComplete: (req: AiChatCompleteRequestDto): Promise<AiChatCompleteIpcResultDto> =>
     ipcRenderer.invoke(IpcChannels.AiChatComplete, req),
-  aiEmbed: (req: AiEmbedRequestDto): Promise<AiEmbedResponseDto> =>
+  aiEmbed: (req: AiEmbedRequestDto): Promise<AiEmbedIpcResultDto> =>
     ipcRenderer.invoke(IpcChannels.AiEmbed, req),
   onAiStreamChunk: (cb: (evt: AiStreamChunkEventDto) => void): (() => void) => {
     const handler = (_e: Electron.IpcRendererEvent, payload: AiStreamChunkEventDto) => cb(payload);
@@ -245,16 +264,20 @@ const api = {
 
   // AI Skills
   skillsList: (vaultPath?: string) => ipcRenderer.invoke(IpcChannels.SkillsList, vaultPath),
-  skillsReadBody: (origin: 'global' | 'local', name: string, vaultPath?: string) =>
+  skillsReadBody: (origin: 'global' | 'local' | 'user', name: string, vaultPath?: string) =>
     ipcRenderer.invoke(IpcChannels.SkillsReadBody, origin, name, vaultPath),
   skillsReadResource: (
-    origin: 'global' | 'local',
+    origin: 'global' | 'local' | 'user',
     name: string,
     resourceRelPath: string,
     vaultPath?: string,
   ) => ipcRenderer.invoke(IpcChannels.SkillsReadResource, origin, name, resourceRelPath, vaultPath),
   skillsOpenFolder: (scope: 'global' | 'local', vaultPath?: string) =>
     ipcRenderer.invoke(IpcChannels.SkillsOpenFolder, scope, vaultPath),
+
+  // Export
+  exportPdf: (payload: { html: string; title: string; defaultFileName: string }) =>
+    ipcRenderer.invoke(IpcChannels.ExportPdf, payload),
 };
 
 contextBridge.exposeInMainWorld('specforge', api);

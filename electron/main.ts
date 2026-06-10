@@ -12,6 +12,7 @@ import { registerEmbeddingHandlers } from './ipc/embeddings';
 import { registerAiHistoryHandlers } from './ipc/ai-history';
 import { registerAiHandlers, disposeAiHandlers } from './ipc/ai';
 import { registerSkillsHandlers } from './ipc/skills';
+import { registerExportHandlers } from './ipc/export';
 import { getDb, closeDb } from './db/index';
 
 const isDev = process.env['SPECFORGE_DEV'] === '1';
@@ -114,6 +115,7 @@ app.whenReady().then(async () => {
   registerAiHistoryHandlers();
   registerAiHandlers();
   registerSkillsHandlers();
+  registerExportHandlers();
 
   await createWindow();
 

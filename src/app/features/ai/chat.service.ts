@@ -2,6 +2,7 @@ import { Injectable, computed, inject, signal } from '@angular/core';
 import { IpcService } from '../../core/ipc.service';
 import { VaultService } from '../../core/vault.service';
 import type {
+  AiErrorInfo,
   AiMode,
   ChatRole,
   ChatSession,
@@ -17,8 +18,8 @@ export interface UiChatMessage {
   content: string;
   /** True while the assistant is mid-stream. */
   streaming: boolean;
-  /** Optional error message attached to a failed assistant turn. */
-  error: string | null;
+  /** Structured error attached to a failed assistant turn. */
+  error: AiErrorInfo | null;
   /** Citations associated with the assistant turn (rendered as badges). */
   citations?: ReadonlyArray<{ relPath: string; headingPath: string }>;
   createdAt: number;
@@ -42,6 +43,8 @@ export class ChatService {
   private readonly _loading = signal(false);
   private readonly _streaming = signal(false);
   private readonly _error = signal<string | null>(null);
+  /** Structured error of the most recent failed AI turn (composer surface). */
+  private readonly _turnError = signal<AiErrorInfo | null>(null);
   private readonly _contextScope = signal<ContextScope>(EMPTY_CONTEXT_SCOPE);
 
   readonly sessions = this._sessions.asReadonly();
@@ -50,6 +53,7 @@ export class ChatService {
   readonly loading = this._loading.asReadonly();
   readonly streaming = this._streaming.asReadonly();
   readonly error = this._error.asReadonly();
+  readonly turnError = this._turnError.asReadonly();
   readonly contextScope = this._contextScope.asReadonly();
   readonly hasMessages = computed(() => this._messages().length > 0);
 
@@ -89,6 +93,7 @@ export class ChatService {
     this._contextScope.set(session.contextScope ?? EMPTY_CONTEXT_SCOPE);
     this._loading.set(true);
     this._error.set(null);
+    this._turnError.set(null);
     try {
       const persisted = await this.ipc.chatsGetMessages(session.id);
       this._messages.set(persisted.map(toUiMessage));
@@ -104,6 +109,7 @@ export class ChatService {
     this._activeSession.set(null);
     this._messages.set([]);
     this._error.set(null);
+    this._turnError.set(null);
     this._contextScope.set(EMPTY_CONTEXT_SCOPE);
   }
 
@@ -199,11 +205,16 @@ export class ChatService {
     this._error.set(error);
   }
 
+  setTurnError(error: AiErrorInfo | null): void {
+    this._turnError.set(error);
+  }
+
   resetForVaultChange(): void {
     this._sessions.set([]);
     this._activeSession.set(null);
     this._messages.set([]);
     this._error.set(null);
+    this._turnError.set(null);
     this._streaming.set(false);
     this._contextScope.set(EMPTY_CONTEXT_SCOPE);
   }

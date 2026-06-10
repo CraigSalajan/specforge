@@ -1,9 +1,10 @@
 import { Injectable, inject, signal } from '@angular/core';
-import type { ContextScope } from '../../shared/types';
+import type { AiErrorInfo, ContextScope } from '../../shared/types';
 import { IpcService } from '../../core/ipc.service';
 import { SettingsService } from '../../core/settings.service';
 import { VaultService } from '../../core/vault.service';
 import { AiProviderService } from './providers/ai-provider.service';
+import { toAiErrorInfo } from './providers/ai-harness-error';
 import { RetrievalService } from './providers/retrieval.service';
 import { ChatService, type UiChatMessage } from './chat.service';
 import { assembleSystemMessage, TOOL_USAGE_PROMPT, type PinnedFile } from './prompts/system-context';
@@ -87,6 +88,28 @@ export type ProposalOutcome =
 /** Upper bound on agentic tool rounds per Ask-mode turn (loop safety). */
 const MAX_TOOL_ROUNDS = 8;
 
+/** Inputs of a `run()` turn, retained so a failed turn can be retried. */
+interface RunTurnOptions {
+  userContent: string;
+  scope: ContextScope;
+  additionalInstructions: string | null;
+  expectsFileProposal: boolean;
+  /** When set, the resulting proposal is forced to edit this rel-path. */
+  forcedEditRelPath: string | null;
+  defaultFolder: string | null;
+  defaultTitle: string;
+}
+
+/**
+ * Snapshot of the last failed turn's inputs. `retryLastFailed()` re-runs it
+ * without re-appending or re-persisting the user message, reusing the failed
+ * assistant bubble. Scoped to a session so a retry can never graft a turn
+ * onto a different conversation.
+ */
+type FailedTurn =
+  | { kind: 'tools'; sessionId: number; userContent: string; scope: ContextScope }
+  | { kind: 'run'; sessionId: number; opts: RunTurnOptions };
+
 /**
  * Orchestrates a single chat turn: retrieves context, composes the system
  * prompt, streams the assistant response, and (for planning commands)
@@ -109,6 +132,13 @@ export class AiOrchestratorService {
 
   private readonly _pendingProposal = signal<FileProposal | null>(null);
   readonly pendingProposal = this._pendingProposal.asReadonly();
+
+  /** True when a failed turn is retained and can be re-run via Retry. */
+  private readonly _retryAvailable = signal(false);
+  readonly retryAvailable = this._retryAvailable.asReadonly();
+
+  /** Inputs of the last failed turn, retained for {@link retryLastFailed}. */
+  private lastFailedTurn: FailedTurn | null = null;
 
   /** Resolver for the in-flight proposal promise, settled by the modal. */
   private pendingResolver: ((outcome: ProposalOutcome) => void) | null = null;
@@ -158,6 +188,29 @@ export class AiOrchestratorService {
     // screen after Stop while the loop unwinds.
     this._pendingProposal.set(null);
     this.settlePending({ applied: false });
+  }
+
+  /**
+   * Re-runs the last failed turn with its original inputs. The user message
+   * is neither re-appended nor re-persisted; the failed assistant bubble is
+   * reset to a fresh streaming state and reused.
+   */
+  async retryLastFailed(): Promise<void> {
+    const turn = this.lastFailedTurn;
+    if (!turn || this.chat.streaming()) return;
+    const session = this.chat.activeSession();
+    if (!session || session.id !== turn.sessionId) {
+      // The failed turn belongs to a closed or different session; retrying
+      // here would graft its inputs onto the wrong conversation.
+      this.lastFailedTurn = null;
+      this._retryAvailable.set(false);
+      return;
+    }
+    if (turn.kind === 'tools') {
+      await this.runWithTools({ userContent: turn.userContent, scope: turn.scope, retry: true });
+    } else {
+      await this.run({ ...turn.opts, retry: true });
+    }
   }
 
   /**
@@ -248,6 +301,7 @@ export class AiOrchestratorService {
   private async runWithTools(opts: {
     userContent: string;
     scope: ContextScope;
+    retry?: boolean;
   }): Promise<void> {
     const session = this.chat.activeSession();
     if (!session) return;
@@ -262,32 +316,14 @@ export class AiOrchestratorService {
       return;
     }
 
-    const userUi: UiChatMessage = {
-      id: null,
-      role: 'user',
-      content: opts.userContent,
-      streaming: false,
-      error: null,
-      createdAt: Date.now(),
-    };
-    this.chat.appendLocal(userUi);
-    await this.chat.persistMessage(session.id, 'user', opts.userContent);
-
-    const assistantUi: UiChatMessage = {
-      id: null,
-      role: 'assistant',
-      content: '',
-      streaming: true,
-      error: null,
-      citations: [],
-      createdAt: Date.now(),
-    };
-    this.chat.appendLocal(assistantUi);
-    this.chat.setStreaming(true);
-    this.chat.setError(null);
+    await this.beginTurn(session.id, opts.userContent, opts.retry === true);
 
     const controller = new AbortController();
     this.abortController = controller;
+
+    // Mirrors the visible assistant content so the catch block can persist
+    // whatever partial text exists when the turn fails mid-stream.
+    let liveText = '';
 
     try {
       // Base conversation: system prompt (with tool guidance) + persisted turns.
@@ -306,6 +342,9 @@ export class AiOrchestratorService {
         .schemas()
         .filter((schema) => !disabledTools.has(schema.function.name));
       let finalText = '';
+      // Flips false the first time a round ends without tool calls; if it is
+      // still true after the loop, the round cap cut the turn short.
+      let exhaustedToolRounds = true;
 
       for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
         let roundText = '';
@@ -320,7 +359,8 @@ export class AiOrchestratorService {
             roundText += chunk.delta;
             // Show streamed text live; on rounds after a tool call the bubble
             // continues to accumulate into the same assistant message.
-            this.chat.updateLastAssistant({ content: finalText + roundText });
+            liveText = finalText + roundText;
+            this.chat.updateLastAssistant({ content: liveText });
           }
           if (chunk.done) {
             toolCalls = chunk.toolCalls;
@@ -329,9 +369,13 @@ export class AiOrchestratorService {
         }
 
         finalText += roundText;
+        liveText = finalText;
 
         // No tool calls: this is the final natural-language reply.
-        if (!toolCalls || toolCalls.length === 0) break;
+        if (!toolCalls || toolCalls.length === 0) {
+          exhaustedToolRounds = false;
+          break;
+        }
 
         // Record the assistant's tool-call message (content may be null).
         convo.push({
@@ -369,33 +413,51 @@ export class AiOrchestratorService {
         // Loop continues: re-invoke the model with the tool results appended.
       }
 
-      const displayContent =
-        finalText.trim().length > 0
-          ? finalText
-          : 'Done.';
+      if (exhaustedToolRounds) {
+        // The model was still requesting tools when the cap hit. Surface an
+        // honest, retryable notice instead of pretending the turn finished.
+        const notice: AiErrorInfo = {
+          code: 'unknown',
+          retryable: true,
+          message: `Stopped after ${MAX_TOOL_ROUNDS} tool rounds without a final answer.`,
+        };
+        this.chat.updateLastAssistant({ content: finalText, streaming: false });
+        await this.failTurn(notice, session.id, finalText, {
+          kind: 'tools',
+          sessionId: session.id,
+          userContent: opts.userContent,
+          scope: opts.scope,
+        });
+      } else {
+        const displayContent =
+          finalText.trim().length > 0
+            ? finalText
+            : 'Done.';
 
-      this.chat.updateLastAssistant({ content: displayContent, streaming: false });
+        this.chat.updateLastAssistant({ content: displayContent, streaming: false });
 
-      const persisted = await this.chat.persistMessage(
-        session.id,
-        'assistant',
-        displayContent,
-      );
-      if (persisted) {
-        this.chat.updateLastAssistant({ id: persisted.id });
+        const persisted = await this.chat.persistMessage(
+          session.id,
+          'assistant',
+          displayContent,
+        );
+        if (persisted) {
+          this.chat.updateLastAssistant({ id: persisted.id });
+        }
       }
     } catch (err) {
       const isAbort = err instanceof DOMException && err.name === 'AbortError';
-      const message = isAbort
-        ? 'Stopped.'
-        : err instanceof Error
-          ? err.message
-          : String(err);
-      this.chat.updateLastAssistant({
-        error: isAbort ? null : message,
-        streaming: false,
-      });
-      if (!isAbort) this.chat.setError(message);
+      if (isAbort) {
+        // User Stop: keep the partial text, no error surface.
+        this.chat.updateLastAssistant({ error: null, streaming: false });
+      } else {
+        await this.failTurn(toAiErrorInfo(err), session.id, liveText, {
+          kind: 'tools',
+          sessionId: session.id,
+          userContent: opts.userContent,
+          scope: opts.scope,
+        });
+      }
     } finally {
       this.abortController = null;
       this.chat.setStreaming(false);
@@ -465,16 +527,92 @@ export class AiOrchestratorService {
     };
   }
 
-  private async run(opts: {
-    userContent: string;
-    scope: ContextScope;
-    additionalInstructions: string | null;
-    expectsFileProposal: boolean;
-    /** When set, the resulting proposal is forced to edit this rel-path. */
-    forcedEditRelPath: string | null;
-    defaultFolder: string | null;
-    defaultTitle: string;
-  }): Promise<void> {
+  /**
+   * Seeds the chat state for a turn. Fresh turns append + persist the user
+   * message and append a streaming assistant bubble; retries skip both and
+   * reset the failed assistant bubble in place instead.
+   */
+  private async beginTurn(sessionId: number, userContent: string, retry: boolean): Promise<void> {
+    // Starting any turn invalidates the previous failed-turn snapshot.
+    this.lastFailedTurn = null;
+    this._retryAvailable.set(false);
+
+    const assistantUi: UiChatMessage = {
+      id: null,
+      role: 'assistant',
+      content: '',
+      streaming: true,
+      error: null,
+      citations: [],
+      createdAt: Date.now(),
+    };
+
+    if (retry) {
+      // Reuse the failed assistant bubble: reset it to a fresh streaming
+      // state (it is filtered out of the recomposed conversation while
+      // streaming, exactly like a brand-new bubble).
+      const messages = this.chat.messages();
+      const last = messages[messages.length - 1];
+      if (last && last.role === 'assistant') {
+        this.chat.updateLastAssistant({
+          id: null,
+          content: '',
+          streaming: true,
+          error: null,
+          citations: [],
+        });
+      } else {
+        this.chat.appendLocal(assistantUi);
+      }
+    } else {
+      const userUi: UiChatMessage = {
+        id: null,
+        role: 'user',
+        content: userContent,
+        streaming: false,
+        error: null,
+        createdAt: Date.now(),
+      };
+      this.chat.appendLocal(userUi);
+      await this.chat.persistMessage(sessionId, 'user', userContent);
+      this.chat.appendLocal(assistantUi);
+    }
+
+    this.chat.setStreaming(true);
+    this.chat.setError(null);
+    this.chat.setTurnError(null);
+  }
+
+  /**
+   * Marks the current assistant turn as failed: attaches the structured error
+   * to the bubble and the composer surface, retains the turn inputs for
+   * Retry, and persists any partial text.
+   *
+   * Persistence policy: `chat_messages` has no error column, so the partial
+   * content is persisted as a plain assistant message — this keeps a reload
+   * from showing an orphaned user question. Empty partials are skipped rather
+   * than writing a blank row.
+   */
+  private async failTurn(
+    info: AiErrorInfo,
+    sessionId: number,
+    partialContent: string,
+    failedTurn: FailedTurn,
+  ): Promise<void> {
+    this.chat.updateLastAssistant({ error: info, streaming: false });
+    this.chat.setTurnError(info);
+    this.lastFailedTurn = failedTurn;
+    this._retryAvailable.set(true);
+
+    if (partialContent.trim().length > 0) {
+      const persisted = await this.chat.persistMessage(sessionId, 'assistant', partialContent);
+      if (persisted) {
+        this.chat.updateLastAssistant({ id: persisted.id });
+      }
+    }
+  }
+
+  private async run(opts: RunTurnOptions & { retry?: boolean }): Promise<void> {
     const session = this.chat.activeSession();
     if (!session) return;
     if (!this.providers.isConfigured()) {
@@ -488,33 +626,14 @@ export class AiOrchestratorService {
       return;
     }
 
-    const now = Date.now();
-    const userUi: UiChatMessage = {
-      id: null,
-      role: 'user',
-      content: opts.userContent,
-      streaming: false,
-      error: null,
-      createdAt: now,
-    };
-    this.chat.appendLocal(userUi);
-    await this.chat.persistMessage(session.id, 'user', opts.userContent);
-
-    const assistantUi: UiChatMessage = {
-      id: null,
-      role: 'assistant',
-      content: '',
-      streaming: true,
-      error: null,
-      citations: [],
-      createdAt: Date.now(),
-    };
-    this.chat.appendLocal(assistantUi);
-    this.chat.setStreaming(true);
-    this.chat.setError(null);
+    await this.beginTurn(session.id, opts.userContent, opts.retry === true);
 
     const controller = new AbortController();
     this.abortController = controller;
+
+    // Declared outside the try so the catch block can persist whatever
+    // partial text streamed in before the failure.
+    let accumulated = '';
 
     try {
       const messages = await this.composeMessages({
@@ -524,7 +643,6 @@ export class AiOrchestratorService {
         vaultPath,
       });
 
-      let accumulated = '';
       if (opts.expectsFileProposal) {
         const result = await this.providers.chat.chatComplete(messages, {
           jsonObject: true,
@@ -581,16 +699,26 @@ export class AiOrchestratorService {
     } catch (err) {
       const isAbort =
         err instanceof DOMException && err.name === 'AbortError';
-      const message = isAbort
-        ? 'Stopped.'
-        : err instanceof Error
-          ? err.message
-          : String(err);
-      this.chat.updateLastAssistant({
-        error: isAbort ? null : message,
-        streaming: false,
-      });
-      if (!isAbort) this.chat.setError(message);
+      if (isAbort) {
+        // User Stop: keep the partial text, no error surface.
+        this.chat.updateLastAssistant({ error: null, streaming: false });
+      } else {
+        // Proposal turns are all-or-nothing (no streamed partial), so the
+        // partial passed here is empty and nothing gets persisted for them.
+        await this.failTurn(toAiErrorInfo(err), session.id, accumulated, {
+          kind: 'run',
+          sessionId: session.id,
+          opts: {
+            userContent: opts.userContent,
+            scope: opts.scope,
+            additionalInstructions: opts.additionalInstructions,
+            expectsFileProposal: opts.expectsFileProposal,
+            forcedEditRelPath: opts.forcedEditRelPath,
+            defaultFolder: opts.defaultFolder,
+            defaultTitle: opts.defaultTitle,
+          },
+        });
+      }
     } finally {
       this.abortController = null;
       this.chat.setStreaming(false);

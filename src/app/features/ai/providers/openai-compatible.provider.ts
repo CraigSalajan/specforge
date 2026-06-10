@@ -1,10 +1,11 @@
 import type {
+  AiChatCompleteIpcResult,
   AiChatCompleteRequest,
-  AiChatCompleteResult,
   AiChatRequestOptions,
   AiChatStreamRequest,
+  AiEmbedIpcResult,
   AiEmbedRequest,
-  AiEmbedResponse,
+  AiErrorInfo,
   AiStreamChunkEvent,
   AiStreamDoneEvent,
   AiStreamErrorEvent,
@@ -18,6 +19,7 @@ import type {
   ToolCall,
 } from './chat.provider';
 import type { EmbeddingProvider } from './embedding.provider';
+import { AiHarnessError, stripIpcErrorPrefix, toAiErrorInfo } from './ai-harness-error';
 
 export interface OpenAiCompatibleConfig {
   baseUrl: string;
@@ -36,8 +38,8 @@ export type OpenAiConfigGetter = () => OpenAiCompatibleConfig;
 export interface AiIpcAdapter {
   aiChatStream(req: AiChatStreamRequest): Promise<void>;
   aiChatAbort(streamId: string): Promise<void>;
-  aiChatComplete(req: AiChatCompleteRequest): Promise<AiChatCompleteResult>;
-  aiEmbed(req: AiEmbedRequest): Promise<AiEmbedResponse>;
+  aiChatComplete(req: AiChatCompleteRequest): Promise<AiChatCompleteIpcResult>;
+  aiEmbed(req: AiEmbedRequest): Promise<AiEmbedIpcResult>;
   onAiStreamChunk(cb: (evt: AiStreamChunkEvent) => void): () => void;
   onAiStreamDone(cb: (evt: AiStreamDoneEvent) => void): () => void;
   onAiStreamError(cb: (evt: AiStreamErrorEvent) => void): () => void;
@@ -83,7 +85,7 @@ export class OpenAiCompatibleChatProvider implements ChatProvider {
     type Pending =
       | { kind: 'chunk'; delta: string }
       | { kind: 'done'; finishReason?: string; toolCalls?: ToolCall[] }
-      | { kind: 'error'; message: string };
+      | { kind: 'error'; message: string; info?: AiErrorInfo };
 
     const queue: Pending[] = [];
     let resolveNext: ((v: Pending | null) => void) | null = null;
@@ -110,7 +112,7 @@ export class OpenAiCompatibleChatProvider implements ChatProvider {
     });
     const offError = this.ipc.onAiStreamError((evt) => {
       if (evt.streamId !== streamId) return;
-      push({ kind: 'error', message: evt.message });
+      push({ kind: 'error', message: evt.message, info: evt.error });
     });
 
     const cleanup = (): void => {
@@ -157,7 +159,9 @@ export class OpenAiCompatibleChatProvider implements ChatProvider {
       if (opts.signal && abortHandler) {
         opts.signal.removeEventListener('abort', abortHandler);
       }
-      throw err instanceof Error ? err : new Error(String(err));
+      // Invoke rejections arrive with Electron's remote-method prefix; wrap
+      // them so the orchestrator always sees a structured, prefix-free error.
+      throw new AiHarnessError(toAiErrorInfo(err));
     }
 
     try {
@@ -191,7 +195,13 @@ export class OpenAiCompatibleChatProvider implements ChatProvider {
           if (opts.signal?.aborted || next.message === 'Aborted') {
             throw new DOMException('Aborted', 'AbortError');
           }
-          throw new Error(next.message);
+          throw new AiHarnessError(
+            next.info ?? {
+              code: 'unknown',
+              retryable: false,
+              message: stripIpcErrorPrefix(next.message),
+            },
+          );
         }
       }
     } finally {
@@ -209,7 +219,12 @@ export class OpenAiCompatibleChatProvider implements ChatProvider {
     const cfg = this.getConfig();
     if (!cfg.apiKey) throw new Error('No API key configured. Open Settings to add one.');
 
+    // The requestId gives the main process an abort handle for this
+    // non-streaming call: a tripped signal forwards through the shared
+    // chat-abort channel and cancels the underlying fetch.
+    const requestId = generateStreamId();
     const request: AiChatCompleteRequest = {
+      requestId,
       baseUrl: cfg.baseUrl,
       apiKey: cfg.apiKey,
       model: opts.model ?? cfg.chatModel,
@@ -217,22 +232,38 @@ export class OpenAiCompatibleChatProvider implements ChatProvider {
       options: toRequestOptions(opts),
     };
 
-    // Honor caller-side cancellation: if the signal is already tripped, fail
-    // fast; otherwise the main process holds no abort handle for the
-    // non-streaming path (callers use streaming for cancellable turns).
     if (opts.signal?.aborted) {
       throw new DOMException('Aborted', 'AbortError');
+    }
+    let abortHandler: (() => void) | null = null;
+    if (opts.signal) {
+      abortHandler = (): void => {
+        void this.ipc.aiChatAbort(requestId);
+      };
+      opts.signal.addEventListener('abort', abortHandler);
     }
 
-    const result = await this.ipc.aiChatComplete(request);
-    if (opts.signal?.aborted) {
-      throw new DOMException('Aborted', 'AbortError');
+    try {
+      const result = await this.ipc.aiChatComplete(request);
+      if (opts.signal?.aborted) {
+        throw new DOMException('Aborted', 'AbortError');
+      }
+      if (!result.ok) {
+        throw new AiHarnessError(result.error);
+      }
+      return {
+        content: result.data.content,
+        toolCalls: result.data.toolCalls,
+        finishReason: result.data.finishReason,
+      };
+    } catch (err) {
+      if (err instanceof AiHarnessError || err instanceof DOMException) throw err;
+      throw new AiHarnessError(toAiErrorInfo(err));
+    } finally {
+      if (opts.signal && abortHandler) {
+        opts.signal.removeEventListener('abort', abortHandler);
+      }
     }
-    return {
-      content: result.content,
-      toolCalls: result.toolCalls,
-      finishReason: result.finishReason,
-    };
   }
 }
 
@@ -257,16 +288,24 @@ export class OpenAiCompatibleEmbeddingProvider implements EmbeddingProvider {
     if (!cfg.apiKey) throw new Error('No API key configured. Open Settings to add one.');
     if (texts.length === 0) return [];
 
-    const res = await this.ipc.aiEmbed({
-      baseUrl: cfg.baseUrl,
-      apiKey: cfg.apiKey,
-      model: cfg.embeddingModel,
-      texts,
-    });
-
-    if (res.vectors.length > 0 && this._dim === undefined) {
-      this._dim = res.dim || res.vectors[0]?.length;
+    let res: AiEmbedIpcResult;
+    try {
+      res = await this.ipc.aiEmbed({
+        baseUrl: cfg.baseUrl,
+        apiKey: cfg.apiKey,
+        model: cfg.embeddingModel,
+        texts,
+      });
+    } catch (err) {
+      throw new AiHarnessError(toAiErrorInfo(err));
     }
-    return res.vectors;
+    if (!res.ok) {
+      throw new AiHarnessError(res.error);
+    }
+
+    if (res.data.vectors.length > 0 && this._dim === undefined) {
+      this._dim = res.data.dim || res.data.vectors[0]?.length;
+    }
+    return res.data.vectors;
   }
 }
