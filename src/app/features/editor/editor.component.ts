@@ -10,6 +10,7 @@ import {
   input,
   output,
   signal,
+  untracked,
   viewChild,
 } from '@angular/core';
 import { EditorState } from '@codemirror/state';
@@ -29,8 +30,12 @@ import {
   mouseSelectingField,
   setMouseSelecting,
 } from 'codemirror-live-markdown';
+import { ConfirmDialogService } from '../../core/confirm-dialog.service';
 import { IpcService } from '../../core/ipc.service';
+import { PdfExportService } from '../../core/pdf-export.service';
+import { SettingsService } from '../../core/settings.service';
 import { richTableField } from './rich-table-field';
+import { taskListField } from './task-list-field';
 
 // Kick off async syntax-highlighter init (lowlight + highlight.js) exactly once
 // for the whole app. codeBlockField consults the highlighter lazily, so fenced
@@ -49,6 +54,11 @@ function ensureHighlighter(): void {
     /* initHighlighter threw synchronously — ignore */
   }
 }
+
+// Auto-save debounce. Every write triggers the chokidar watcher (tree refresh
+// at 120ms, index-status refresh at 800ms), so saving more aggressively than
+// ~1s would churn the watcher pipeline on every keystroke pause.
+const AUTO_SAVE_DEBOUNCE_MS = 1000;
 
 @Component({
   selector: 'app-editor',
@@ -70,6 +80,11 @@ function ensureHighlighter(): void {
         </div>
         @if (filePath()) {
           <div class="flex items-center gap-1">
+            <button
+              type="button"
+              class="rounded px-2 py-1 text-sm text-text-secondary hover:bg-surface-3 hover:text-text-primary disabled:opacity-50"
+              [disabled]="exporting()"
+              (click)="exportPdf()">{{ exporting() ? 'Exporting…' : 'Export PDF' }}</button>
             <button
               type="button"
               class="rounded bg-accent px-2 py-1 text-sm font-medium text-white hover:bg-accent-hover disabled:opacity-50"
@@ -94,6 +109,9 @@ function ensureHighlighter(): void {
 })
 export class EditorComponent implements OnDestroy {
   private readonly ipc = inject(IpcService);
+  private readonly pdfExport = inject(PdfExportService);
+  private readonly settings = inject(SettingsService);
+  private readonly confirmDialog = inject(ConfirmDialogService);
 
   readonly filePath = input<string | null>(null);
 
@@ -103,6 +121,8 @@ export class EditorComponent implements OnDestroy {
 
   private readonly _content = signal<string>('');
   private readonly _savedContent = signal<string>('');
+
+  readonly exporting = signal(false);
 
   readonly isDirty = computed(() => this._content() !== this._savedContent());
   readonly displayName = computed(() => {
@@ -118,17 +138,36 @@ export class EditorComponent implements OnDestroy {
   // writes during change detection).
   private isApplyingExternal = false;
 
+  // Path whose content currently lives in the buffer. Set once a load
+  // completes; flushes (auto-save timer, switch, destroy, unload) write to
+  // THIS path — never the filePath() input, which may already point at the
+  // next file by the time an async flush runs.
+  private loadedPath: string | null = null;
+
+  // Pending debounced auto-save (plain setTimeout — no RxJS in this app).
+  private autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Monotonic token bumped on every file switch. Async work (file reads, the
+  // unsaved-changes prompt) compares its captured token against the current
+  // one and bails when superseded, so rapid switches are strictly latest-wins
+  // and a stale read can never clobber a newer buffer.
+  private loadToken = 0;
+
+  // Tail of the write queue. Disk writes are strictly serialized through this
+  // chain — otherwise a debounced auto-save racing a switch-triggered flush
+  // for the same file could land out of order and leave older content on
+  // disk. Each link handles its own errors, so the chain never rejects.
+  private writeChain: Promise<void> = Promise.resolve();
+
   constructor() {
-    // Reacts to filePath changes: load/clear the document buffer.
+    // Reacts to filePath changes: flush unsaved work, then load/clear the
+    // document buffer. Everything except filePath() is read inside
+    // untracked() so dirty-state and settings changes don't re-trigger it.
     effect(() => {
       const path = this.filePath();
-      if (path) {
-        void this.loadFile(path);
-      } else {
-        this._content.set('');
-        this._savedContent.set('');
-        this.destroyView();
-      }
+      untracked(() => {
+        void this.switchTo(path);
+      });
     });
 
     // Mounts (and syncs) the CodeMirror view. Runs as part of change
@@ -149,6 +188,11 @@ export class EditorComponent implements OnDestroy {
   }
 
   ngOnDestroy(): void {
+    this.clearAutoSaveTimer();
+    if (this.autoSaveEnabled()) {
+      // Best effort: the component is going away, so we can't await the write.
+      void this.flushDirtyBuffer();
+    }
     this.destroyView();
   }
 
@@ -160,23 +204,160 @@ export class EditorComponent implements OnDestroy {
     }
   }
 
+  // Best-effort flush when the window closes. ipcRenderer.invoke sends the
+  // message to the main process synchronously, so the write typically lands
+  // even though the renderer won't see the promise resolve.
+  @HostListener('window:beforeunload')
+  onBeforeUnload(): void {
+    this.clearAutoSaveTimer();
+    if (this.autoSaveEnabled()) {
+      void this.flushDirtyBuffer();
+    }
+  }
+
   async save(): Promise<void> {
+    this.clearAutoSaveTimer();
+    await this.flushDirtyBuffer();
+  }
+
+  async exportPdf(): Promise<void> {
     const path = this.filePath();
+    if (!path || this.exporting()) return;
+    this.exporting.set(true);
+    try {
+      const result = await this.pdfExport.exportMarkdown(this._content(), path);
+      if (!result.success && !result.canceled) {
+        window.alert('Failed to export PDF: ' + (result.error ?? 'Unknown error'));
+      }
+    } catch (err) {
+      window.alert('Failed to export PDF: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      this.exporting.set(false);
+    }
+  }
+
+  /**
+   * Handles a filePath() change: flushes (or prompts about) unsaved work in
+   * the OLD buffer before the new file is loaded, so switching files can no
+   * longer silently drop edits (issue #2).
+   *
+   * The old path + content are captured synchronously up front, which means
+   * the flush write can never race the reload — even though we deliberately
+   * don't await it (auto-save case) before loading the new file.
+   */
+  private async switchTo(nextPath: string | null): Promise<void> {
+    const token = ++this.loadToken;
+
+    // Any pending debounced save is superseded: either we flush immediately
+    // below, or the buffer is clean and there is nothing to write.
+    this.clearAutoSaveTimer();
+
+    const oldPath = this.loadedPath;
+    const oldContent = this._content();
+    const dirty = oldPath !== null && oldContent !== this._savedContent();
+
+    if (dirty && oldPath !== nextPath) {
+      if (this.autoSaveEnabled()) {
+        // Fire-and-forget: the captured (path, content) pair keeps the write
+        // consistent regardless of what loads into the buffer afterwards.
+        void this.writeTo(oldPath, oldContent);
+      } else {
+        const fileName = oldPath.split(/[\\/]/).pop() ?? oldPath;
+        const shouldSave = await this.confirmDialog.confirm({
+          title: 'Unsaved changes',
+          message: `You have unsaved changes in ${fileName}. Save them?`,
+          confirmLabel: 'Save',
+          cancelLabel: 'Discard',
+        });
+        // Honor an explicit Save even if a newer switch arrived meanwhile.
+        // (A newer switch force-resolves this prompt with `false` via
+        // ConfirmDialogService, so `true` always reflects a real user click.)
+        if (shouldSave) {
+          void this.writeTo(oldPath, oldContent);
+        }
+      }
+    }
+
+    // A newer switch happened while we awaited the prompt — it owns loading.
+    if (token !== this.loadToken) return;
+
+    if (nextPath) {
+      await this.loadFile(nextPath, token);
+    } else {
+      this.loadedPath = null;
+      this._content.set('');
+      this._savedContent.set('');
+      this.destroyView();
+    }
+  }
+
+  /**
+   * Writes the buffer to the currently loaded file if it has unsaved changes.
+   * Shared by manual save, the debounced auto-save, destroy and beforeunload.
+   */
+  private async flushDirtyBuffer(): Promise<void> {
+    const path = this.loadedPath;
     if (!path) return;
-    if (!this.isDirty()) return;
     const content = this._content();
+    if (content === this._savedContent()) return;
+    await this.writeTo(path, content);
+  }
+
+  private writeTo(path: string, content: string): Promise<void> {
+    const write = this.writeChain.then(() => this.performWrite(path, content));
+    this.writeChain = write;
+    return write;
+  }
+
+  private async performWrite(path: string, content: string): Promise<void> {
     try {
       await this.ipc.writeFile(path, content);
-      this._savedContent.set(content);
+      // Only advance the dirty baseline if the buffer still holds this file —
+      // a flush for the previous file must not clobber the next file's state.
+      if (this.loadedPath === path) {
+        this._savedContent.set(content);
+      }
       this.saved.emit({ path });
     } catch (err) {
+      // Buffer and dirty state are left untouched, so nothing is lost and the
+      // user can retry (manual save or the next auto-save attempt).
       window.alert('Failed to save: ' + (err instanceof Error ? err.message : String(err)));
     }
   }
 
-  private async loadFile(path: string): Promise<void> {
+  private scheduleAutoSave(): void {
+    if (!this.autoSaveEnabled()) return;
+    this.clearAutoSaveTimer();
+    this.autoSaveTimer = setTimeout(() => {
+      this.autoSaveTimer = null;
+      void this.flushDirtyBuffer();
+    }, AUTO_SAVE_DEBOUNCE_MS);
+  }
+
+  private clearAutoSaveTimer(): void {
+    if (this.autoSaveTimer !== null) {
+      clearTimeout(this.autoSaveTimer);
+      this.autoSaveTimer = null;
+    }
+  }
+
+  private autoSaveEnabled(): boolean {
+    return this.settings.editorAutoSave();
+  }
+
+  private async loadFile(path: string, token: number): Promise<void> {
     try {
+      // Let any in-flight flush land first: switching away from a dirty file
+      // (and quickly back) fires a write without awaiting it, and reading
+      // before that write resolves would load stale pre-write content while
+      // performWrite advances the dirty baseline past it.
+      await this.writeChain;
+      if (token !== this.loadToken) return;
       const content = await this.ipc.readFile(path);
+      // A newer switch superseded this load — drop the stale content so a
+      // slow read can never overwrite the buffer of the newer file.
+      if (token !== this.loadToken) return;
+      this.loadedPath = path;
       // Writing _content drives the mount/sync effect, which creates the view
       // (once the host has rendered) and dispatches the new document.
       this._content.set(content);
@@ -213,6 +394,7 @@ export class EditorComponent implements OnDestroy {
         // tables (source shown while the cursor is inside the table), rendering
         // inline markdown inside cells via marked.parseInline.
         richTableField,
+        taskListField, // GFM task checkboxes (- [ ] / - [x]) — package has no task-list support
         codeBlockField({ copyButton: true }),
         linkPlugin(),
         imageField(),
@@ -223,6 +405,7 @@ export class EditorComponent implements OnDestroy {
           // only user edits should flow back into the signal.
           if (update.docChanged && !this.isApplyingExternal) {
             this._content.set(update.state.doc.toString());
+            this.scheduleAutoSave();
           }
         }),
       ],
