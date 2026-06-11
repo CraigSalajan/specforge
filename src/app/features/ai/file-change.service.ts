@@ -1,7 +1,9 @@
 import { Injectable, inject, signal } from '@angular/core';
 import type { AiChangeType } from '../../shared/types';
+import { EditorBufferService } from '../../core/editor-buffer.service';
 import { IpcService } from '../../core/ipc.service';
 import { VaultService } from '../../core/vault.service';
+import { threeWayMerge } from '../../shared/merge-utils';
 import { isSafeRelPath, relToAbs } from './providers/path-utils';
 
 export interface ApplyChangeInput {
@@ -29,6 +31,7 @@ export interface ApplyChangeInput {
 export class FileChangeService {
   private readonly ipc = inject(IpcService);
   private readonly vault = inject(VaultService);
+  private readonly editorBuffer = inject(EditorBufferService);
 
   private readonly _undoing = signal(false);
   private readonly _error = signal<string | null>(null);
@@ -40,6 +43,8 @@ export class FileChangeService {
     if (!vaultPath || !isSafeRelPath(relPath)) return null;
     try {
       const abs = relToAbs(vaultPath, relPath);
+      // Flush-before-read: proposal bases must include unsaved editor edits.
+      await this.editorBuffer.flushIfDirty(abs);
       return await this.ipc.readFile(abs);
     } catch {
       return null;
@@ -69,15 +74,23 @@ export class FileChangeService {
 
     const absPath = relToAbs(vaultPath, input.relPath);
 
+    // What actually lands on disk: an apply-time merge can shift both sides.
+    let beforeContent = input.beforeContent;
+    let afterContent = input.afterContent;
+
     try {
       switch (input.changeType) {
         case 'create':
           await this.ipc.createFile(absPath);
           await this.ipc.writeFile(absPath, input.afterContent ?? '');
           break;
-        case 'edit':
-          await this.ipc.writeFile(absPath, input.afterContent ?? '');
+        case 'edit': {
+          const resolved = await this.resolveEditWrite(absPath, input);
+          beforeContent = resolved.before;
+          afterContent = resolved.after;
+          await this.ipc.writeFile(absPath, resolved.after);
           break;
+        }
         case 'delete':
           await this.ipc.deleteFile(absPath);
           break;
@@ -97,8 +110,8 @@ export class FileChangeService {
         relPath: input.relPath,
         newRelPath: input.newRelPath ?? null,
         changeType: input.changeType,
-        beforeContent: input.beforeContent,
-        afterContent: input.afterContent,
+        beforeContent,
+        afterContent,
         applied: true,
       });
 
@@ -108,6 +121,43 @@ export class FileChangeService {
       this._error.set(err instanceof Error ? err.message : String(err));
       throw err;
     }
+  }
+
+  /**
+   * Resolves what an `edit` apply should write. The proposal was computed
+   * against `input.beforeContent`; if disk has moved on since (user typing,
+   * another AI apply, an external tool), the proposal's changes are replayed
+   * on top of the current content via three-way merge instead of silently
+   * clobbering it. Returns the actual disk baseline alongside the content so
+   * the history record stays losslessly undoable.
+   */
+  private async resolveEditWrite(
+    absPath: string,
+    input: ApplyChangeInput,
+  ): Promise<{ before: string | null; after: string }> {
+    // Flush-before-read: unsaved editor edits are part of the disk truth the
+    // proposal must merge against.
+    await this.editorBuffer.flushIfDirty(absPath);
+
+    const proposed = input.afterContent ?? '';
+    let current: string | null = null;
+    try {
+      current = await this.ipc.readFile(absPath);
+    } catch {
+      current = null; // file missing — fall through to a plain write
+    }
+
+    if (current === null || input.beforeContent === null || current === input.beforeContent) {
+      return { before: current ?? input.beforeContent, after: proposed };
+    }
+
+    const merged = threeWayMerge(input.beforeContent, current, proposed);
+    if (!merged.ok) {
+      throw new Error(
+        'File changed on disk since this proposal was created and the changes conflict. Re-generate the proposal.',
+      );
+    }
+    return { before: current, after: merged.text };
   }
 
   /**

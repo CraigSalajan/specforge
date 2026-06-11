@@ -1,4 +1,5 @@
 import { Injectable, inject } from '@angular/core';
+import { EditorBufferService } from '../../../core/editor-buffer.service';
 import { IpcService } from '../../../core/ipc.service';
 import type { ToolCall, ToolDef } from '../providers/chat.provider';
 import { canonicalRelPath, isSafeRelPath, relToAbs } from '../providers/path-utils';
@@ -26,6 +27,7 @@ interface ReadFileArgs {
 @Injectable({ providedIn: 'root' })
 export class ReadFileTool implements Tool {
   private readonly ipc = inject(IpcService);
+  private readonly editorBuffer = inject(EditorBufferService);
 
   readonly name = 'read_file';
 
@@ -95,9 +97,13 @@ export class ReadFileTool implements Tool {
 
     const offset = this.normalizeOffset(args.offset);
 
+    const abs = relToAbs(ctx.vaultPath, canon);
+    // Flush-before-read: the model must see unsaved editor buffer content.
+    await this.editorBuffer.flushIfDirty(abs);
+
     let raw: string;
     try {
-      raw = await this.ipc.readFile(relToAbs(ctx.vaultPath, canon));
+      raw = await this.ipc.readFile(abs);
     } catch {
       return fail(`File not found or unreadable: ${canon}`);
     }

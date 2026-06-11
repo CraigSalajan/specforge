@@ -1,5 +1,6 @@
 import { Injectable, inject, signal } from '@angular/core';
 import type { AiErrorInfo, ContextScope } from '../../shared/types';
+import { EditorBufferService } from '../../core/editor-buffer.service';
 import { IpcService } from '../../core/ipc.service';
 import { SettingsService } from '../../core/settings.service';
 import { VaultService } from '../../core/vault.service';
@@ -121,6 +122,7 @@ type FailedTurn =
 @Injectable({ providedIn: 'root' })
 export class AiOrchestratorService {
   private readonly ipc = inject(IpcService);
+  private readonly editorBuffer = inject(EditorBufferService);
   private readonly settings = inject(SettingsService);
   private readonly vault = inject(VaultService);
   private readonly providers = inject(AiProviderService);
@@ -748,7 +750,10 @@ export class AiOrchestratorService {
       const canon = canonicalRelPath(relPath);
       if (!canon || seenPinned.has(canon)) return;
       try {
-        const content = await this.ipc.readFile(relToAbs(opts.vaultPath, canon));
+        const abs = relToAbs(opts.vaultPath, canon);
+        // Flush-before-read: pinned context must include unsaved editor edits.
+        await this.editorBuffer.flushIfDirty(abs);
+        const content = await this.ipc.readFile(abs);
         pinnedFiles.push({ title: canon, content });
         seenPinned.add(canon);
       } catch {
