@@ -5,6 +5,7 @@ import {
   inject,
   output,
 } from '@angular/core';
+import { EditorSelectionService, resolveActiveSelection } from '../../core/editor-selection.service';
 import { VaultService } from '../../core/vault.service';
 import { SettingsService } from '../../core/settings.service';
 import { ChatService } from './chat.service';
@@ -55,6 +56,30 @@ const ASSUMED_CHARS_PER_FILE = 8 * 1024;
               class="cb-x -mr-0.5 rounded-full p-0.5 hover:text-text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
               [attr.aria-label]="'Remove context: ' + rel"
               (click)="removeActiveFile()">
+              <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>
+            </button>
+          </span>
+        }
+
+        @if (selectionLabel(); as sel) {
+          <span
+            class="cb-chip inline-flex items-center gap-1 rounded-full border border-border-subtle bg-surface-2 px-2 py-0.5 text-xs text-text-secondary"
+            title="Selected text in the active file — the AI will focus on it.">
+            <svg class="h-3.5 w-3.5 shrink-0 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M3 7V5a2 2 0 0 1 2-2h2" />
+              <path d="M17 3h2a2 2 0 0 1 2 2v2" />
+              <path d="M21 17v2a2 2 0 0 1-2 2h-2" />
+              <path d="M7 21H5a2 2 0 0 1-2-2v-2" />
+              <path d="M7 8h8" />
+              <path d="M7 12h10" />
+              <path d="M7 16h6" />
+            </svg>
+            <span class="cb-label">{{ sel }}</span>
+            <button
+              type="button"
+              class="cb-x -mr-0.5 rounded-full p-0.5 hover:text-text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              aria-label="Remove context: selection"
+              (click)="clearSelection()">
               <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>
             </button>
           </span>
@@ -164,6 +189,7 @@ export class ContextBarComponent {
   private readonly chat = inject(ChatService);
   private readonly vault = inject(VaultService);
   private readonly settings = inject(SettingsService);
+  private readonly editorSelection = inject(EditorSelectionService);
 
   readonly scope = this.chat.contextScope;
 
@@ -182,6 +208,28 @@ export class ContextBarComponent {
     const vaultPath = this.vault.vaultPath();
     if (!abs || !vaultPath) return null;
     return absToRel(vaultPath, abs);
+  });
+
+  /**
+   * The editor selection that will focus the next turn, validated through the
+   * same rules the orchestrator applies (`resolveActiveSelection`), so the
+   * chip and the prompt can never disagree.
+   */
+  private readonly selection = computed(() =>
+    resolveActiveSelection(
+      this.editorSelection.selection(),
+      this.vault.activeFilePath(),
+      this.scope().includeActiveFile,
+    ),
+  );
+
+  /** Chip label, `Selection · L4–L9` (or `Selection · L4` for one line). */
+  readonly selectionLabel = computed<string | null>(() => {
+    const sel = this.selection();
+    if (!sel) return null;
+    return sel.startLine === sel.endLine
+      ? `Selection · L${sel.startLine}`
+      : `Selection · L${sel.startLine}–L${sel.endLine}`;
   });
 
   readonly isEmpty = computed(() => {
@@ -213,6 +261,10 @@ export class ContextBarComponent {
 
   // --- Chip removal -------------------------------------------------------
 
+  clearSelection(): void {
+    this.editorSelection.clear();
+  }
+
   removeActiveFile(): void {
     void this.chat.setScope({ ...this.scope(), includeActiveFile: false });
   }
@@ -234,6 +286,11 @@ export class ContextBarComponent {
   /** Removes the last chip (token-field Backspace behavior from the composer). */
   removeLastChip(): boolean {
     const s = this.scope();
+    // The selection is the most recently added context, so it goes first.
+    if (this.selection()) {
+      this.clearSelection();
+      return true;
+    }
     if (s.files.length > 0) {
       void this.chat.setScope({ ...s, files: s.files.slice(0, -1) });
       return true;

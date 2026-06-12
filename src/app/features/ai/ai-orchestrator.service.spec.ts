@@ -187,9 +187,13 @@ describe('AiOrchestratorService.runWithTools', () => {
   function runTools(): Promise<void> {
     return (
       orchestrator as unknown as {
-        runWithTools(opts: { userContent: string; scope: typeof EMPTY_CONTEXT_SCOPE }): Promise<void>;
+        runWithTools(opts: {
+          userContent: string;
+          scope: typeof EMPTY_CONTEXT_SCOPE;
+          selection: null;
+        }): Promise<void>;
       }
-    ).runWithTools({ userContent: 'Create a PRD', scope: EMPTY_CONTEXT_SCOPE });
+    ).runWithTools({ userContent: 'Create a PRD', scope: EMPTY_CONTEXT_SCOPE, selection: null });
   }
 
   beforeEach(() => {

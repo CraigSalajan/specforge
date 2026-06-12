@@ -13,6 +13,7 @@ import { DomSanitizer, type SafeHtml } from '@angular/platform-browser';
 import DOMPurify from 'dompurify';
 import { Marked } from 'marked';
 import { type AiErrorInfo, type ChatSession } from '../../shared/types';
+import { EditorSelectionService, resolveActiveSelection } from '../../core/editor-selection.service';
 import { VaultService } from '../../core/vault.service';
 import { UiStateService } from '../../core/ui-state.service';
 import { InputDialogService } from '../../core/input-dialog.service';
@@ -206,9 +207,7 @@ import {
               [attr.aria-pressed]="composerMode() === 'edit'"
               (click)="setComposerMode('edit')">Edit</button>
           </div>
-          <span class="text-[11px] text-text-muted">
-            {{ composerMode() === 'ask' ? 'Answers in chat — files untouched' : 'Proposes an edit to the active file' }}
-          </span>
+          <span class="text-[11px] text-text-muted">{{ modeCaption() }}</span>
         </div>
         <div class="mb-2">
           <app-context-bar #contextBar (requestContextPicker)="onRequestContextPicker()" />
@@ -308,6 +307,7 @@ export class AiPanelComponent {
   private readonly inputDialog = inject(InputDialogService);
   private readonly confirmDialog = inject(ConfirmDialogService);
   private readonly sanitizer = inject(DomSanitizer);
+  private readonly editorSelection = inject(EditorSelectionService);
 
   // Dedicated Marked instance (same pattern as PdfExportService) so chat-only
   // options never leak into the global `marked` used by the proposal preview /
@@ -424,14 +424,34 @@ export class AiPanelComponent {
 
   readonly contextScope = this.chat.contextScope;
 
+  /**
+   * True when a valid editor selection will focus the next turn — same rules
+   * the orchestrator and the Selection chip apply (`resolveActiveSelection`).
+   */
+  readonly selectionActive = computed<boolean>(() =>
+    resolveActiveSelection(
+      this.editorSelection.selection(),
+      this.vault.activeFilePath(),
+      this.contextScope().includeActiveFile,
+    ) !== null,
+  );
+
+  /** Quiet caption under the Ask/Edit toggle, selection-aware in Edit mode. */
+  readonly modeCaption = computed<string>(() => {
+    if (this.composerMode() === 'ask') return 'Answers in chat — files untouched';
+    return this.selectionActive()
+      ? 'Proposes an edit focused on the selection'
+      : 'Proposes an edit to the active file';
+  });
+
   /** Composer placeholder hints whether any vault context is attached. */
   readonly composerPlaceholder = computed<string>(() => {
     const s = this.contextScope();
     const hasActive = s.includeActiveFile && this.vault.activeFilePath() !== null;
     const empty = !s.wholeVault && s.folders.length === 0 && s.files.length === 0 && !hasActive;
-    return empty
-      ? 'Ask anything — / for commands, @ for context.'
-      : 'Ask anything, or pick a command above…';
+    if (empty) return 'Ask anything — / for commands, @ for context.';
+    if (this.selectionActive()) return 'Ask about the selection…';
+    return 'Ask anything, or pick a command above…';
   });
 
   readonly canSend = computed(() => {

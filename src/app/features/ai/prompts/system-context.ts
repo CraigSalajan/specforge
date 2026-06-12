@@ -59,7 +59,52 @@ export interface PinnedFile {
   content: string;
 }
 
+/**
+ * The user's editor selection for this turn. Rendered directly after the
+ * matching PINNED FILE block so the model sees the selection in context.
+ */
+export interface SelectionContext {
+  /** Vault-relative path of the pinned file the selection belongs to. */
+  relPath: string;
+  /** The selected text, verbatim. */
+  text: string;
+  /** 1-based first selected line. */
+  startLine: number;
+  /** 1-based last selected line (inclusive). */
+  endLine: number;
+}
+
 const TRUNCATION_MARKER = '\n…(truncated)';
+
+/** Trailing instruction of every SELECTION block. */
+const SELECTION_FOCUS_NOTE = `The user's request concerns this selected text specifically. Focus your
+response on the selection; the full PINNED FILE above is provided for
+surrounding context.`;
+
+/** Human range label: `line 4` for one line, `lines 4–9` otherwise. */
+export function selectionRangeLabel(startLine: number, endLine: number): string {
+  return startLine === endLine ? `line ${startLine}` : `lines ${startLine}–${endLine}`;
+}
+
+/**
+ * Renders the SELECTION block within `allowance` chars, truncating the
+ * selected text like pinned files are. Returns null when the allowance
+ * cannot even fit the block frame.
+ */
+function selectionBlock(selection: SelectionContext, allowance: number): string | null {
+  const label = selectionRangeLabel(selection.startLine, selection.endLine);
+  const header = `SELECTION (${label} of ${selection.relPath}):\n---\n`;
+  const footer = `\n---\n${SELECTION_FOCUS_NOTE}`;
+  const contentAllowance = Math.max(0, allowance - header.length - footer.length);
+  if (contentAllowance <= 0) return null;
+
+  let body = selection.text;
+  if (body.length > contentAllowance) {
+    const sliceLen = Math.max(0, contentAllowance - TRUNCATION_MARKER.length);
+    body = body.slice(0, sliceLen) + TRUNCATION_MARKER;
+  }
+  return `${header}${body}${footer}`;
+}
 
 /**
  * Fraction of the total budget reserved for pinned files when both pinned
@@ -83,6 +128,8 @@ export function assembleSystemMessage(
     additionalInstructions?: string;
     pinnedFiles?: PinnedFile[];
     availableSkills?: SkillMeta[];
+    /** Editor selection to focus on; must reference a pinned file's title. */
+    selection?: SelectionContext;
   },
 ): ContextAssembly {
   const sections: string[] = [BASE_SYSTEM];
@@ -121,7 +168,15 @@ export function assembleSystemMessage(
 
   let pinnedUsed = 0;
   if (pinned.length > 0) {
-    const cap = perFileCap(pinnedBudget, pinned.length);
+    // The selection (when it targets a pinned file) gets its own budget slot,
+    // so a huge pinned file can never starve the SELECTION block out of the
+    // context entirely — the case where the selection matters most.
+    const requested = options.selection;
+    const selection =
+      requested && pinned.some((p) => p.title === requested.relPath)
+        ? requested
+        : undefined;
+    const cap = perFileCap(pinnedBudget, pinned.length + (selection ? 1 : 0));
     for (const file of pinned) {
       const remaining = pinnedBudget - pinnedUsed;
       if (remaining <= 0) break;
@@ -143,6 +198,19 @@ export function assembleSystemMessage(
       sections.push(block);
       citations.push({ relPath: file.title, headingPath: '' });
       pinnedUsed += block.length;
+
+      // Selection focus renders immediately after its pinned file so the
+      // model reads it as "this range of the file above".
+      if (selection && selection.relPath === file.title) {
+        const selBlock = selectionBlock(
+          selection,
+          Math.min(cap, pinnedBudget - pinnedUsed),
+        );
+        if (selBlock) {
+          sections.push(selBlock);
+          pinnedUsed += selBlock.length;
+        }
+      }
     }
   }
 

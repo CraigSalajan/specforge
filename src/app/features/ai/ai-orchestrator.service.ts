@@ -1,6 +1,7 @@
 import { Injectable, inject, signal } from '@angular/core';
 import type { AiErrorInfo, ContextScope } from '../../shared/types';
 import { EditorBufferService } from '../../core/editor-buffer.service';
+import { EditorSelectionService, resolveActiveSelection } from '../../core/editor-selection.service';
 import { IpcService } from '../../core/ipc.service';
 import { SettingsService } from '../../core/settings.service';
 import { VaultService } from '../../core/vault.service';
@@ -8,7 +9,13 @@ import { AiProviderService } from './providers/ai-provider.service';
 import { toAiErrorInfo } from './providers/ai-harness-error';
 import { RetrievalService } from './providers/retrieval.service';
 import { ChatService, type UiChatMessage } from './chat.service';
-import { assembleSystemMessage, TOOL_USAGE_PROMPT, type PinnedFile } from './prompts/system-context';
+import {
+  assembleSystemMessage,
+  selectionRangeLabel,
+  TOOL_USAGE_PROMPT,
+  type PinnedFile,
+  type SelectionContext,
+} from './prompts/system-context';
 import { findCommand, type PlanningCommandId } from './prompts';
 import type { ChatMessage, ToolCall } from './providers/chat.provider';
 import { absToRel, canonicalRelPath, relToAbs, sanitizeFilename } from './providers/path-utils';
@@ -25,6 +32,20 @@ const EDIT_SYSTEM_PROMPT = `The user is asking you to edit the PINNED FILE shown
 Return a single JSON object of the exact shape { "content": "<full revised markdown>" }.
 The "content" value MUST be the complete, updated markdown for the file — not a diff,
 not a snippet, and not commentary. Preserve everything the user did not ask to change.`;
+
+/**
+ * Edit-mode instruction when the user has text selected in the editor: the
+ * change is scoped to the selected range, but the proposal pipeline still
+ * needs the complete revised file.
+ */
+function editSelectionSystemPrompt(selection: SelectionContext): string {
+  const range = selectionRangeLabel(selection.startLine, selection.endLine);
+  return `The user is asking you to edit the PINNED FILE shown above, focused on its SELECTION block (${range}).
+Modify ONLY the selected range; preserve everything outside it verbatim.
+Return a single JSON object of the exact shape { "content": "<full revised markdown>" }.
+The "content" value MUST be the complete, updated markdown for the WHOLE file — not a diff,
+not a snippet, and not just the revised selection.`;
+}
 
 /**
  * System instruction for Ask-mode turns. Keeps the model in explain/answer mode
@@ -89,10 +110,15 @@ export type ProposalOutcome =
 /** Upper bound on agentic tool rounds per Ask-mode turn (loop safety). */
 const MAX_TOOL_ROUNDS = 8;
 
+/** Max selection chars folded into the retrieval query (see composeRetrievalQuery). */
+const RETRIEVAL_SELECTION_CAP = 500;
+
 /** Inputs of a `run()` turn, retained so a failed turn can be retried. */
 interface RunTurnOptions {
   userContent: string;
   scope: ContextScope;
+  /** Editor selection captured at turn start, replayed verbatim on Retry. */
+  selection: SelectionContext | null;
   additionalInstructions: string | null;
   expectsFileProposal: boolean;
   /** When set, the resulting proposal is forced to edit this rel-path. */
@@ -108,7 +134,13 @@ interface RunTurnOptions {
  * onto a different conversation.
  */
 type FailedTurn =
-  | { kind: 'tools'; sessionId: number; userContent: string; scope: ContextScope }
+  | {
+      kind: 'tools';
+      sessionId: number;
+      userContent: string;
+      scope: ContextScope;
+      selection: SelectionContext | null;
+    }
   | { kind: 'run'; sessionId: number; opts: RunTurnOptions };
 
 /**
@@ -123,6 +155,7 @@ type FailedTurn =
 export class AiOrchestratorService {
   private readonly ipc = inject(IpcService);
   private readonly editorBuffer = inject(EditorBufferService);
+  private readonly editorSelection = inject(EditorSelectionService);
   private readonly settings = inject(SettingsService);
   private readonly vault = inject(VaultService);
   private readonly providers = inject(AiProviderService);
@@ -209,7 +242,12 @@ export class AiOrchestratorService {
       return;
     }
     if (turn.kind === 'tools') {
-      await this.runWithTools({ userContent: turn.userContent, scope: turn.scope, retry: true });
+      await this.runWithTools({
+        userContent: turn.userContent,
+        scope: turn.scope,
+        selection: turn.selection,
+        retry: true,
+      });
     } else {
       await this.run({ ...turn.opts, retry: true });
     }
@@ -240,19 +278,29 @@ export class AiOrchestratorService {
         : null;
     const isEdit = mode === 'edit' && editTargetRel !== null;
 
+    // Editor selection focus, snapshotted once at turn start so the prompt is
+    // stable for the whole turn (and replayed verbatim on Retry) even if the
+    // user keeps selecting while the model streams.
+    const selection = this.captureSelection(scope);
+
     // Ask-mode turns with tools enabled go through the agentic tool loop so the
     // model can create files via the `write_file` tool. Edit-mode turns keep the
     // existing JSON-proposal path untouched. Tools are skipped when disabled in
     // settings, which makes behavior identical to the legacy plain-chat path.
     if (!isEdit && this.settings.aiToolsEnabled()) {
-      await this.runWithTools({ userContent: content, scope });
+      await this.runWithTools({ userContent: content, scope, selection });
       return;
     }
 
     await this.run({
       userContent: content,
       scope,
-      additionalInstructions: isEdit ? EDIT_SYSTEM_PROMPT : ASK_SYSTEM_PROMPT,
+      selection,
+      additionalInstructions: isEdit
+        ? selection
+          ? editSelectionSystemPrompt(selection)
+          : EDIT_SYSTEM_PROMPT
+        : ASK_SYSTEM_PROMPT,
       expectsFileProposal: isEdit,
       forcedEditRelPath: isEdit ? editTargetRel : null,
       defaultFolder: null,
@@ -282,6 +330,9 @@ export class AiOrchestratorService {
     await this.run({
       userContent: userIntent.trim().length > 0 ? userIntent : cmd.description,
       scope: effectiveScope,
+      // Planning commands draft whole documents from templates; an editor
+      // selection would only mislead that flow, so it is not threaded here.
+      selection: null,
       additionalInstructions: cmd.systemPrompt,
       expectsFileProposal: cmd.expectsFileProposal,
       forcedEditRelPath: null,
@@ -303,6 +354,7 @@ export class AiOrchestratorService {
   private async runWithTools(opts: {
     userContent: string;
     scope: ContextScope;
+    selection: SelectionContext | null;
     retry?: boolean;
   }): Promise<void> {
     const session = this.chat.activeSession();
@@ -332,6 +384,7 @@ export class AiOrchestratorService {
       const convo = await this.composeMessages({
         scope: opts.scope,
         userContent: opts.userContent,
+        selection: opts.selection,
         additionalInstructions: TOOL_USAGE_PROMPT,
         vaultPath,
       });
@@ -429,6 +482,7 @@ export class AiOrchestratorService {
           sessionId: session.id,
           userContent: opts.userContent,
           scope: opts.scope,
+          selection: opts.selection,
         });
       } else {
         const displayContent =
@@ -458,6 +512,7 @@ export class AiOrchestratorService {
           sessionId: session.id,
           userContent: opts.userContent,
           scope: opts.scope,
+          selection: opts.selection,
         });
       }
     } finally {
@@ -641,6 +696,7 @@ export class AiOrchestratorService {
       const messages = await this.composeMessages({
         scope: opts.scope,
         userContent: opts.userContent,
+        selection: opts.selection,
         additionalInstructions: opts.additionalInstructions,
         vaultPath,
       });
@@ -713,6 +769,7 @@ export class AiOrchestratorService {
           opts: {
             userContent: opts.userContent,
             scope: opts.scope,
+            selection: opts.selection,
             additionalInstructions: opts.additionalInstructions,
             expectsFileProposal: opts.expectsFileProposal,
             forcedEditRelPath: opts.forcedEditRelPath,
@@ -731,9 +788,41 @@ export class AiOrchestratorService {
     void this.indexFreshFile(vaultPath);
   }
 
+  /**
+   * Captures the current editor selection for a turn, or null when no valid
+   * selection applies: the scope must include the active file (otherwise the
+   * SELECTION block would reference content the model cannot see), and the
+   * snapshot must belong to that file with non-whitespace text.
+   */
+  private captureSelection(scope: ContextScope): SelectionContext | null {
+    const activeFilePath = this.vault.activeFilePath();
+    const snapshot = resolveActiveSelection(
+      this.editorSelection.selection(),
+      activeFilePath,
+      scope.includeActiveFile,
+    );
+    if (!snapshot || !activeFilePath) return null;
+    const vaultPath = this.vault.vaultPath();
+    if (!vaultPath) return null;
+    // Derive the rel-path from the active-file path — the exact string
+    // composeMessages keys the pinned file by — not from the snapshot's path.
+    // resolveActiveSelection only guarantees the two are samePath-equal
+    // (case/separator-insensitive), while the PINNED FILE / SELECTION title
+    // match in assembleSystemMessage is strict, casing-preserving equality.
+    const relPath = canonicalRelPath(absToRel(vaultPath, activeFilePath));
+    if (!relPath) return null;
+    return {
+      relPath,
+      text: snapshot.text,
+      startLine: snapshot.startLine,
+      endLine: snapshot.endLine,
+    };
+  }
+
   private async composeMessages(opts: {
     scope: ContextScope;
     userContent: string;
+    selection: SelectionContext | null;
     additionalInstructions: string | null;
     vaultPath: string;
   }): Promise<ChatMessage[]> {
@@ -789,7 +878,7 @@ export class AiOrchestratorService {
 
     const hits = needsContext
       ? await this.retrieval.retrieve(
-          this.composeRetrievalQuery(opts.userContent, activeContent),
+          this.composeRetrievalQuery(opts.userContent, activeContent, opts.selection),
           opts.vaultPath,
           topK,
           filter,
@@ -801,6 +890,7 @@ export class AiOrchestratorService {
       additionalInstructions: opts.additionalInstructions ?? undefined,
       pinnedFiles,
       availableSkills: this.skillRegistry.enabled(),
+      selection: opts.selection ?? undefined,
     });
 
     this.chat.updateLastAssistant({ citations });
@@ -814,10 +904,20 @@ export class AiOrchestratorService {
     return [systemMessage, ...turns];
   }
 
-  private composeRetrievalQuery(userContent: string, activeContent: string | null): string {
-    if (!activeContent) return userContent;
-    const firstHeading = activeContent.split(/\r?\n/).find((l) => l.startsWith('#'));
-    return [userContent, firstHeading ?? ''].filter((s) => s.trim().length > 0).join('\n');
+  private composeRetrievalQuery(
+    userContent: string,
+    activeContent: string | null,
+    selection: SelectionContext | null,
+  ): string {
+    // Selection text is what the user is actually working on, so it sharpens
+    // retrieval more than the file's first heading; capped so a select-all
+    // can't swamp the search query.
+    const selectionBoost = selection ? selection.text.slice(0, RETRIEVAL_SELECTION_CAP) : '';
+    const firstHeading =
+      activeContent?.split(/\r?\n/).find((l) => l.startsWith('#')) ?? '';
+    return [userContent, selectionBoost, firstHeading]
+      .filter((s) => s.trim().length > 0)
+      .join('\n');
   }
 
   private parseProposal(

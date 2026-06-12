@@ -32,6 +32,7 @@ import {
 } from 'codemirror-live-markdown';
 import { ConfirmDialogService } from '../../core/confirm-dialog.service';
 import { EditorBufferService, type EditorBufferDelegate } from '../../core/editor-buffer.service';
+import { EditorSelectionService } from '../../core/editor-selection.service';
 import { IpcService } from '../../core/ipc.service';
 import { PdfExportService } from '../../core/pdf-export.service';
 import { SettingsService } from '../../core/settings.service';
@@ -67,6 +68,11 @@ const AUTO_SAVE_DEBOUNCE_MS = 1000;
 // Coalesces watcher event bursts (chokidar can emit several events for one
 // logical save) before the buffer is reconciled with disk.
 const RECONCILE_DEBOUNCE_MS = 80;
+
+// Debounce for publishing the editor selection to EditorSelectionService
+// (plain setTimeout — no RxJS in this app). Long enough that a mouse drag
+// doesn't churn the signal on every pixel, short enough to feel immediate.
+const SELECTION_PUBLISH_DEBOUNCE_MS = 150;
 
 // Lifetime of the auto-dismissing "Merged changes from disk" hint.
 const MERGE_NOTICE_MS = 4000;
@@ -158,6 +164,7 @@ export class EditorComponent implements OnDestroy {
   private readonly settings = inject(SettingsService);
   private readonly confirmDialog = inject(ConfirmDialogService);
   private readonly editorBuffer = inject(EditorBufferService);
+  private readonly editorSelection = inject(EditorSelectionService);
 
   readonly filePath = input<string | null>(null);
 
@@ -204,6 +211,11 @@ export class EditorComponent implements OnDestroy {
 
   // Pending debounced auto-save (plain setTimeout — no RxJS in this app).
   private autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Pending debounced selection publish (same setTimeout pattern). The
+  // snapshot is read from live view state when the timer fires, so coalesced
+  // updates always publish the final selection, never an intermediate one.
+  private selectionPublishTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Monotonic token bumped on every file switch. Async work (file reads, the
   // unsaved-changes prompt) compares its captured token against the current
@@ -290,6 +302,8 @@ export class EditorComponent implements OnDestroy {
     this.clearReconcileTimer();
     this.clearMergeNoticeTimer();
     this.clearAutoSaveTimer();
+    this.clearSelectionPublishTimer();
+    this.editorSelection.clear();
     if (this.autoSaveEnabled()) {
       // Best effort: the component is going away, so we can't await the write.
       void this.flushDirtyBuffer();
@@ -355,6 +369,11 @@ export class EditorComponent implements OnDestroy {
     // Any pending debounced save is superseded: either we flush immediately
     // below, or the buffer is clean and there is nothing to write.
     this.clearAutoSaveTimer();
+
+    // The published selection belongs to the outgoing file; drop it (and any
+    // pending publish) before the next document loads.
+    this.clearSelectionPublishTimer();
+    this.editorSelection.clear();
 
     // A pending reconcile belongs to the previous file; drop it. An already
     // in-flight reconcile aborts on its own token/path guards. Banner state
@@ -490,6 +509,14 @@ export class EditorComponent implements OnDestroy {
       // A newer switch superseded this load — drop the stale content so a
       // slow read can never overwrite the buffer of the newer file.
       if (token !== this.loadToken) return;
+      // Collapse any selection carried over from the previous document. The
+      // minimal-change dispatch in applyContentToView maps selections through
+      // the edit, so a selection inside a region both files happen to share
+      // would survive the switch — and the debounced publish would resurrect
+      // the just-cleared selection focus in a file the user never selected in.
+      if (this.view && this.loadedPath !== path) {
+        this.view.dispatch({ selection: { anchor: 0 } });
+      }
       this.loadedPath = path;
       // Writing _content drives the mount/sync effect, which creates the view
       // (once the host has rendered) and dispatches the new document.
@@ -709,6 +736,13 @@ export class EditorComponent implements OnDestroy {
             this._content.set(update.state.doc.toString());
             this.scheduleAutoSave();
           }
+          // Selection publishing is debounced so drag-selection doesn't churn
+          // the signal. Doc changes also re-publish: edits move or collapse
+          // selections (including external applies, where CM maps the range),
+          // and the timer reads settled view state when it fires.
+          if (update.selectionSet || update.docChanged) {
+            this.scheduleSelectionPublish();
+          }
         }),
       ],
     });
@@ -742,10 +776,66 @@ export class EditorComponent implements OnDestroy {
   private destroyView(): void {
     const view = this.view;
     if (!view) return;
+    this.clearSelectionPublishTimer();
+    this.editorSelection.clear();
     view.contentDOM.removeEventListener('mousedown', this.onMouseDown);
     document.removeEventListener('mouseup', this.onMouseUp);
     view.destroy();
     this.view = null;
+  }
+
+  private scheduleSelectionPublish(): void {
+    this.clearSelectionPublishTimer();
+    this.selectionPublishTimer = setTimeout(() => {
+      this.selectionPublishTimer = null;
+      this.publishSelection();
+    }, SELECTION_PUBLISH_DEBOUNCE_MS);
+  }
+
+  private clearSelectionPublishTimer(): void {
+    if (this.selectionPublishTimer !== null) {
+      clearTimeout(this.selectionPublishTimer);
+      this.selectionPublishTimer = null;
+    }
+  }
+
+  /**
+   * Publishes the current selection to EditorSelectionService, or clears it
+   * when the selection is empty. Runs from the debounce timer, so it always
+   * reads settled view state rather than a mid-drag intermediate.
+   */
+  private publishSelection(): void {
+    // Defensive: never publish mid-external-apply (the flag is only true
+    // synchronously during dispatch, so this should be unreachable from the
+    // timer). The post-apply update schedules a fresh publish anyway.
+    if (this.isApplyingExternal) return;
+    const view = this.view;
+    const path = this.loadedPath;
+    if (!view || !path) {
+      this.editorSelection.clear();
+      return;
+    }
+    const range = view.state.selection.main;
+    if (range.empty) {
+      this.editorSelection.clear();
+      return;
+    }
+    const doc = view.state.doc;
+    // A selection ending exactly at a line start (full-line / triple-click
+    // selections include the trailing newline) selects nothing on that line,
+    // so report the previous line as the last selected one.
+    const endPos =
+      range.to > range.from && doc.lineAt(range.to).from === range.to
+        ? range.to - 1
+        : range.to;
+    this.editorSelection.set({
+      filePath: path,
+      text: view.state.sliceDoc(range.from, range.to),
+      from: range.from,
+      to: range.to,
+      startLine: doc.lineAt(range.from).number,
+      endLine: doc.lineAt(endPos).number,
+    });
   }
 
   private readonly onMouseDown = (): void => {
