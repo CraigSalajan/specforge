@@ -214,9 +214,14 @@ html, body {
 }
 .cm-editor .cm-table-source { font-family: var(--font-mono); color: var(--color-text-secondary); }
 
-/* Inline markdown rendered inside the rich table widget cells (marked.parseInline
-   output): match the editor's inline-code chip and link styling so code/links in
-   table cells look like everywhere else. */
+/* Inline markdown rendered inside the rich table widget cells (sanitized
+   marked.parseInline output, see rich-table-field.ts): match the editor's
+   inline treatments so code / links / emphasis / strikethrough / images in
+   table cells look like everywhere else (.cm-strong / .cm-emphasis /
+   .cm-strikethrough and .cm-image-widget img below). Wikilink anchors reuse
+   the .cm-link-widget.cm-wikilink-widget rules below, and task checkboxes
+   reuse .cm-editor input.cm-task-checkbox (the widget lives inside
+   .cm-editor, so both apply without table-specific duplicates). */
 .cm-editor .cm-table-widget code {
   font-family: var(--font-mono);
   font-size: 0.85em;
@@ -228,6 +233,9 @@ html, body {
 }
 .cm-editor .cm-table-widget a { color: var(--color-accent-hover); text-decoration: underline; }
 .cm-editor .cm-table-widget strong { font-weight: 700; }
+.cm-editor .cm-table-widget em { font-style: italic; }
+.cm-editor .cm-table-widget del { text-decoration: line-through; color: var(--color-text-muted); }
+.cm-editor .cm-table-widget img { max-width: 100%; height: auto; border-radius: 6px; }
 
 /* Links / wikilinks (URL hidden by linkPlugin; only the text widget shows). */
 .cm-editor .cm-link,
