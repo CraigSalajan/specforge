@@ -7,13 +7,14 @@ import {
 import {
   CONNECT_TIMEOUT_MS,
   RESPONSE_TIMEOUT_MS,
-  STREAM_IDLE_TIMEOUT_MS,
   abortedInfo,
   fetchFailureInfo,
   httpErrorInfo,
   invalidRequestInfo,
+  resolveIdleTimeoutMs,
   timeoutInfo,
   type AiErrorInfo,
+  type TimeoutKind,
 } from './ai-error';
 
 const Channels = {
@@ -66,6 +67,12 @@ interface ChatStreamRequest {
   model: string;
   messages: ChatMessage[];
   options?: ChatRequestOptions;
+  /**
+   * Bound in ms for headers and the first meaningful streamed event; values
+   * above the default also extend the mid-stream idle bound. 0 disables all
+   * request timeouts.
+   */
+  timeoutMs?: number;
 }
 
 interface ChatCompleteRequest {
@@ -79,6 +86,8 @@ interface ChatCompleteRequest {
    * renderer can abort a non-streaming completion via the ChatAbort channel.
    */
   requestId?: string;
+  /** Connect bound in ms; 0 waits indefinitely. Values above the default also extend the response bound. */
+  timeoutMs?: number;
 }
 
 interface EmbedRequest {
@@ -86,6 +95,8 @@ interface EmbedRequest {
   apiKey: string;
   model: string;
   texts: string[];
+  /** Connect bound in ms; 0 waits indefinitely. Values above the default also extend the response bound. */
+  timeoutMs?: number;
 }
 
 interface EmbedResponse {
@@ -190,6 +201,67 @@ function assertMessages(value: unknown): ChatMessage[] {
   });
 }
 
+/**
+ * Upper bound accepted for the connect watchdog. Node clamps `setTimeout`
+ * delays above 2^31 - 1 ms to 1 ms, so a larger value would make every
+ * request abort almost immediately instead of waiting longer.
+ */
+const MAX_CONNECT_TIMEOUT_MS = 2_147_483_647;
+
+/**
+ * Sanitizes the per-request connect bound: an integer within
+ * [0, {@link MAX_CONNECT_TIMEOUT_MS}] is used as-is (0 disables the connect
+ * watchdog entirely); anything else falls back to {@link CONNECT_TIMEOUT_MS}.
+ */
+function resolveConnectTimeoutMs(value: unknown): number {
+  return typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= 0 &&
+    value <= MAX_CONNECT_TIMEOUT_MS
+    ? value
+    : CONNECT_TIMEOUT_MS;
+}
+
+/**
+ * Timeout state machine shared by the AI handlers: at most one bound is armed
+ * at a time, arming replaces the previous bound, and the record of which
+ * bound fired survives for the catch block to classify the resulting
+ * AbortError. Reads go through {@link fired} because the assignment happens
+ * inside the timer callback, which control-flow analysis cannot connect to a
+ * captured `let`.
+ */
+interface AbortWatchdog<K extends TimeoutKind> {
+  /** Arms `kind` for `ms`, replacing any previously armed bound. */
+  arm(kind: K, ms: number): void;
+  /** Clears the armed bound, if any. */
+  disarm(): void;
+  /** The bound that aborted the request, or null when none fired. */
+  fired(): { kind: K; ms: number } | null;
+}
+
+function createAbortWatchdog<K extends TimeoutKind>(
+  controller: AbortController,
+): AbortWatchdog<K> {
+  let firedBound: { kind: K; ms: number } | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  return {
+    arm(kind: K, ms: number): void {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        firedBound = { kind, ms };
+        controller.abort();
+      }, ms);
+    },
+    disarm(): void {
+      if (timer) clearTimeout(timer);
+      timer = null;
+    },
+    fired(): { kind: K; ms: number } | null {
+      return firedBound;
+    },
+  };
+}
+
 function assertTexts(value: unknown): string[] {
   if (!Array.isArray(value)) {
     throw new Error('texts must be an array');
@@ -242,6 +314,7 @@ async function handleChatStream(
   const apiKey = assertNonEmptyString(req.apiKey, 'apiKey');
   const model = assertNonEmptyString(req.model, 'model');
   const messages = assertMessages(req.messages);
+  const connectTimeoutMs = resolveConnectTimeoutMs(req.timeoutMs);
 
   if (activeStreams.has(streamId)) {
     throw new Error(`Duplicate active streamId: ${streamId}`);
@@ -270,26 +343,19 @@ async function handleChatStream(
     // pieces, all keyed by the same index.
     const toolAccumulator = new Map<number, { id: string; name: string; args: string }>();
 
-    // Watchdog: aborts the fetch when the provider goes silent — first while
-    // waiting for response headers, then between streamed chunks. `timedOut`
-    // lets the catch block tell a watchdog abort apart from a user Stop.
-    let timedOut: 'connect' | 'idle' | null = null;
-    let watchdog: ReturnType<typeof setTimeout> | null = null;
-    const armWatchdog = (kind: 'connect' | 'idle', ms: number): void => {
-      if (watchdog) clearTimeout(watchdog);
-      watchdog = setTimeout(() => {
-        timedOut = kind;
-        controller.abort();
-      }, ms);
-    };
-    const disarmWatchdog = (): void => {
-      if (watchdog) clearTimeout(watchdog);
-      watchdog = null;
-    };
+    // Watchdog: aborts the fetch when the provider goes silent — while
+    // waiting for response headers and the first meaningful streamed event
+    // (both bounded by the user's connect setting), then between streamed
+    // chunks (idle bound: the larger of the default and the user's setting).
+    // With the setting at 0 no watchdog is ever armed. The fired record lets
+    // the catch block tell a watchdog abort apart from a user Stop and report
+    // the wait that was actually enforced.
+    const watchdog = createAbortWatchdog<'connect' | 'first-token' | 'idle'>(controller);
+    const idleTimeoutMs = resolveIdleTimeoutMs(connectTimeoutMs);
 
     try {
       const body = buildChatBody(model, messages, req.options, true);
-      armWatchdog('connect', CONNECT_TIMEOUT_MS);
+      if (connectTimeoutMs > 0) watchdog.arm('connect', connectTimeoutMs);
       const res = await fetch(`${trimBaseUrl(baseUrl)}/chat/completions`, {
         method: 'POST',
         headers: {
@@ -299,7 +365,12 @@ async function handleChatStream(
         body: JSON.stringify(body),
         signal: controller.signal,
       });
-      armWatchdog('idle', STREAM_IDLE_TIMEOUT_MS);
+      // Headers arrived (for SSE this happens before any token is generated).
+      // The user's bound keeps governing the wait for the first token; with 0
+      // no watchdog is armed at all. The idle bound takes over only once the
+      // first meaningful event has been parsed — SSE keep-alives, blank lines
+      // and role-only deltas must not displace this bound (see the read loop).
+      if (connectTimeoutMs > 0) watchdog.arm('first-token', connectTimeoutMs);
 
       if (!res.ok || !res.body) {
         const text = await readErrorBody(res);
@@ -312,11 +383,18 @@ async function handleChatStream(
       const decoder = new TextDecoder();
       let buffer = '';
       let finished = false;
+      // Set once the first meaningful event — a content or tool_calls delta,
+      // or a finish_reason — has been parsed ([DONE] ends the loop outright,
+      // so it needs no handoff). Until then the first-token watchdog keeps
+      // running untouched, so SSE keep-alive comments, blank lines and
+      // role-only deltas can neither reset the user's bound nor swap it for
+      // the idle bound.
+      let streamStarted = false;
 
       try {
         while (!finished) {
           const { value, done } = await reader.read();
-          armWatchdog('idle', STREAM_IDLE_TIMEOUT_MS);
+          if (streamStarted && idleTimeoutMs > 0) watchdog.arm('idle', idleTimeoutMs);
           if (done) break;
           buffer += decoder.decode(value, { stream: true });
           const newlineIdx = buffer.lastIndexOf('\n');
@@ -336,8 +414,16 @@ async function handleChatStream(
               const choice = json.choices?.[0];
               const delta = choice?.delta?.content ?? '';
               const fr = choice?.finish_reason ?? null;
+              const toolDeltas = choice?.delta?.tool_calls;
               if (fr) finishReason = fr;
-              accumulateToolCallDeltas(toolAccumulator, choice?.delta?.tool_calls);
+              accumulateToolCallDeltas(toolAccumulator, toolDeltas);
+              if (!streamStarted && (delta || fr || (toolDeltas?.length ?? 0) > 0)) {
+                // Generation has started: hand off from the first-token
+                // watchdog to the idle bound. When timeouts are disabled
+                // (idleTimeoutMs 0) nothing was armed and nothing arms now.
+                streamStarted = true;
+                if (idleTimeoutMs > 0) watchdog.arm('idle', idleTimeoutMs);
+              }
               if (delta) {
                 safeSend(sender, Channels.StreamChunk, { streamId, delta });
               }
@@ -358,14 +444,15 @@ async function handleChatStream(
 
       safeSend(sender, Channels.StreamDone, { streamId, finishReason, toolCalls });
     } catch (err) {
+      const fired = watchdog.fired();
       if (err instanceof AiRequestError) {
         safeSend(sender, Channels.StreamError, {
           streamId,
           message: err.info.message,
           error: err.info,
         });
-      } else if (isAbortError(err) && timedOut) {
-        const info = timeoutInfo(timedOut);
+      } else if (isAbortError(err) && fired) {
+        const info = timeoutInfo(fired.kind, fired.ms);
         safeSend(sender, Channels.StreamError, { streamId, message: info.message, error: info });
       } else if (isAbortError(err)) {
         // User-initiated Stop: the renderer translates this back into an
@@ -376,7 +463,7 @@ async function handleChatStream(
         safeSend(sender, Channels.StreamError, { streamId, message: info.message, error: info });
       }
     } finally {
-      disarmWatchdog();
+      watchdog.disarm();
       activeStreams.delete(streamId);
       sender.removeListener('destroyed', cleanupOnSenderDestroyed);
     }
@@ -416,11 +503,9 @@ async function handleChatComplete(
   const controller = new AbortController();
   if (requestId) activeStreams.set(requestId, { controller, sender: event.sender });
 
-  let timedOut: 'connect' | 'response' | null = null;
-  let timer = setTimeout(() => {
-    timedOut = 'connect';
-    controller.abort();
-  }, CONNECT_TIMEOUT_MS);
+  const connectTimeoutMs = resolveConnectTimeoutMs(req.timeoutMs);
+  const watchdog = createAbortWatchdog<'connect' | 'response'>(controller);
+  if (connectTimeoutMs > 0) watchdog.arm('connect', connectTimeoutMs);
 
   try {
     const body = buildChatBody(model, messages, req.options, false);
@@ -435,11 +520,11 @@ async function handleChatComplete(
     });
 
     // Headers arrived: swap the connect watchdog for a body-completion bound.
-    clearTimeout(timer);
-    timer = setTimeout(() => {
-      timedOut = 'response';
-      controller.abort();
-    }, RESPONSE_TIMEOUT_MS);
+    // 0 keeps waiting indefinitely; otherwise the user's bound may extend —
+    // but never shrink — the default response window.
+    if (connectTimeoutMs > 0) {
+      watchdog.arm('response', Math.max(connectTimeoutMs, RESPONSE_TIMEOUT_MS));
+    }
 
     if (!res.ok) {
       const text = await readErrorBody(res);
@@ -462,11 +547,12 @@ async function handleChatComplete(
     };
   } catch (err) {
     if (isAbortError(err)) {
-      return { ok: false, error: timedOut ? timeoutInfo(timedOut) : abortedInfo() };
+      const fired = watchdog.fired();
+      return { ok: false, error: fired ? timeoutInfo(fired.kind, fired.ms) : abortedInfo() };
     }
     return { ok: false, error: fetchFailureInfo(err) };
   } finally {
-    clearTimeout(timer);
+    watchdog.disarm();
     if (requestId) activeStreams.delete(requestId);
   }
 }
@@ -491,11 +577,9 @@ async function handleEmbed(_event: IpcMainInvokeEvent, req: EmbedRequest): Promi
   }
 
   const controller = new AbortController();
-  let timedOut: 'connect' | 'response' | null = null;
-  let timer = setTimeout(() => {
-    timedOut = 'connect';
-    controller.abort();
-  }, CONNECT_TIMEOUT_MS);
+  const connectTimeoutMs = resolveConnectTimeoutMs(req.timeoutMs);
+  const watchdog = createAbortWatchdog<'connect' | 'response'>(controller);
+  if (connectTimeoutMs > 0) watchdog.arm('connect', connectTimeoutMs);
 
   try {
     const res = await fetch(`${trimBaseUrl(baseUrl)}/embeddings`, {
@@ -508,11 +592,12 @@ async function handleEmbed(_event: IpcMainInvokeEvent, req: EmbedRequest): Promi
       signal: controller.signal,
     });
 
-    clearTimeout(timer);
-    timer = setTimeout(() => {
-      timedOut = 'response';
-      controller.abort();
-    }, RESPONSE_TIMEOUT_MS);
+    // Headers arrived: swap the connect watchdog for a body-completion bound.
+    // 0 keeps waiting indefinitely; otherwise the user's bound may extend —
+    // but never shrink — the default response window.
+    if (connectTimeoutMs > 0) {
+      watchdog.arm('response', Math.max(connectTimeoutMs, RESPONSE_TIMEOUT_MS));
+    }
 
     if (!res.ok) {
       const text = await readErrorBody(res);
@@ -529,11 +614,12 @@ async function handleEmbed(_event: IpcMainInvokeEvent, req: EmbedRequest): Promi
     return { ok: true, data: { vectors, model, dim } };
   } catch (err) {
     if (isAbortError(err)) {
-      return { ok: false, error: timedOut ? timeoutInfo(timedOut) : abortedInfo() };
+      const fired = watchdog.fired();
+      return { ok: false, error: fired ? timeoutInfo(fired.kind, fired.ms) : abortedInfo() };
     }
     return { ok: false, error: fetchFailureInfo(err) };
   } finally {
-    clearTimeout(timer);
+    watchdog.disarm();
   }
 }
 

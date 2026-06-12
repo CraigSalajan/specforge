@@ -164,7 +164,11 @@ export type Theme = 'dark' | 'light';
  *  - `ai.apiKey` is stored locally in the DB. Phase 4 will move it to the
  *    OS keychain (e.g. `keytar` or Electron `safeStorage`).
  *  - `ai.embeddingsEnabled` is stored as the string `'true'` / `'false'`.
- *  - `ai.topK` and `ai.maxContextChars` are stored as decimal strings.
+ *  - `ai.topK`, `ai.maxContextChars` and `ai.timeoutSeconds` are stored as
+ *    decimal strings.
+ *  - `ai.timeoutSeconds` bounds connecting and the wait for the first token;
+ *    values above the default also extend the mid-stream stall tolerance.
+ *    0 disables request timeouts entirely.
  */
 export interface Settings {
   vaultPath: string | null;
@@ -179,6 +183,7 @@ export interface Settings {
   'ai.disabledTools': string[];
   'ai.topK': number;
   'ai.maxContextChars': number;
+  'ai.timeoutSeconds': number;
   'skills.enabled': boolean;
   'skills.directories': string[];
   'skills.disabledGlobal': string[];
@@ -201,6 +206,7 @@ export const DEFAULT_SETTINGS: Settings = {
   'ai.disabledTools': [],
   'ai.topK': 6,
   'ai.maxContextChars': 12000,
+  'ai.timeoutSeconds': 30,
   'skills.enabled': true,
   'skills.directories': [],
   'skills.disabledGlobal': [],
@@ -223,6 +229,7 @@ export const SETTINGS_KEYS = [
   'ai.disabledTools',
   'ai.topK',
   'ai.maxContextChars',
+  'ai.timeoutSeconds',
   'skills.enabled',
   'skills.directories',
   'skills.disabledGlobal',
@@ -342,6 +349,12 @@ export interface AiChatStreamRequest {
   model: string;
   messages: AiChatMessage[];
   options?: AiChatRequestOptions;
+  /**
+   * Bound in ms for headers and the first meaningful streamed event; values
+   * above the default also extend the mid-stream idle bound. 0 disables all
+   * request timeouts.
+   */
+  timeoutMs?: number;
 }
 
 export interface AiChatCompleteRequest {
@@ -355,6 +368,8 @@ export interface AiChatCompleteRequest {
    * completion through the same abort channel as streams.
    */
   requestId?: string;
+  /** Connect bound in ms; 0 waits indefinitely. Values above the default also extend the response bound. */
+  timeoutMs?: number;
 }
 
 export interface AiEmbedRequest {
@@ -362,6 +377,8 @@ export interface AiEmbedRequest {
   apiKey: string;
   model: string;
   texts: string[];
+  /** Connect bound in ms; 0 waits indefinitely. Values above the default also extend the response bound. */
+  timeoutMs?: number;
 }
 
 export interface AiEmbedResponse {

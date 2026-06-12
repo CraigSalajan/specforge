@@ -209,6 +209,17 @@ type SettingsSection = 'workspace' | 'ai' | 'index' | 'tools' | 'skills';
                     (ngModelChange)="patch({ 'ai.maxContextChars': asPositiveInt($event, 12000) })" />
                   <p class="mt-1 text-xs text-text-muted">Truncates excerpts proportionally when over budget.</p>
                 </div>
+                <div>
+                  <label class="mb-1 block text-xs text-text-secondary">Request timeout (seconds)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    max="3600"
+                    class="w-full rounded border border-border-subtle bg-surface-2 px-2 py-1.5 font-mono text-xs text-text-primary focus:border-accent focus:outline-none"
+                    [ngModel]="draft()['ai.timeoutSeconds']"
+                    (ngModelChange)="patch({ 'ai.timeoutSeconds': asNonNegativeInt($event, 30) })" />
+                  <p class="mt-1 text-xs text-text-muted">Bounds connecting and the wait for the first token; larger values also extend mid-stream stall tolerance. 0 disables request timeouts.</p>
+                </div>
               </div>
             </section>
             }
@@ -625,14 +636,23 @@ export class SettingsModalComponent {
     await this.embeddingIndexer.rebuild(vaultPath);
   }
 
+  /** Coerces a numeric form value (number or decimal string) to a number. */
+  private coerceNumber(value: unknown): number {
+    return typeof value === 'number'
+      ? value
+      : typeof value === 'string'
+        ? Number.parseInt(value, 10)
+        : Number.NaN;
+  }
+
   asPositiveInt(value: unknown, fallback: number): number {
-    const n =
-      typeof value === 'number'
-        ? value
-        : typeof value === 'string'
-          ? Number.parseInt(value, 10)
-          : Number.NaN;
+    const n = this.coerceNumber(value);
     return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+  }
+
+  asNonNegativeInt(value: unknown, fallback: number): number {
+    const n = this.coerceNumber(value);
+    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback;
   }
 
   async onSave(): Promise<void> {

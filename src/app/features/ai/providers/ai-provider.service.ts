@@ -27,6 +27,7 @@ export class AiProviderService {
       apiKey: s['ai.apiKey'] ?? '',
       chatModel: s['ai.chatModel'] || 'gpt-4o-mini',
       embeddingModel: s['ai.embeddingModel'] || 'text-embedding-3-small',
+      timeoutMs: (s['ai.timeoutSeconds'] ?? 30) * 1000,
     };
   };
 

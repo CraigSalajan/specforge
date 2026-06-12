@@ -90,6 +90,7 @@ interface AiChatStreamRequestDto {
   model: string;
   messages: AiChatMessageDto[];
   options?: AiChatRequestOptionsDto;
+  timeoutMs?: number;
 }
 
 interface AiChatCompleteRequestDto {
@@ -99,6 +100,7 @@ interface AiChatCompleteRequestDto {
   messages: AiChatMessageDto[];
   options?: AiChatRequestOptionsDto;
   requestId?: string;
+  timeoutMs?: number;
 }
 
 interface AiEmbedRequestDto {
@@ -106,6 +108,7 @@ interface AiEmbedRequestDto {
   apiKey: string;
   model: string;
   texts: string[];
+  timeoutMs?: number;
 }
 
 interface AiEmbedResponseDto {

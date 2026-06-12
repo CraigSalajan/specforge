@@ -33,11 +33,21 @@ export interface AiErrorInfo {
 /** Time allowed for the provider to return response headers. */
 export const CONNECT_TIMEOUT_MS = 30_000;
 
-/** Max gap between streamed chunks before the stream counts as stalled. */
+/** Default max gap between streamed chunks before the stream counts as stalled. */
 export const STREAM_IDLE_TIMEOUT_MS = 60_000;
 
 /** Time allowed for a non-streaming response body to finish after headers. */
 export const RESPONSE_TIMEOUT_MS = 120_000;
+
+/**
+ * Effective mid-stream idle bound derived from the user's connect bound.
+ * Mirrors the non-streaming response rule: the user's bound may extend — but
+ * never shrink — the default idle window, and 0 disables the bound entirely
+ * (the stream waits indefinitely).
+ */
+export function resolveIdleTimeoutMs(connectTimeoutMs: number): number {
+  return connectTimeoutMs === 0 ? 0 : Math.max(STREAM_IDLE_TIMEOUT_MS, connectTimeoutMs);
+}
 
 /** Upper bound for the human-readable summary surfaced to the UI. */
 const MAX_MESSAGE_CHARS = 300;
@@ -158,14 +168,33 @@ export function fetchFailureInfo(err: unknown): AiErrorInfo {
   };
 }
 
-/** A timeout enforced by the main process (watchdog-triggered abort). */
-export function timeoutInfo(kind: 'connect' | 'idle' | 'response'): AiErrorInfo {
+/** Which watchdog fired: waiting for headers, the first streamed token, a
+ * mid-stream chunk, or a non-streaming response body. */
+export type TimeoutKind = 'connect' | 'first-token' | 'idle' | 'response';
+
+/** Renders a watchdog bound for the UI, e.g. 90_000 → "90 seconds". */
+function formatSeconds(ms: number): string {
+  const seconds = ms / 1000;
+  const rounded = Number.isInteger(seconds) ? seconds : Math.round(seconds * 10) / 10;
+  return `${rounded} second${rounded === 1 ? '' : 's'}`;
+}
+
+/**
+ * A timeout enforced by the main process (watchdog-triggered abort).
+ * `timeoutMs` is the bound that actually fired — the per-request value from
+ * Settings for `connect`/`first-token`, or the effective fixed bound for
+ * `idle`/`response` — so the message always reports the real wait.
+ */
+export function timeoutInfo(kind: TimeoutKind, timeoutMs: number): AiErrorInfo {
+  const duration = formatSeconds(timeoutMs);
   const message =
     kind === 'connect'
-      ? `The provider did not respond within ${CONNECT_TIMEOUT_MS / 1000} seconds.`
-      : kind === 'idle'
-        ? `The stream stalled — no data received for ${STREAM_IDLE_TIMEOUT_MS / 1000} seconds.`
-        : `The provider did not finish responding within ${RESPONSE_TIMEOUT_MS / 1000} seconds.`;
+      ? `The provider did not respond within ${duration}.`
+      : kind === 'first-token'
+        ? `The provider did not start responding within ${duration}.`
+        : kind === 'idle'
+          ? `The stream stalled — no data received for ${duration}.`
+          : `The provider did not finish responding within ${duration}.`;
   return { code: 'timeout', retryable: true, message };
 }
 

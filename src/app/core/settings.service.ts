@@ -46,6 +46,7 @@ export class SettingsService {
   readonly disabledTools = computed(() => this._settings()['ai.disabledTools']);
   readonly aiTopK = computed(() => this._settings()['ai.topK']);
   readonly aiMaxContextChars = computed(() => this._settings()['ai.maxContextChars']);
+  readonly aiTimeoutSeconds = computed(() => this._settings()['ai.timeoutSeconds']);
   readonly skillsEnabled = computed(() => this._settings()['skills.enabled']);
   readonly skillDirectories = computed(() => this._settings()['skills.directories']);
   readonly disabledGlobalSkills = computed(() => this._settings()['skills.disabledGlobal']);
@@ -237,6 +238,15 @@ export class SettingsService {
           : DEFAULT_SETTINGS['ai.maxContextChars'];
         return;
       }
+      case 'ai.timeoutSeconds': {
+        // 0 is valid and means "wait indefinitely"; only negative or
+        // malformed values fall back to the default.
+        const n = Number.parseInt(raw, 10);
+        target['ai.timeoutSeconds'] = Number.isFinite(n) && n >= 0
+          ? n
+          : DEFAULT_SETTINGS['ai.timeoutSeconds'];
+        return;
+      }
       case 'ui.leftPaneWidth': {
         const n = Number.parseInt(raw, 10);
         target['ui.leftPaneWidth'] = Number.isFinite(n) && n >= 180 && n <= 600
@@ -274,6 +284,7 @@ export class SettingsService {
       'ai.disabledTools': JSON.stringify(s['ai.disabledTools'] ?? []),
       'ai.topK': String(s['ai.topK']),
       'ai.maxContextChars': String(s['ai.maxContextChars']),
+      'ai.timeoutSeconds': String(s['ai.timeoutSeconds']),
       'skills.enabled': s['skills.enabled'] ? 'true' : 'false',
       'skills.directories': JSON.stringify(s['skills.directories'] ?? []),
       'skills.disabledGlobal': JSON.stringify(s['skills.disabledGlobal'] ?? []),

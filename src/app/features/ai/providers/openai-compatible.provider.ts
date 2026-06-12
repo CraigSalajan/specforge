@@ -26,6 +26,12 @@ export interface OpenAiCompatibleConfig {
   apiKey: string;
   chatModel: string;
   embeddingModel: string;
+  /**
+   * Bound in ms for connecting and, for streams, the first token; values
+   * above the default also extend the mid-stream idle bound. 0 disables all
+   * request timeouts.
+   */
+  timeoutMs: number;
 }
 
 export type OpenAiConfigGetter = () => OpenAiCompatibleConfig;
@@ -150,6 +156,7 @@ export class OpenAiCompatibleChatProvider implements ChatProvider {
       model: opts.model ?? cfg.chatModel,
       messages,
       options: toRequestOptions(opts),
+      timeoutMs: cfg.timeoutMs,
     };
 
     try {
@@ -230,6 +237,7 @@ export class OpenAiCompatibleChatProvider implements ChatProvider {
       model: opts.model ?? cfg.chatModel,
       messages,
       options: toRequestOptions(opts),
+      timeoutMs: cfg.timeoutMs,
     };
 
     if (opts.signal?.aborted) {
@@ -295,6 +303,7 @@ export class OpenAiCompatibleEmbeddingProvider implements EmbeddingProvider {
         apiKey: cfg.apiKey,
         model: cfg.embeddingModel,
         texts,
+        timeoutMs: cfg.timeoutMs,
       });
     } catch (err) {
       throw new AiHarnessError(toAiErrorInfo(err));

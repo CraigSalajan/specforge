@@ -1,11 +1,13 @@
 import {
   CONNECT_TIMEOUT_MS,
+  RESPONSE_TIMEOUT_MS,
   STREAM_IDLE_TIMEOUT_MS,
   extractProviderMessage,
   fetchFailureInfo,
   httpErrorInfo,
   invalidRequestInfo,
   parseRetryAfterMs,
+  resolveIdleTimeoutMs,
   timeoutInfo,
   truncateErrorMessage,
 } from '../../../../../electron/ipc/ai-error';
@@ -172,15 +174,60 @@ describe('ai-error classification', () => {
   });
 
   describe('timeoutInfo', () => {
-    it('produces retryable timeout errors mentioning the watchdog bound', () => {
-      const connect = timeoutInfo('connect');
+    it('produces retryable timeout errors reporting the bound that fired', () => {
+      const connect = timeoutInfo('connect', CONNECT_TIMEOUT_MS);
       expect(connect.code).toBe('timeout');
       expect(connect.retryable).toBe(true);
       expect(connect.message).toContain(String(CONNECT_TIMEOUT_MS / 1000));
+    });
 
-      const idle = timeoutInfo('idle');
+    it('uses the per-request connect bound when one is provided', () => {
+      const connect = timeoutInfo('connect', 90_000);
+      expect(connect.code).toBe('timeout');
+      expect(connect.retryable).toBe(true);
+      expect(connect.message).toContain('90 seconds');
+    });
+
+    it('reports the user bound when the provider never starts streaming', () => {
+      const info = timeoutInfo('first-token', 45_000);
+      expect(info.code).toBe('timeout');
+      expect(info.retryable).toBe(true);
+      expect(info.message).toContain('did not start responding');
+      expect(info.message).toContain('45 seconds');
+    });
+
+    it('reports the default 60-second idle bound for mid-stream stalls', () => {
+      const idle = timeoutInfo('idle', STREAM_IDLE_TIMEOUT_MS);
       expect(idle.code).toBe('timeout');
-      expect(idle.message).toContain(String(STREAM_IDLE_TIMEOUT_MS / 1000));
+      expect(idle.retryable).toBe(true);
+      expect(idle.message).toContain('stalled');
+      expect(idle.message).toContain('60 seconds');
+    });
+
+    it('reports max(user bound, default) for response timeouts', () => {
+      const extended = timeoutInfo('response', Math.max(300_000, RESPONSE_TIMEOUT_MS));
+      expect(extended.message).toContain('300 seconds');
+
+      const floored = timeoutInfo('response', Math.max(10_000, RESPONSE_TIMEOUT_MS));
+      expect(floored.message).toContain('120 seconds');
+    });
+
+    it('formats a one-second bound in the singular', () => {
+      expect(timeoutInfo('connect', 1_000).message).toContain('1 second.');
+    });
+  });
+
+  describe('resolveIdleTimeoutMs', () => {
+    it('disables the idle bound entirely when the connect bound is 0', () => {
+      expect(resolveIdleTimeoutMs(0)).toBe(0);
+    });
+
+    it('floors smaller connect bounds at the default idle bound', () => {
+      expect(resolveIdleTimeoutMs(30_000)).toBe(STREAM_IDLE_TIMEOUT_MS);
+    });
+
+    it('lets a larger connect bound extend mid-stream stall tolerance', () => {
+      expect(resolveIdleTimeoutMs(300_000)).toBe(300_000);
     });
   });
 
