@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-12
+
+### Added
+
+- Selection-focused AI: select text in the editor and your next Ask or Edit turn focuses on that selection. A dismissible `Selection · L4–L9` chip appears in the chat context bar so you always know it's in play, edit proposals scope their changes to the selected range (while still returning the complete file for a safe diff), and the selection also sharpens context retrieval.
+- Configurable AI request timeout in Settings → AI Provider (default 30 seconds; 0 disables). It bounds connecting and the wait for the first token — larger values also extend the mid-stream stall tolerance — and timeout errors now say which phase timed out.
+- The open file now live-reloads when it changes on disk: clean buffers reload in place with cursor and scroll preserved, unsaved edits are merged with the disk version, and true conflicts surface a quiet "Keep mine / Use disk" banner with auto-save suspended. Files deleted on disk keep their buffer with a restore option, and AI proposals merge onto the current disk state instead of overwriting it.
+
+### Changed
+
+- Table cells in the editor now render like the rest of the document: task checkboxes are clickable and toggle the underlying markdown, wikilinks display as links, regular links open in a new tab, and emphasis, strikethrough, and images render properly.
+
+### Security
+
+- Inline markdown rendered inside editor table cells is now sanitized with DOMPurify (XSS hardening), matching the app's other markdown surfaces.
+
 ## [0.3.0] - 2026-06-09
 
 ### Added
@@ -51,7 +67,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - DevTools are disabled in published production builds (F12 / Ctrl+Shift+I and the "Toggle Developer Tools" menu item are no-ops in official release builds). Local development and self-built packages keep DevTools available.
 
-[Unreleased]: https://github.com/CraigSalajan/specforge/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/CraigSalajan/specforge/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/CraigSalajan/specforge/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/CraigSalajan/specforge/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/CraigSalajan/specforge/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/CraigSalajan/specforge/releases/tag/v0.2.1
