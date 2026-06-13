@@ -345,10 +345,16 @@ export class EditorComponent implements OnDestroy {
     try {
       const result = await this.pdfExport.exportMarkdown(this._content(), path);
       if (!result.success && !result.canceled) {
-        window.alert('Failed to export PDF: ' + (result.error ?? 'Unknown error'));
+        await this.confirmDialog.notice({
+          title: 'PDF export failed',
+          message: result.error ?? 'Unknown error',
+        });
       }
     } catch (err) {
-      window.alert('Failed to export PDF: ' + (err instanceof Error ? err.message : String(err)));
+      await this.confirmDialog.notice({
+        title: 'PDF export failed',
+        message: err instanceof Error ? err.message : String(err),
+      });
     } finally {
       this.exporting.set(false);
     }
@@ -469,8 +475,13 @@ export class EditorComponent implements OnDestroy {
       this.saved.emit({ path });
     } catch (err) {
       // Buffer and dirty state are left untouched, so nothing is lost and the
-      // user can retry (manual save or the next auto-save attempt).
-      window.alert('Failed to save: ' + (err instanceof Error ? err.message : String(err)));
+      // user can retry (manual save or the next auto-save attempt). The notice
+      // is fire-and-forget: awaiting dismissal here would stall the serialized
+      // write chain behind user input.
+      void this.confirmDialog.notice({
+        title: 'Save failed',
+        message: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 
@@ -524,7 +535,10 @@ export class EditorComponent implements OnDestroy {
       this._savedContent.set(content);
       this.resetDiskSyncState();
     } catch (err) {
-      window.alert('Failed to read file: ' + (err instanceof Error ? err.message : String(err)));
+      void this.confirmDialog.notice({
+        title: 'Could not read file',
+        message: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 

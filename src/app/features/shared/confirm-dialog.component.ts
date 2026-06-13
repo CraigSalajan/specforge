@@ -37,10 +37,12 @@ import { ConfirmDialogService } from '../../core/confirm-dialog.service';
           </div>
 
           <footer class="flex items-center justify-end gap-2 border-t border-border-subtle bg-surface-2 px-4 py-2.5">
-            <button
-              type="button"
-              class="rounded px-3 py-1.5 text-xs text-text-secondary hover:bg-surface-3 hover:text-text-primary"
-              (click)="onCancel()">{{ req.cancelLabel ?? 'Cancel' }}</button>
+            @if (!req.noticeOnly) {
+              <button
+                type="button"
+                class="rounded px-3 py-1.5 text-xs text-text-secondary hover:bg-surface-3 hover:text-text-primary"
+                (click)="onCancel()">{{ req.cancelLabel ?? 'Cancel' }}</button>
+            }
             <button
               #confirmBtn
               type="button"

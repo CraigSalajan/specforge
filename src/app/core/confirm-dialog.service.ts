@@ -11,6 +11,11 @@ export interface ConfirmDialogRequest {
   confirmLabel?: string;
   cancelLabel?: string;
   danger?: boolean;
+  /**
+   * Single-affordance notice: the cancel button is hidden and the dialog only
+   * acknowledges (used for error notices instead of `window.alert`).
+   */
+  noticeOnly?: boolean;
 }
 
 /**
@@ -40,6 +45,20 @@ export class ConfirmDialogService {
     this._request.set(options);
     return new Promise<boolean>((resolve) => {
       this.resolver = resolve;
+    });
+  }
+
+  /**
+   * Single-OK notice (replaces `window.alert`, which is unreliable inside the
+   * Electron renderer). Resolves once the user dismisses it — via the OK
+   * button, the × close, Escape, or the scrim.
+   */
+  async notice(options: { title: string; message: string; dismissLabel?: string }): Promise<void> {
+    await this.confirm({
+      title: options.title,
+      message: options.message,
+      confirmLabel: options.dismissLabel ?? 'OK',
+      noticeOnly: true,
     });
   }
 
