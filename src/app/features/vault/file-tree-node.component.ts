@@ -1,5 +1,14 @@
-import { ChangeDetectionStrategy, Component, computed, input, output, signal } from '@angular/core';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  computed,
+  inject,
+  input,
+  output,
+  signal,
+} from '@angular/core';
 import type { FileNode } from '../../shared/types';
+import { TreeExpansionService } from './tree-expansion.service';
 
 @Component({
   selector: 'app-file-tree-node',
@@ -83,6 +92,11 @@ import type { FileNode } from '../../shared/types';
   `,
 })
 export class FileTreeNodeComponent {
+  // Expansion state lives in TreeExpansionService (persisted per vault),
+  // not in the node: components are recreated on tree refreshes and
+  // restarts, while the service's collapsed set survives both.
+  private readonly expansion = inject(TreeExpansionService);
+
   readonly node = input.required<FileNode>();
   readonly activePath = input<string | null>(null);
   readonly depth = input<number>(0);
@@ -95,8 +109,7 @@ export class FileTreeNodeComponent {
   readonly contextMenuRequested = output<{ node: FileNode; x: number; y: number }>();
   readonly moveRequested = output<{ sourcePath: string; targetDir: string }>();
 
-  private readonly _expanded = signal(true);
-  readonly isExpanded = this._expanded.asReadonly();
+  readonly isExpanded = computed(() => !this.expansion.isCollapsed(this.node().path));
 
   private readonly _dragOver = signal(false);
   readonly isDragOver = this._dragOver.asReadonly();
@@ -107,7 +120,7 @@ export class FileTreeNodeComponent {
   onClick(): void {
     const n = this.node();
     if (n.isDirectory) {
-      this._expanded.update((v) => !v);
+      this.expansion.toggle(n.path);
     } else {
       this.fileSelected.emit(n.path);
     }
@@ -131,13 +144,13 @@ export class FileTreeNodeComponent {
 
   onCreateFileInside(evt: MouseEvent): void {
     evt.stopPropagation();
-    this._expanded.set(true);
+    this.expansion.expand(this.node().path);
     this.createFileRequested.emit(this.node().path);
   }
 
   onCreateFolderInside(evt: MouseEvent): void {
     evt.stopPropagation();
-    this._expanded.set(true);
+    this.expansion.expand(this.node().path);
     this.createFolderRequested.emit(this.node().path);
   }
 

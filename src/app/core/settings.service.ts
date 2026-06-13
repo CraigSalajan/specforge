@@ -52,6 +52,9 @@ export class SettingsService {
   readonly disabledUserSkills = computed(() => this._settings()['skills.disabledUser']);
   readonly leftPaneWidth = computed(() => this._settings()['ui.leftPaneWidth']);
   readonly rightPaneWidth = computed(() => this._settings()['ui.rightPaneWidth']);
+  readonly lastOpenFile = computed(() => this._settings()['ui.lastOpenFile']);
+  readonly collapsedFolders = computed(() => this._settings()['ui.collapsedFolders']);
+  readonly openTabs = computed(() => this._settings()['ui.openTabs']);
 
   constructor() {
     // SpecForge is dark-only (see DESIGN.md). The Tailwind `dark` variant in
@@ -260,6 +263,38 @@ export class SettingsService {
           : DEFAULT_SETTINGS['ui.rightPaneWidth'];
         return;
       }
+      case 'ui.lastOpenFile':
+        target['ui.lastOpenFile'] = raw.length === 0 ? null : raw;
+        return;
+      case 'ui.collapsedFolders': {
+        // Stored as a JSON array of normalized vault-relative folder paths.
+        // Parse defensively: any malformed value falls back to "nothing
+        // collapsed" (the all-expanded default).
+        try {
+          const parsed: unknown = JSON.parse(raw);
+          target['ui.collapsedFolders'] =
+            Array.isArray(parsed) && parsed.every((v) => typeof v === 'string')
+              ? (parsed as string[])
+              : [];
+        } catch {
+          target['ui.collapsedFolders'] = [];
+        }
+        return;
+      }
+      case 'ui.openTabs': {
+        // Stored as a JSON array of vault-relative file paths in tab order.
+        // Parse defensively: any malformed value falls back to "no tabs".
+        try {
+          const parsed: unknown = JSON.parse(raw);
+          target['ui.openTabs'] =
+            Array.isArray(parsed) && parsed.every((v) => typeof v === 'string')
+              ? (parsed as string[])
+              : [];
+        } catch {
+          target['ui.openTabs'] = [];
+        }
+        return;
+      }
       case 'ai.baseUrl':
       case 'ai.apiKey':
       case 'ai.chatModel':
@@ -291,6 +326,9 @@ export class SettingsService {
       'skills.disabledUser': JSON.stringify(s['skills.disabledUser'] ?? []),
       'ui.leftPaneWidth': String(s['ui.leftPaneWidth']),
       'ui.rightPaneWidth': String(s['ui.rightPaneWidth']),
+      'ui.lastOpenFile': s['ui.lastOpenFile'] ?? '',
+      'ui.collapsedFolders': JSON.stringify(s['ui.collapsedFolders'] ?? []),
+      'ui.openTabs': JSON.stringify(s['ui.openTabs'] ?? []),
     };
   }
 }

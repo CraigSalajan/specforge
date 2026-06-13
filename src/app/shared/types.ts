@@ -237,6 +237,28 @@ export interface Settings {
   'skills.disabledUser': string[];
   'ui.leftPaneWidth': number;
   'ui.rightPaneWidth': number;
+  /**
+   * Vault-relative path (forward slashes, original casing) of the file to
+   * restore on launch, or null. Per-vault UI state: VaultService clears it
+   * when the vault is switched or closed, so it can never reopen a file from
+   * a different vault.
+   */
+  'ui.lastOpenFile': string | null;
+  /**
+   * Normalized (lowercase, forward-slash) vault-relative paths of collapsed
+   * file-tree folders, stored as a JSON array. The tree defaults to
+   * all-expanded, so only the collapsed set is persisted. Per-vault UI state:
+   * cleared on vault switch/close (same guard as `ui.lastOpenFile`).
+   */
+  'ui.collapsedFolders': string[];
+  /**
+   * Vault-relative paths (forward slashes, original casing) of the open
+   * editor tabs in tab-bar order, stored as a JSON array. The active tab is
+   * tracked separately via `ui.lastOpenFile`. Per-vault UI state: cleared on
+   * vault switch/close (same guard as `ui.lastOpenFile`); entries whose files
+   * no longer exist are pruned on restore.
+   */
+  'ui.openTabs': string[];
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -260,6 +282,9 @@ export const DEFAULT_SETTINGS: Settings = {
   'skills.disabledUser': [],
   'ui.leftPaneWidth': 256,
   'ui.rightPaneWidth': 320,
+  'ui.lastOpenFile': null,
+  'ui.collapsedFolders': [],
+  'ui.openTabs': [],
 };
 
 export const SETTINGS_KEYS = [
@@ -283,6 +308,9 @@ export const SETTINGS_KEYS = [
   'skills.disabledUser',
   'ui.leftPaneWidth',
   'ui.rightPaneWidth',
+  'ui.lastOpenFile',
+  'ui.collapsedFolders',
+  'ui.openTabs',
 ] as const;
 
 export type SettingsKey = (typeof SETTINGS_KEYS)[number];
