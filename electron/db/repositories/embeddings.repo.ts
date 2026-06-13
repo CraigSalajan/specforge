@@ -171,6 +171,8 @@ export interface SimilaritySearchHit {
   headingPath: string;
   excerpt: string;
   score: number;
+  /** 1-based first line of the matched chunk (its heading line). */
+  startLine: number;
 }
 
 export interface SearchFilter {
@@ -237,6 +239,7 @@ export function searchByVector(
               f.rel_path AS rel_path,
               mc.heading_path AS heading_path,
               mc.content AS content,
+              mc.start_line AS start_line,
               e.vector AS vector,
               e.dim AS dim
          FROM embeddings e
@@ -251,6 +254,7 @@ export function searchByVector(
       rel_path: string;
       heading_path: string;
       content: string;
+      start_line: number;
       vector: Uint8Array;
       dim: number;
     }>;
@@ -263,6 +267,7 @@ export function searchByVector(
       headingPath: r.heading_path,
       excerpt: buildExcerpt(r.content),
       score,
+      startLine: r.start_line,
     };
   });
 

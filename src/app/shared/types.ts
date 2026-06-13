@@ -129,6 +129,12 @@ export interface IndexSearchHit {
   headingPath: string;
   excerpt: string;
   score: number;
+  /**
+   * 1-based first line of the matched chunk (its heading line). Optional so
+   * payloads produced before line tracking still typecheck; current index
+   * searches always populate it.
+   */
+  startLine?: number;
 }
 
 export type SearchResult = IndexSearchHit;

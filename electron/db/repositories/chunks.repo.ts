@@ -45,6 +45,8 @@ export interface SearchHit {
   headingPath: string;
   excerpt: string;
   score: number;
+  /** 1-based first line of the matched chunk (its heading line). */
+  startLine: number;
 }
 
 export interface SearchFilter {
@@ -143,6 +145,7 @@ function searchChunksFts(
       `SELECT f.rel_path AS rel_path,
               markdown_chunks.heading_path AS heading_path,
               markdown_chunks.content AS content,
+              markdown_chunks.start_line AS start_line,
               bm25(markdown_chunks_fts) AS score
        FROM markdown_chunks_fts
        JOIN markdown_chunks ON markdown_chunks.id = markdown_chunks_fts.rowid
@@ -156,6 +159,7 @@ function searchChunksFts(
       rel_path: string;
       heading_path: string;
       content: string;
+      start_line: number;
       score: number;
     }>;
 
@@ -165,6 +169,7 @@ function searchChunksFts(
     excerpt: buildExcerpt(r.content, query),
     // bm25 returns lower=better; invert for caller convenience.
     score: -r.score,
+    startLine: r.start_line,
   }));
 }
 
@@ -181,7 +186,8 @@ function searchChunksLike(
     .prepare(
       `SELECT f.rel_path AS rel_path,
               markdown_chunks.heading_path AS heading_path,
-              markdown_chunks.content AS content
+              markdown_chunks.content AS content,
+              markdown_chunks.start_line AS start_line
        FROM markdown_chunks
        JOIN files f ON f.id = markdown_chunks.file_id
        WHERE f.vault_path = ?
@@ -193,6 +199,7 @@ function searchChunksLike(
       rel_path: string;
       heading_path: string;
       content: string;
+      start_line: number;
     }>;
 
   const qLower = query.toLowerCase();
@@ -206,6 +213,7 @@ function searchChunksLike(
         headingPath: r.heading_path,
         excerpt: buildExcerpt(r.content, query),
         score: occurrences + headingHit * 2,
+        startLine: r.start_line,
       };
     })
     .sort((a, b) => b.score - a.score);
