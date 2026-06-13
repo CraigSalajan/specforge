@@ -13,6 +13,7 @@ import { DomSanitizer, type SafeHtml } from '@angular/platform-browser';
 import DOMPurify from 'dompurify';
 import { Marked } from 'marked';
 import { type AiErrorInfo, type ChatSession } from '../../shared/types';
+import { renderHighlightedCode } from '../../shared/markdown-code';
 import { EditorSelectionService, resolveActiveSelection } from '../../core/editor-selection.service';
 import { VaultService } from '../../core/vault.service';
 import { UiStateService } from '../../core/ui-state.service';
@@ -313,8 +314,14 @@ export class AiPanelComponent {
   // options never leak into the global `marked` used by the proposal preview /
   // rich-table renderers. `breaks: true` turns the single newlines AI prose
   // favors into line breaks instead of collapsing them into one monolithic
-  // paragraph.
-  private readonly marked = new Marked({ gfm: true, breaks: true });
+  // paragraph. Code blocks are token-colored by the shared highlight.js
+  // renderer (hljs only adds class attributes, which the DOMPurify pass in
+  // renderAssistant preserves); the dark palette lives in styles.css.
+  private readonly marked = new Marked({
+    gfm: true,
+    breaks: true,
+    renderer: { code: renderHighlightedCode },
+  });
 
   /**
    * Memo cache for rendered assistant markdown, keyed by the raw content

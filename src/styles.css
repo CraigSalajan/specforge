@@ -162,29 +162,31 @@ html, body {
 .cm-editor .cm-codeblock-copy:hover { color: var(--color-text-primary); background: var(--color-border-subtle); }
 .cm-editor .cm-codeblock-copy-success { color: #34d399; }
 
-/* highlight.js token colors. The package emits hljs-* classes inside rendered
-   code blocks but ships no theme CSS, so we supply a compact dark palette that
-   reads well on --color-surface-2. (Token classes verified from the bundle.) */
-.cm-editor .hljs-keyword,
-.cm-editor .hljs-selector-tag,
-.cm-editor .hljs-literal,
-.cm-editor .hljs-operator { color: var(--color-accent-hover); }
-.cm-editor .hljs-string,
-.cm-editor .hljs-selector-class,
-.cm-editor .hljs-selector-id { color: #6ee7a8; }
-.cm-editor .hljs-comment { color: var(--color-text-muted); font-style: italic; }
-.cm-editor .hljs-number,
-.cm-editor .hljs-meta { color: #f0a868; }
-.cm-editor .hljs-title,
-.cm-editor .hljs-function,
-.cm-editor .hljs-name { color: #7dd3fc; }
-.cm-editor .hljs-attr,
-.cm-editor .hljs-attribute,
-.cm-editor .hljs-variable,
-.cm-editor .hljs-params { color: var(--color-text-primary); }
-.cm-editor .hljs-built_in,
-.cm-editor .hljs-class,
-.cm-editor .hljs-punctuation { color: var(--color-text-secondary); }
+/* highlight.js token colors. Shared by the editor's rendered code blocks
+   (codemirror-live-markdown emits hljs-* classes but ships no theme CSS) and
+   the AI chat bubbles (.prose-ai code blocks are highlighted via the shared
+   marked renderer in src/app/shared/markdown-code.ts). One compact dark
+   palette that reads well on --color-surface-2 / surface-3. */
+:is(.cm-editor, .prose-ai) .hljs-keyword,
+:is(.cm-editor, .prose-ai) .hljs-selector-tag,
+:is(.cm-editor, .prose-ai) .hljs-literal,
+:is(.cm-editor, .prose-ai) .hljs-operator { color: var(--color-accent-hover); }
+:is(.cm-editor, .prose-ai) .hljs-string,
+:is(.cm-editor, .prose-ai) .hljs-selector-class,
+:is(.cm-editor, .prose-ai) .hljs-selector-id { color: #6ee7a8; }
+:is(.cm-editor, .prose-ai) .hljs-comment { color: var(--color-text-muted); font-style: italic; }
+:is(.cm-editor, .prose-ai) .hljs-number,
+:is(.cm-editor, .prose-ai) .hljs-meta { color: #f0a868; }
+:is(.cm-editor, .prose-ai) .hljs-title,
+:is(.cm-editor, .prose-ai) .hljs-function,
+:is(.cm-editor, .prose-ai) .hljs-name { color: #7dd3fc; }
+:is(.cm-editor, .prose-ai) .hljs-attr,
+:is(.cm-editor, .prose-ai) .hljs-attribute,
+:is(.cm-editor, .prose-ai) .hljs-variable,
+:is(.cm-editor, .prose-ai) .hljs-params { color: var(--color-text-primary); }
+:is(.cm-editor, .prose-ai) .hljs-built_in,
+:is(.cm-editor, .prose-ai) .hljs-class,
+:is(.cm-editor, .prose-ai) .hljs-punctuation { color: var(--color-text-secondary); }
 
 /* Tables (rendered HTML widget: <table> with header row + cells). */
 .cm-editor .cm-table-widget {

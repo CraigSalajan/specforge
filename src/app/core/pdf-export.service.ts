@@ -1,18 +1,9 @@
 import { Injectable, inject } from '@angular/core';
 import DOMPurify from 'dompurify';
-import { Marked, type Tokens } from 'marked';
-import hljs from 'highlight.js/lib/common';
+import { Marked } from 'marked';
+import { renderHighlightedCode } from '../shared/markdown-code';
 import { IpcService } from './ipc.service';
 import type { ExportPdfResult } from '../shared/types';
-
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
 
 /**
  * Renders a markdown document to sanitized, syntax-highlighted HTML and hands
@@ -24,21 +15,11 @@ export class PdfExportService {
   private readonly ipc = inject(IpcService);
 
   // Dedicated Marked instance so the highlighted-code renderer never leaks
-  // into the global `marked` used by the AI panel / rich-table renderers.
+  // into the global `marked` used by the rich-table renderer. The renderer
+  // itself is shared with the AI chat (src/app/shared/markdown-code.ts).
   private readonly marked = new Marked({
     gfm: true,
-    renderer: {
-      // marked v18 renderer methods receive token objects (Tokens.Code).
-      code: ({ text, lang }: Tokens.Code): string => {
-        const language = (lang ?? '').trim().split(/\s+/)[0];
-        const highlighted =
-          language && hljs.getLanguage(language)
-            ? hljs.highlight(text, { language }).value
-            : escapeHtml(text);
-        const langClass = language ? ` language-${escapeHtml(language)}` : '';
-        return `<pre><code class="hljs${langClass}">${highlighted}</code></pre>\n`;
-      },
-    },
+    renderer: { code: renderHighlightedCode },
   });
 
   async exportMarkdown(markdown: string, filePath: string): Promise<ExportPdfResult> {
