@@ -343,10 +343,21 @@ export class EditorComponent implements OnDestroy {
     // ALREADY-open file changes no other signal, and this effect is where the
     // view is guaranteed to hold the target document.
     effect(() => {
+      // filePath() is read FIRST so this effect both re-runs across open/close
+      // transitions and can decline to (re)mount a view while no file is open.
+      // That guard is essential: closing the last file calls destroyView(), but
+      // the _content.set('') in that same teardown re-triggers this effect while
+      // the #editorHost view-child can still resolve to the OLD host for one
+      // flush (the @if has not detached it yet). Building a view there would
+      // orphan it in a to-be-detached host, and the next open would find
+      // ensureView() short-circuiting on that non-null view — dispatching the
+      // document into a detached editor that never renders.
+      const path = this.filePath();
       const host = this.editorHost()?.nativeElement;
       const content = this._content();
-      if (!host) {
-        // Host removed (file closed) — view is torn down by the filePath effect.
+      if (!path || !host) {
+        // No file open (or host not yet rendered) — the view is owned and torn
+        // down by the filePath effect; never mount one here.
         return;
       }
       this.ensureView(host);
@@ -653,17 +664,22 @@ export class EditorComponent implements OnDestroy {
       // holds this document; a pending reveal for this file outranks it).
       const cached = this.viewStateCache.get(normalizePath(path));
       this.pendingViewState = cached ? { ...cached, path } : null;
-      // Writing _content drives the mount/sync effect, which creates the view
-      // (once the host has rendered) and dispatches the new document.
+      // Apply the document to the (reused) view directly, then sync the
+      // signal — mirroring the disk-reconcile paths. Relying on the
+      // mount/sync effect alone is unsafe: it only re-runs when the _content
+      // signal VALUE changes, so opening a file whose content is byte-
+      // identical to what the view currently shows (common with empty/
+      // templated files) would leave the document unpopulated. applyContentToView
+      // is a no-op when the view doesn't exist yet (first open, no host) — the
+      // effect + ensureView still cover that case — and when the text already
+      // matches, so this is safe and idempotent in every path.
+      this.applyContentToView(content);
       this._content.set(content);
       this._savedContent.set(content);
       this.resetDiskSyncState();
-      // Normally the mount/sync effect performs the reveal once it has put
-      // this content into the view. But when the new file's content is
-      // IDENTICAL to the previous document, the content signal does not
-      // change and that effect never re-runs — the doc-sync guards inside
-      // consumePendingViewState / consumePendingReveal make these direct
-      // calls safe in exactly (and only) that case.
+      // The view now holds this document, so the per-file view-state restore
+      // and any pending reveal apply correctly here. (The mount/sync effect
+      // also runs these whenever _content changed; both are guarded/idempotent.)
       this.consumePendingViewState();
       this.consumePendingReveal();
     } catch (err) {
@@ -843,7 +859,14 @@ export class EditorComponent implements OnDestroy {
   }
 
   private ensureView(host: HTMLDivElement): void {
-    if (this.view) return;
+    // Reuse a live view already mounted in THIS host. A view whose DOM is no
+    // longer parented by `host` is an orphan (built against a host that was
+    // then detached) — destroy it and rebuild in the live host, otherwise its
+    // document would be dispatched into a detached editor and never render.
+    if (this.view) {
+      if (this.view.dom.parentElement === host) return;
+      this.destroyView();
+    }
 
     // Begin loading the code highlighter (no-op after the first call).
     ensureHighlighter();
