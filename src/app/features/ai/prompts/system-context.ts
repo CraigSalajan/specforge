@@ -1,4 +1,4 @@
-import type { IndexSearchHit, SkillMeta } from '../../../shared/types';
+import type { Citation, IndexSearchHit, SkillMeta } from '../../../shared/types';
 import type { ChatMessage } from '../providers/chat.provider';
 
 /**
@@ -50,7 +50,7 @@ have, and \`list_files\` to discover what exists. Don't read files you don't nee
 
 export interface ContextAssembly {
   systemMessage: ChatMessage;
-  citations: Array<{ relPath: string; headingPath: string }>;
+  citations: Citation[];
 }
 
 export interface PinnedFile {
@@ -155,7 +155,7 @@ export function assembleSystemMessage(
 
   const maxChars = Math.max(0, options.maxContextChars);
   const pinned = (options.pinnedFiles ?? []).filter((p) => p.title && p.content !== undefined);
-  const citations: Array<{ relPath: string; headingPath: string }> = [];
+  const citations: Citation[] = [];
 
   // 1. Budget allocation. Reserve a share for pinned files (proportional to
   //    count via the per-file cap); the remainder goes to retrieval hits. If
@@ -227,7 +227,11 @@ export function assembleSystemMessage(
       const block = `---\n[${hit.relPath} :: ${hit.headingPath || '(file)'}]\n${excerpt}`;
       if (used + block.length > budget) break;
       ctxLines.push(block);
-      citations.push({ relPath: hit.relPath, headingPath: hit.headingPath });
+      // `startLine` is added only when the hit carries one, so citation
+      // objects from line-less hits stay shape-identical to legacy citations.
+      const citation: Citation = { relPath: hit.relPath, headingPath: hit.headingPath };
+      if (typeof hit.startLine === 'number') citation.startLine = hit.startLine;
+      citations.push(citation);
       used += block.length;
     }
     // Only add the VAULT CONTEXT section if at least one hit block was actually added

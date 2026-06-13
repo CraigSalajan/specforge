@@ -12,8 +12,10 @@ import { FormsModule } from '@angular/forms';
 import { DomSanitizer, type SafeHtml } from '@angular/platform-browser';
 import DOMPurify from 'dompurify';
 import { Marked } from 'marked';
-import { type AiErrorInfo, type ChatSession } from '../../shared/types';
+import { type AiErrorInfo, type ChatSession, type Citation } from '../../shared/types';
 import { renderHighlightedCode } from '../../shared/markdown-code';
+import { fromVaultRel } from '../../shared/vault-paths';
+import { EditorNavigationService } from '../../core/editor-navigation.service';
 import { EditorSelectionService, resolveActiveSelection } from '../../core/editor-selection.service';
 import { VaultService } from '../../core/vault.service';
 import { UiStateService } from '../../core/ui-state.service';
@@ -65,8 +67,8 @@ import {
       <div class="flex items-center gap-2 border-b border-border-subtle bg-surface-2 px-2 py-1.5">
         <select
           class="flex-1 min-w-0 rounded border border-border-subtle bg-surface-1 pl-2 pr-8 py-1 text-sm text-text-primary focus:border-accent focus:outline-none"
-          [value]="activeSessionId() ?? ''"
-          (change)="onSessionSelect($any($event.target).value)">
+          [ngModel]="activeSessionId() ?? ''"
+          (ngModelChange)="onSessionSelect($event)">
           @if (!activeSession()) {
             <option value="">Untitled chat</option>
           }
@@ -134,7 +136,7 @@ import {
                         type="button"
                         class="rounded-sm bg-surface-3 px-1.5 py-0.5 text-xs text-text-secondary hover:bg-accent hover:text-white"
                         [title]="c.title"
-                        (click)="onCitationOpen(c.relPath)">{{ c.relPath }}@if (c.count > 1) {<span class="ml-1 text-text-muted">×{{ c.count }}</span>}</button>
+                        (click)="onCitationOpen(c.relPath, c.startLine)">{{ c.relPath }}@if (c.count > 1) {<span class="ml-1 text-text-muted">×{{ c.count }}</span>}</button>
                     }
                   </div>
                 }
@@ -308,6 +310,7 @@ export class AiPanelComponent {
   private readonly inputDialog = inject(InputDialogService);
   private readonly confirmDialog = inject(ConfirmDialogService);
   private readonly sanitizer = inject(DomSanitizer);
+  private readonly editorNav = inject(EditorNavigationService);
   private readonly editorSelection = inject(EditorSelectionService);
 
   // Dedicated Marked instance (same pattern as PdfExportService) so chat-only
@@ -492,11 +495,23 @@ export class AiPanelComponent {
   /** Px distance from the bottom that still counts as "pinned". */
   private static readonly STICK_THRESHOLD = 24;
 
+  /** Last composer focus-request seq honored (command palette integration). */
+  private consumedComposerFocusSeq = 0;
+
   constructor() {
     effect(() => {
       this.vault.vaultPath();
       this.chat.resetForVaultChange();
       void this.chat.refreshSessions();
+    });
+
+    // "Focus AI composer" palette command. focus() is a harmless no-op while
+    // the textarea is disabled (provider unconfigured / streaming).
+    effect(() => {
+      const seq = this.ui.composerFocusRequests();
+      if (seq === this.consumedComposerFocusSeq) return;
+      this.consumedComposerFocusSeq = seq;
+      this.inputEl()?.nativeElement.focus();
     });
 
     effect(() => {
@@ -535,19 +550,25 @@ export class AiPanelComponent {
   }
 
   groupCitations(
-    citations: ReadonlyArray<{ relPath: string; headingPath: string }>,
-  ): Array<{ relPath: string; count: number; title: string }> {
-    const groups = new Map<string, { count: number; headings: string[] }>();
+    citations: ReadonlyArray<Citation>,
+  ): Array<{ relPath: string; count: number; title: string; startLine?: number }> {
+    const groups = new Map<string, { count: number; headings: string[]; startLine?: number }>();
     for (const c of citations) {
       const group = groups.get(c.relPath) ?? { count: 0, headings: [] };
       group.count += 1;
       if (c.headingPath) group.headings.push(c.headingPath);
+      // Citations arrive ranked (pinned first, then hits by score), so the
+      // first line-bearing citation is the best jump target for the file.
+      if (group.startLine === undefined && typeof c.startLine === 'number') {
+        group.startLine = c.startLine;
+      }
       groups.set(c.relPath, group);
     }
     return [...groups.entries()].map(([relPath, group]) => ({
       relPath,
       count: group.count,
       title: group.headings.length > 0 ? group.headings.join('\n') : relPath,
+      startLine: group.startLine,
     }));
   }
 
@@ -832,14 +853,21 @@ export class AiPanelComponent {
     this.orchestrator.stop();
   }
 
-  async onCitationOpen(relPath: string): Promise<void> {
+  async onCitationOpen(relPath: string, startLine?: number): Promise<void> {
     const vaultPath = this.vault.vaultPath();
     if (!vaultPath) return;
-    const sep = vaultPath.includes('\\') && !vaultPath.includes('/') ? '\\' : '/';
-    const root = vaultPath.replace(/[\\/]$/, '');
-    const cleanRel = relPath.replace(/\\/g, '/').replace(/^\/+/, '');
-    const abs = [root, ...cleanRel.split('/')].join(sep);
-    this.vault.setActiveFile(abs);
+    // Citations carry vault-relative paths (forward slashes); rebuild the
+    // absolute path with the vault's native separator.
+    const abs = fromVaultRel(vaultPath, relPath);
+    if (typeof startLine === 'number') {
+      // Jump to the cited chunk's heading line (works whether the file is
+      // already open or still needs to load).
+      this.editorNav.openFileAtLine(abs, startLine);
+    } else {
+      // Line-less citation (pinned file, or persisted before line tracking):
+      // degrade to just opening the file.
+      this.vault.setActiveFile(abs);
+    }
   }
 
   onOpenSettings(): void {

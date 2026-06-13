@@ -6,6 +6,7 @@ import type {
   AiMode,
   ChatRole,
   ChatSession,
+  Citation,
   ContextScope,
   PersistedChatMessage,
 } from '../../shared/types';
@@ -20,8 +21,12 @@ export interface UiChatMessage {
   streaming: boolean;
   /** Structured error attached to a failed assistant turn. */
   error: AiErrorInfo | null;
-  /** Citations associated with the assistant turn (rendered as badges). */
-  citations?: ReadonlyArray<{ relPath: string; headingPath: string }>;
+  /**
+   * Citations associated with the assistant turn (rendered as badges).
+   * `startLine` is optional on each citation: older payloads (and whole-file
+   * pinned citations) carry none and degrade to file-open-only on click.
+   */
+  citations?: ReadonlyArray<Citation>;
   createdAt: number;
 }
 

@@ -140,6 +140,19 @@ export interface IndexSearchHit {
 export type SearchResult = IndexSearchHit;
 
 /**
+ * A source reference attached to an assistant turn, rendered as a clickable
+ * badge. `startLine` (1-based, the cited chunk's heading line) enables
+ * jump-to-line; when absent — whole-file citations (pinned files) or
+ * citations captured before line tracking — clicking degrades to opening
+ * the file without scrolling.
+ */
+export interface Citation {
+  relPath: string;
+  headingPath: string;
+  startLine?: number;
+}
+
+/**
  * Where a discovered skill comes from: `global` (under userData), `local`
  * (inside the open vault's `.specforge/skills`), or `user` (one of the
  * user-configured `skills.directories`).

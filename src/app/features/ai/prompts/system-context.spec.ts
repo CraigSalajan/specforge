@@ -1,3 +1,4 @@
+import type { IndexSearchHit } from '../../../shared/types';
 import {
   assembleSystemMessage,
   selectionRangeLabel,
@@ -157,5 +158,50 @@ describe('assembleSystemMessage SELECTION block', () => {
     expect(content).toContain('PINNED FILE: docs/prd.md');
     expect(content).toContain('…(truncated)');
     expect(content).toContain('SELECTION (line 1 of docs/prd.md):\n---\nzzz\n---\n');
+  });
+});
+
+/**
+ * Citation startLine threading: retrieval hits carry the cited chunk's
+ * 1-based heading line so the citation badge can jump the editor there.
+ * Line-less hits and pinned files must keep the legacy citation shape (no
+ * startLine key at all) so old persisted payloads stay interchangeable.
+ */
+describe('assembleSystemMessage citation startLine', () => {
+  const BUDGET = 100_000;
+
+  function hit(partial: Partial<IndexSearchHit> = {}): IndexSearchHit {
+    return {
+      relPath: 'docs/a.md',
+      headingPath: '# A',
+      excerpt: 'excerpt body',
+      score: 1,
+      ...partial,
+    };
+  }
+
+  it('carries the hit startLine into its citation', () => {
+    const { citations } = assembleSystemMessage([hit({ startLine: 12 })], {
+      maxContextChars: BUDGET,
+    });
+
+    expect(citations).toEqual([{ relPath: 'docs/a.md', headingPath: '# A', startLine: 12 }]);
+  });
+
+  it('omits the startLine key entirely for line-less hits', () => {
+    const { citations } = assembleSystemMessage([hit()], { maxContextChars: BUDGET });
+
+    expect(citations).toEqual([{ relPath: 'docs/a.md', headingPath: '# A' }]);
+    expect('startLine' in citations[0]).toBe(false);
+  });
+
+  it('never attaches a startLine to whole-file pinned citations', () => {
+    const { citations } = assembleSystemMessage([], {
+      maxContextChars: BUDGET,
+      pinnedFiles: [{ title: 'docs/prd.md', content: 'alpha' }],
+    });
+
+    expect(citations).toEqual([{ relPath: 'docs/prd.md', headingPath: '' }]);
+    expect('startLine' in citations[0]).toBe(false);
   });
 });
