@@ -1,4 +1,5 @@
-import { BrowserWindow, app, ipcMain, nativeImage } from 'electron';
+import { BrowserWindow, Menu, app, ipcMain, nativeImage } from 'electron';
+import type { MenuItemConstructorOptions } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
@@ -38,6 +39,26 @@ function resolveIconPath(): string | undefined {
     path.resolve(__dirname, '..', '..', 'build', 'icon.png'), // project build/ dir fallback
   ];
   return candidates.find((candidate) => fs.existsSync(candidate));
+}
+
+// Replaces Electron's DEFAULT application menu, whose File > Close Window
+// accelerator (CmdOrCtrl+W) closes the window before the renderer ever sees
+// the keydown — the app binds Ctrl/Cmd+W to "close editor tab". The template
+// keeps the default menu's useful accelerator roles — clipboard editing,
+// reload / force-reload / DevTools / zoom under View — and omits only the
+// File menu (the sole owner of the close-window accelerator). On Windows and
+// Linux the menu bar stays hidden (autoHideMenuBar), so this is effectively
+// just an accelerator table; on macOS the standard app/Edit/Window menus are
+// preserved so system shortcuts (quit, hide, clipboard) keep working.
+function setupApplicationMenu(): void {
+  const isMac = process.platform === 'darwin';
+  const template: MenuItemConstructorOptions[] = [
+    ...(isMac ? [{ role: 'appMenu' } satisfies MenuItemConstructorOptions] : []),
+    { role: 'editMenu' },
+    { role: 'viewMenu' },
+    ...(isMac ? [{ role: 'windowMenu' } satisfies MenuItemConstructorOptions] : []),
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
 // Wires electron-updater to the GitHub Releases feed. No-ops in dev (there is no
@@ -93,6 +114,8 @@ async function createWindow(): Promise<void> {
 app.whenReady().then(async () => {
   // Improves Windows taskbar icon grouping/identity.
   app.setAppUserModelId('com.specforge.app');
+
+  setupApplicationMenu();
 
   // On macOS, set the dock icon explicitly when the master icon is available.
   if (process.platform === 'darwin' && app.dock) {

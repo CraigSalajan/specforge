@@ -99,6 +99,16 @@ const MERGE_NOTICE_MS = 4000;
 // while the suspended auto-save can't silently resurrect the file.
 const DELETED_BASELINE = '\0specforge:deleted-on-disk\0';
 
+// Session-only cap on remembered per-file selection/scroll states (tab
+// switches restore them). Map insertion order doubles as the eviction order.
+const VIEW_STATE_CACHE_MAX = 50;
+
+/** Selection (state JSON) + scroll captured when switching away from a file. */
+interface PerFileViewState {
+  selection: unknown;
+  scrollTop: number;
+}
+
 @Component({
   selector: 'app-editor',
   standalone: true,
@@ -108,12 +118,7 @@ const DELETED_BASELINE = '\0specforge:deleted-on-disk\0';
     <div class="flex h-full flex-col bg-surface-0 text-text-primary">
       <div class="flex items-center justify-between border-b border-border-subtle bg-surface-1 px-3 py-2">
         <div class="flex items-center gap-2 truncate">
-          @if (filePath()) {
-            <span class="truncate text-xs font-mono text-text-secondary" [title]="filePath() ?? ''">{{ displayName() }}</span>
-            @if (isDirty()) {
-              <span class="h-1.5 w-1.5 rounded-full bg-accent" title="Unsaved changes"></span>
-            }
-          } @else {
+          @if (!filePath()) {
             <span class="text-xs text-text-muted">No file open</span>
           }
         </div>
@@ -166,6 +171,7 @@ const DELETED_BASELINE = '\0specforge:deleted-on-disk\0';
           <div class="flex h-full flex-col items-center justify-center gap-2 text-text-muted">
             <p class="text-sm">Select a file from the vault to start editing</p>
             <p class="text-xs">Ctrl+S to save · Markdown renders live as you type</p>
+            <p class="text-xs">Ctrl+P to open files · Ctrl+Shift+P for commands</p>
           </div>
         } @else {
           <div #editorHost class="absolute inset-0 overflow-hidden"></div>
@@ -283,6 +289,25 @@ export class EditorComponent implements OnDestroy {
 
   private mergeNoticeTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // Pending removal of the transient jump-to-line flash decoration (same
+  // setTimeout pattern as the other editor timers).
+  private revealHighlightTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Per-file selection/scroll memory for tab switches, keyed by normalized
+  // path. Session-only — undo history is NOT preserved across switches (the
+  // view is reused; doc replacement is excluded from history instead).
+  private readonly viewStateCache = new Map<string, PerFileViewState>();
+
+  // View state waiting to be restored once the target document is actually in
+  // the view (same handshake shape as the pending reveal). Cleared by any
+  // newer switch; a pending reveal for the same file always wins over it.
+  private pendingViewState: (PerFileViewState & { path: string }) | null = null;
+
+  // Last UiStateService focus-request seq this editor has honored. Requests
+  // arriving before the view exists (file still loading) are consumed by the
+  // focus effect once the host/content effect has created the view.
+  private consumedFocusSeq = 0;
+
   // Registered with EditorBufferService so AI read paths can flush this
   // buffer before reading from disk. While in conflict (or deleted-on-disk)
   // a flush would silently pick a winner, so the delegate declines and
@@ -313,6 +338,10 @@ export class EditorComponent implements OnDestroy {
     // populated once the @if (filePath()) branch has rendered the host. This
     // is required in a zoneless app, where a one-shot microtask after a signal
     // write is not ordered relative to the framework's render flush.
+    //
+    // The pending-reveal read is intentionally tracked: a jump request for the
+    // ALREADY-open file changes no other signal, and this effect is where the
+    // view is guaranteed to hold the target document.
     effect(() => {
       const host = this.editorHost()?.nativeElement;
       const content = this._content();
@@ -322,6 +351,44 @@ export class EditorComponent implements OnDestroy {
       }
       this.ensureView(host);
       this.applyContentToView(content);
+      // Restore before reveal: consumePendingViewState declines (and drops
+      // its state) when a reveal targets the loaded file, so a jump request
+      // is never clobbered by a remembered scroll position.
+      this.consumePendingViewState();
+      this.consumePendingReveal();
+    });
+
+    // Publishes dirty state for chrome outside the editor (tab bar dirty
+    // dot). Background tabs are never dirty — the buffer is flushed on every
+    // switch — so this single signal fully describes tab dirty state.
+    effect(() => {
+      this.editorStatus.setActiveDirty(this.isDirty());
+    });
+
+    // Focus requests from the command palette ("Focus editor") and the quick
+    // switcher (file open). Declared AFTER the mount/sync effect and tracking
+    // the same host/content signals, so a request issued while a file is
+    // still loading fires once that effect has created the view.
+    effect(() => {
+      const seq = this.ui.editorFocusRequests();
+      this.editorHost();
+      this._content();
+      if (seq === this.consumedFocusSeq) return;
+      if (!this.view) return;
+      this.consumedFocusSeq = seq;
+      this.view.focus();
+    });
+
+    // The wikilink plugin resolves targets synchronously against
+    // resolvableStems at decoration build time; when the vault's file set
+    // changes with no doc/selection change (file created, deleted, renamed),
+    // nothing would trigger a rebuild — this effect tells the view to
+    // re-evaluate so unresolved marks flip immediately.
+    effect(() => {
+      this.resolvableStems();
+      untracked(() => {
+        this.view?.dispatch({ effects: refreshLinkResolution.of(null) });
+      });
     });
 
     this.editorBuffer.register(this.bufferDelegate);
@@ -339,7 +406,9 @@ export class EditorComponent implements OnDestroy {
     this.clearMergeNoticeTimer();
     this.clearAutoSaveTimer();
     this.clearSelectionPublishTimer();
+    this.clearRevealHighlightTimer();
     this.editorSelection.clear();
+    this.editorStatus.setActiveDirty(false);
     if (this.autoSaveEnabled()) {
       // Best effort: the component is going away, so we can't await the write.
       void this.flushDirtyBuffer();
@@ -408,6 +477,13 @@ export class EditorComponent implements OnDestroy {
   private async switchTo(nextPath: string | null): Promise<void> {
     const token = ++this.loadToken;
 
+    // Remember the outgoing file's selection + scroll (synchronously, while
+    // the view still holds its document) so returning to its tab restores
+    // the exact spot. Any not-yet-consumed restore is stale once a newer
+    // switch begins.
+    this.captureViewState();
+    this.pendingViewState = null;
+
     // Any pending debounced save is superseded: either we flush immediately
     // below, or the buffer is clean and there is nothing to write.
     this.clearAutoSaveTimer();
@@ -423,6 +499,14 @@ export class EditorComponent implements OnDestroy {
     // sentinel still makes the dirty check below flush the old buffer.
     this.clearReconcileTimer();
     this.pendingUnlink = false;
+
+    // A pending reveal targeting some OTHER file is stale (e.g. its load
+    // failed and the user has navigated on); drop it so it can't fire on a
+    // much later, unrelated open of that file.
+    const staleReveal = this.editorNav.pendingReveal();
+    if (staleReveal && (!nextPath || !samePath(staleReveal.filePath, nextPath))) {
+      this.editorNav.consume(staleReveal);
+    }
 
     const oldPath = this.loadedPath;
     const oldContent = this._content();
@@ -565,11 +649,23 @@ export class EditorComponent implements OnDestroy {
         this.view.dispatch({ selection: { anchor: 0 } });
       }
       this.loadedPath = path;
+      // Arm the per-file selection/scroll restore (consumed once the view
+      // holds this document; a pending reveal for this file outranks it).
+      const cached = this.viewStateCache.get(normalizePath(path));
+      this.pendingViewState = cached ? { ...cached, path } : null;
       // Writing _content drives the mount/sync effect, which creates the view
       // (once the host has rendered) and dispatches the new document.
       this._content.set(content);
       this._savedContent.set(content);
       this.resetDiskSyncState();
+      // Normally the mount/sync effect performs the reveal once it has put
+      // this content into the view. But when the new file's content is
+      // IDENTICAL to the previous document, the content signal does not
+      // change and that effect never re-runs — the doc-sync guards inside
+      // consumePendingViewState / consumePendingReveal make these direct
+      // calls safe in exactly (and only) that case.
+      this.consumePendingViewState();
+      this.consumePendingReveal();
     } catch (err) {
       void this.confirmDialog.notice({
         title: 'Could not read file',
@@ -838,7 +934,10 @@ export class EditorComponent implements OnDestroy {
   // Single code path for programmatic content application. Dispatching only
   // the differing range (instead of replacing the whole document) lets
   // CodeMirror map the user's selection and scroll position through external
-  // updates (disk reloads, merges).
+  // updates (disk reloads, merges). External applies are excluded from undo
+  // history: with a reused view, a recorded file-switch replacement would let
+  // Ctrl+Z resurrect the PREVIOUS file's content into this one (undo bleed) —
+  // existing user edits are still mapped through the change and stay undoable.
   private applyContentToView(content: string): void {
     const view = this.view;
     if (!view) return;
@@ -846,9 +945,129 @@ export class EditorComponent implements OnDestroy {
     if (!change) return;
     this.isApplyingExternal = true;
     try {
-      view.dispatch({ changes: change });
+      view.dispatch({ changes: change, annotations: Transaction.addToHistory.of(false) });
     } finally {
       this.isApplyingExternal = false;
+    }
+  }
+
+  /**
+   * Snapshots the loaded file's selection + scroll into the per-file cache
+   * (insertion-ordered LRU, capped). Called at the start of every switch,
+   * before the view's document is replaced.
+   */
+  private captureViewState(): void {
+    const view = this.view;
+    const path = this.loadedPath;
+    if (!view || !path) return;
+    const key = normalizePath(path);
+    this.viewStateCache.delete(key);
+    this.viewStateCache.set(key, {
+      selection: view.state.selection.toJSON(),
+      scrollTop: view.scrollDOM.scrollTop,
+    });
+    if (this.viewStateCache.size > VIEW_STATE_CACHE_MAX) {
+      const oldest = this.viewStateCache.keys().next().value;
+      if (oldest !== undefined) this.viewStateCache.delete(oldest);
+    }
+  }
+
+  /**
+   * Restores the remembered selection + scroll once the target document is in
+   * the view (same doc-sync guard as the pending reveal). A pending reveal
+   * for this file wins: it places its own cursor and centers its own line, so
+   * the remembered state is dropped instead of fighting it.
+   */
+  private consumePendingViewState(): void {
+    const pending = this.pendingViewState;
+    if (!pending) return;
+    const view = this.view;
+    const path = this.loadedPath;
+    if (!view || !path) return;
+    if (!samePath(pending.path, path)) {
+      this.pendingViewState = null;
+      return;
+    }
+    if (view.state.doc.toString() !== this._content()) return;
+    this.pendingViewState = null;
+    const reveal = this.editorNav.pendingReveal();
+    if (reveal && samePath(reveal.filePath, path)) return;
+    const docLen = view.state.doc.length;
+    try {
+      // The doc may have changed on disk since the state was captured (or the
+      // JSON may be malformed); clamp every range and bail on parse failure.
+      const stored = EditorSelection.fromJSON(pending.selection);
+      const clamped = EditorSelection.create(
+        stored.ranges.map((r) =>
+          EditorSelection.range(Math.min(r.anchor, docLen), Math.min(r.head, docLen)),
+        ),
+        stored.mainIndex,
+      );
+      view.dispatch({ selection: clamped });
+    } catch {
+      // Unusable stored selection — scroll restore below still applies.
+    }
+    const scrollTop = pending.scrollTop;
+    // Apply after the view has measured, otherwise the not-yet-laid-out
+    // document clamps the scroll offset to a stale height.
+    view.requestMeasure({
+      read: () => null,
+      write: () => {
+        view.scrollDOM.scrollTop = scrollTop;
+      },
+    });
+  }
+
+  /**
+   * Applies a pending jump-to-line request once the target document is
+   * actually in the view. Called from the mount/sync effect (which tracks the
+   * pendingReveal signal, covering the file-already-open case) and from
+   * loadFile (covering a switch between files with identical content, where
+   * the content signal never changes). The doc-sync guard keeps a reveal from
+   * firing against the PREVIOUS document while the target file's content has
+   * yet to be applied to the view.
+   */
+  private consumePendingReveal(): void {
+    const request = this.editorNav.pendingReveal();
+    if (!request) return;
+    const view = this.view;
+    const path = this.loadedPath;
+    if (!view || !path || !samePath(request.filePath, path)) return;
+    if (view.state.doc.toString() !== this._content()) return;
+    this.editorNav.consume(request);
+    this.revealLine(request.line);
+  }
+
+  /**
+   * Centers the given 1-based line (clamped to the document), places the
+   * cursor at its start, and flashes the line. The flash decoration is
+   * removed on a timer matching the fade duration — which under
+   * prefers-reduced-motion is what ends the static (non-animated) highlight.
+   */
+  private revealLine(line: number): void {
+    const view = this.view;
+    if (!view) return;
+    const doc = view.state.doc;
+    const lineNo = Math.max(1, Math.min(Math.floor(line), doc.lines));
+    const pos = doc.line(lineNo).from;
+    this.clearRevealHighlightTimer();
+    view.dispatch({
+      selection: { anchor: pos },
+      effects: [EditorView.scrollIntoView(pos, { y: 'center' }), setRevealHighlight.of(pos)],
+    });
+    // Navigation lands the user in the editor: focus makes the placed cursor
+    // visible and keeps the keyboard-first flow (read, then edit) intact.
+    view.focus();
+    this.revealHighlightTimer = setTimeout(() => {
+      this.revealHighlightTimer = null;
+      this.view?.dispatch({ effects: setRevealHighlight.of(null) });
+    }, REVEAL_HIGHLIGHT_MS);
+  }
+
+  private clearRevealHighlightTimer(): void {
+    if (this.revealHighlightTimer !== null) {
+      clearTimeout(this.revealHighlightTimer);
+      this.revealHighlightTimer = null;
     }
   }
 
@@ -856,6 +1075,7 @@ export class EditorComponent implements OnDestroy {
     const view = this.view;
     if (!view) return;
     this.clearSelectionPublishTimer();
+    this.clearRevealHighlightTimer();
     this.editorSelection.clear();
     view.contentDOM.removeEventListener('mousedown', this.onMouseDown);
     document.removeEventListener('mouseup', this.onMouseUp);
