@@ -355,3 +355,75 @@ html, body {
     scroll-behavior: auto !important;
   }
 }
+
+/* ── Wikilinks: unresolved targets + [[ autocomplete ─────────────────────
+   Emitted by the in-repo link plugin (src/app/features/editor/link-plugin.ts)
+   and @codemirror/autocomplete (wikilink-autocomplete.ts).
+
+   Unresolved wikilinks — targets with no matching vault file — stay quiet:
+   muted ink and a dashed underline instead of the accent link treatment, so
+   a missing page reads as "not there yet" without shouting. Clicking one
+   offers to create the file, hence the pointer cursor stays. Applies to both
+   the rendered widget anchor and the source-mode mark (this block sits after
+   the .cm-link-widget rules above, so the equal-specificity override wins by
+   order). */
+.cm-editor .cm-wikilink-unresolved {
+  color: var(--color-text-muted);
+  text-decoration: underline dashed;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+/* [[ autocomplete popup: same overlay vocabulary as the app's modals/menus —
+   raised surface, 1px strong border, no gradients; selection is a surface
+   step + primary ink (accent only on the matched characters). The plugin's
+   base theme is light-first and monospace; restate font, colors and sizing
+   on the SpecForge ramp (cf. the .cm-search panel block above). The `div`
+   tag in the selectors is deliberate: @codemirror/autocomplete injects its
+   base theme at runtime (which cascades after this sheet), and its ul/li
+   rules tie ours on class specificity — the extra type selector breaks the
+   tie in our favor without resorting to !important. */
+.cm-editor div.cm-tooltip.cm-tooltip-autocomplete {
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border-strong);
+  border-radius: 0.25rem;
+  overflow: hidden;
+}
+.cm-editor div.cm-tooltip.cm-tooltip-autocomplete > ul {
+  font-family: inherit;
+  font-size: 0.8125rem;
+  max-height: 14rem;
+  min-width: 16rem;
+}
+.cm-editor div.cm-tooltip.cm-tooltip-autocomplete > ul > li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding: 0.25rem 0.6rem;
+  color: var(--color-text-secondary);
+}
+.cm-editor div.cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected] {
+  background: var(--color-surface-3);
+  color: var(--color-text-primary);
+}
+.cm-editor .cm-tooltip-autocomplete .cm-completionLabel {
+  flex: none;
+}
+/* Vault-relative path, dimmed and pushed to the row's end in mono — the same
+   primary/detail pairing the quick switcher uses. */
+.cm-editor .cm-tooltip-autocomplete .cm-completionDetail {
+  flex: 1;
+  margin-left: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  font-style: normal;
+  color: var(--color-text-muted);
+}
+.cm-editor .cm-tooltip-autocomplete .cm-completionMatchedText {
+  text-decoration: none;
+  color: var(--color-accent-hover);
+}

@@ -19,10 +19,11 @@
 //   real checkbox that toggles the underlying source text, mirroring the
 //   in-repo taskListField (task-list-field.ts). Header and body cells get the
 //   same treatment.
-// - `[[wikilinks]]` render as the same visual-only anchors the package's
-//   linkPlugin produces in paragraphs (literal inside inline code, matching
-//   the plugin's skip-list; the app passes no onWikiLinkClick, so they never
-//   navigate).
+// - `[[wikilinks]]` render as visual-only anchors with the same classes the
+//   link plugin gives wikilink widgets in paragraphs (literal inside inline
+//   code, matching the plugin's skip-list). Unlike paragraph wikilinks —
+//   which navigate via the in-repo appLinkPlugin (link-plugin.ts) — table
+//   cell wikilinks have no click handler and do not navigate (yet).
 // - Regular links open in a new tab (`target="_blank" rel="noopener
 //   noreferrer"`, like the package's LinkWidget with its default
 //   openInNewTab), and `ignoreEvent` lets clicks on hyperlinks / checkboxes
@@ -153,9 +154,10 @@ function createCellCheckbox(checked: boolean): HTMLInputElement {
 
 function createWikilinkAnchor(display: string): HTMLAnchorElement {
   const anchor = document.createElement('a');
-  // Same classes the package's linkPlugin gives wikilink widgets in
-  // paragraphs (styled in styles.css). No href and no handler: the app passes
-  // no onWikiLinkClick, so wikilinks are visual-only and must not navigate.
+  // Same classes the in-repo appLinkPlugin (link-plugin.ts) gives wikilink
+  // widgets in paragraphs (styled in styles.css). No href and no handler:
+  // table cell wikilinks are visual-only and must not navigate — paragraph
+  // wikilinks are the navigable ones.
   anchor.className = 'cm-link-widget cm-wikilink-widget';
   anchor.textContent = display;
   return anchor;
@@ -337,11 +339,11 @@ class RichTableWidget extends WidgetType {
   // the cursor moving into the table (which would flip the widget to source
   // mode before the interaction lands). `a[href]` (not bare `a`) so the
   // visual-only wikilink anchors — no href, no handler — are NOT ignored:
-  // swallowing their clicks would leave a dead pointer-cursor target, while
-  // falling through matches the package's LinkWidget, whose paragraph
-  // wikilinks also return false here. false everywhere else keeps the
-  // click-to-edit behavior — clicking plain cell text still reveals the
-  // table source.
+  // swallowing their clicks would leave a dead pointer-cursor target;
+  // falling through keeps click-to-edit for them (paragraph wikilinks, by
+  // contrast, navigate via the in-repo appLinkPlugin). false everywhere else
+  // keeps the click-to-edit behavior — clicking plain cell text still
+  // reveals the table source.
   override ignoreEvent(event: Event): boolean {
     const target = event.target as HTMLElement | null;
     return !!target?.closest?.('a[href], input.cm-task-checkbox');

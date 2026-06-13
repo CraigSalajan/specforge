@@ -24,7 +24,6 @@ import {
   editorTheme,
   imageField,
   initHighlighter,
-  linkPlugin,
   livePreviewPlugin,
   markdownStylePlugin,
   mouseSelectingField,
@@ -32,15 +31,31 @@ import {
 } from 'codemirror-live-markdown';
 import { ConfirmDialogService } from '../../core/confirm-dialog.service';
 import { EditorBufferService, type EditorBufferDelegate } from '../../core/editor-buffer.service';
+import { EditorNavigationService } from '../../core/editor-navigation.service';
 import { EditorSelectionService } from '../../core/editor-selection.service';
+import { EditorStatusService } from '../../core/editor-status.service';
 import { IpcService } from '../../core/ipc.service';
 import { PdfExportService } from '../../core/pdf-export.service';
 import { SettingsService } from '../../core/settings.service';
+import { UiStateService } from '../../core/ui-state.service';
+import { VaultService } from '../../core/vault.service';
 import { computeMinimalChange, threeWayMerge } from '../../shared/merge-utils';
-import { samePath } from '../../shared/path-utils';
+import { normalizePath, samePath } from '../../shared/path-utils';
 import type { FileChangeEvent } from '../../shared/types';
+import { appLinkPlugin, refreshLinkResolution } from './link-plugin';
+import { mermaidField } from './mermaid-field';
+import { REVEAL_HIGHLIGHT_MS, revealLineExtension, setRevealHighlight } from './reveal-line';
 import { richTableField } from './rich-table-field';
 import { taskListField } from './task-list-field';
+import { wikiLinkAutocomplete } from './wikilink-autocomplete';
+import { WikilinkNavigationService } from './wikilink-navigation.service';
+import {
+  buildResolvableStems,
+  buildWikiCompletionEntries,
+  collectMarkdownFiles,
+  isTargetResolvable,
+  splitWikiTarget,
+} from './wikilink-utils';
 
 // Kick off async syntax-highlighter init (lowlight + highlight.js) exactly once
 // for the whole app. codeBlockField consults the highlighter lazily, so fenced
@@ -164,7 +179,12 @@ export class EditorComponent implements OnDestroy {
   private readonly settings = inject(SettingsService);
   private readonly confirmDialog = inject(ConfirmDialogService);
   private readonly editorBuffer = inject(EditorBufferService);
+  private readonly editorNav = inject(EditorNavigationService);
   private readonly editorSelection = inject(EditorSelectionService);
+  private readonly editorStatus = inject(EditorStatusService);
+  private readonly ui = inject(UiStateService);
+  private readonly vault = inject(VaultService);
+  private readonly wikilinkNav = inject(WikilinkNavigationService);
 
   readonly filePath = input<string | null>(null);
 
@@ -190,11 +210,26 @@ export class EditorComponent implements OnDestroy {
   readonly mergeNotice = signal<string | null>(null);
 
   readonly isDirty = computed(() => this._content() !== this._savedContent());
-  readonly displayName = computed(() => {
-    const p = this.filePath();
-    if (!p) return '';
-    return p.split(/[\\/]/).pop() ?? p;
+
+  // Vault markdown corpus for the wikilink features. The tree signal is kept
+  // fresh by the watcher (120ms debounce), so both derivations below are
+  // near-live: a created/deleted/renamed file updates unresolved marks and
+  // the [[ completion list without any extra IPC.
+  private readonly vaultMarkdownFiles = computed(() => {
+    const vaultPath = this.vault.vaultPath();
+    if (!vaultPath) return [];
+    return collectMarkdownFiles(this.vault.tree(), vaultPath);
   });
+
+  /** Segment-aligned stems for the synchronous unresolved-wikilink check. */
+  private readonly resolvableStems = computed(() =>
+    buildResolvableStems(this.vaultMarkdownFiles().map((f) => f.relPath)),
+  );
+
+  /** `[[` completion corpus (duplicate basenames pre-disambiguated). */
+  private readonly wikiCompletionEntries = computed(() =>
+    buildWikiCompletionEntries(this.vaultMarkdownFiles()),
+  );
 
   private view: EditorView | null = null;
   // True while we are programmatically replacing the document (file load).
@@ -720,7 +755,12 @@ export class EditorComponent implements OnDestroy {
       doc: this._content(),
       extensions: [
         history(),
-        keymap.of([...defaultKeymap, ...historyKeymap]),
+        keymap.of([...defaultKeymap, ...searchKeymap, ...historyKeymap]),
+        // In-file find/replace: Ctrl/Cmd+F opens the panel (which includes the
+        // replace row), Enter/Shift+Enter step through matches, Esc closes.
+        // `top: true` docks the panel above the document instead of below it.
+        // Panel chrome is themed in styles.css (.cm-panels / .cm-search).
+        search({ top: true }),
         EditorView.lineWrapping,
         // GFM enables table, strikethrough, task-list and autolink parsing in
         // the lezer markdown grammar. Without it, table pipes (and ~~strike~~)
@@ -738,9 +778,33 @@ export class EditorComponent implements OnDestroy {
         // inline markdown inside cells via marked.parseInline.
         richTableField,
         taskListField, // GFM task checkboxes (- [ ] / - [x]) — package has no task-list support
+        // ```mermaid fences render as diagrams (mermaid-field.ts; mermaid is
+        // lazy-loaded on first render). Prec.high + placement before
+        // codeBlockField: the package field decorates every fence except
+        // `math`, so it emits a competing block replace over mermaid fences —
+        // overlapping replace decorations resolve by precedence, and the
+        // diagram must win. In source mode both fields only emit line classes,
+        // which coexist.
+        Prec.high(mermaidField),
         codeBlockField({ copyButton: true }),
-        linkPlugin(),
+        // In-repo replacement for the package's linkPlugin (see link-plugin.ts):
+        // wikilinks navigate on click (create-on-confirm when unresolved) and
+        // carry cm-wikilink-unresolved when their target doesn't exist.
+        appLinkPlugin({
+          isWikiTargetResolved: (raw) => {
+            const { target } = splitWikiTarget(raw);
+            // [[#Heading]] targets the active file itself — always resolved.
+            return target === '' || isTargetResolvable(target, this.resolvableStems());
+          },
+          onWikiLinkClick: (raw) => {
+            void this.wikilinkNav.open(raw);
+          },
+        }),
+        // Typing `[[` offers the vault's markdown files (wikilink-autocomplete.ts).
+        wikiLinkAutocomplete(() => this.wikiCompletionEntries()),
         imageField(),
+        // Transient jump-to-line flash (AI citation navigation).
+        revealLineExtension,
         editorTheme,
         this.appTheme,
         EditorView.updateListener.of((update) => {
