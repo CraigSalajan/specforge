@@ -294,7 +294,7 @@ After undo, the row is flipped to `applied=0`. The audit log retains both events
 
 ### API key storage
 
-`ai.apiKey` is currently stored as plain text in the `settings` table. The README's troubleshooting section documents the file location. **Phase 4 moves it to `safeStorage` / `keytar`** so it's encrypted at rest with OS-managed keys. Until then, treat the user data directory like any other place that holds plain credentials.
+`ai.apiKey` is encrypted at rest with Electron's `safeStorage` (OS keychain) when available. The encryption seam lives in `electron/ipc/secure-settings.ts`: writes store `enc:v1:` + base64 of the encrypted value, reads decrypt transparently, and a one-time idempotent migration on startup rewrites any legacy plaintext key. On systems without OS-level encryption (some Linux setups without a keyring) the value degrades to plaintext rather than losing the key; if a previously encrypted value can no longer be decrypted (e.g. the DB was copied to another machine), it reads as unset and the user re-enters it. The renderer contract is unchanged — plaintext crosses the IPC bridge both ways; encryption is at-rest only.
 
 ## 12. Build & packaging
 

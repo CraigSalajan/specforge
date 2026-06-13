@@ -6,6 +6,7 @@ import { registerDialogHandlers } from './ipc/dialog';
 import { registerVaultHandlers } from './ipc/vault';
 import { registerWatcherHandlers, disposeWatcher } from './ipc/watcher';
 import { registerSettingsHandlers } from './ipc/settings';
+import { migratePlaintextSecrets } from './ipc/secure-settings';
 import { registerIndexHandlers } from './ipc/index';
 import { registerChatHandlers } from './ipc/chats';
 import { registerEmbeddingHandlers } from './ipc/embeddings';
@@ -103,6 +104,14 @@ app.whenReady().then(async () => {
     getDb();
   } catch (err) {
     console.error('[main] Failed to initialize SQLite database:', err);
+  }
+
+  // One-time at-rest encryption of secret settings (e.g. ai.apiKey). Runs here
+  // because safeStorage requires the app `ready` event and the DB must be open.
+  try {
+    migratePlaintextSecrets();
+  } catch (err) {
+    console.error('[main] Failed to migrate secret settings to encrypted storage:', err);
   }
 
   registerDialogHandlers();

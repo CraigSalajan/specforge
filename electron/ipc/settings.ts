@@ -5,6 +5,7 @@ import {
   setSetting,
   setManySettings,
 } from '../db/repositories/settings.repo';
+import { decryptSettingValue, encryptSettingValue } from './secure-settings';
 
 const Channels = {
   Get: 'specforge:settings-get',
@@ -28,17 +29,22 @@ function assertValue(value: unknown): asserts value is string {
 export function registerSettingsHandlers(): void {
   ipcMain.handle(Channels.Get, async (_e, key: string): Promise<string | null> => {
     assertKey(key);
-    return getSetting(key);
+    const stored = getSetting(key);
+    return stored === null ? null : decryptSettingValue(key, stored);
   });
 
   ipcMain.handle(Channels.GetAll, async (): Promise<Record<string, string>> => {
-    return getAllSettings();
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(getAllSettings())) {
+      out[k] = decryptSettingValue(k, v);
+    }
+    return out;
   });
 
   ipcMain.handle(Channels.Set, async (_e, key: string, value: string): Promise<void> => {
     assertKey(key);
     assertValue(value);
-    setSetting(key, value);
+    setSetting(key, encryptSettingValue(key, value));
   });
 
   ipcMain.handle(
@@ -51,7 +57,7 @@ export function registerSettingsHandlers(): void {
       for (const [k, v] of Object.entries(values)) {
         assertKey(k);
         assertValue(v);
-        sanitized[k] = v;
+        sanitized[k] = encryptSettingValue(k, v);
       }
       setManySettings(sanitized);
     },

@@ -161,8 +161,10 @@ export type Theme = 'dark' | 'light';
  * Application settings persisted in the SQLite `settings` table.
  *
  * Notes:
- *  - `ai.apiKey` is stored locally in the DB. Phase 4 will move it to the
- *    OS keychain (e.g. `keytar` or Electron `safeStorage`).
+ *  - `ai.apiKey` is stored locally in the DB, encrypted at rest via Electron
+ *    `safeStorage` when the OS supports it (it falls back to plaintext on
+ *    systems without OS-level encryption, e.g. some Linux setups). The
+ *    renderer always sends and receives the plaintext key over IPC.
  *  - `ai.embeddingsEnabled` is stored as the string `'true'` / `'false'`.
  *  - `ai.topK`, `ai.maxContextChars` and `ai.timeoutSeconds` are stored as
  *    decimal strings.

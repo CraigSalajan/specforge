@@ -132,7 +132,7 @@ type SettingsSection = 'workspace' | 'ai' | 'index' | 'tools' | 'skills';
                   (ngModelChange)="patch({ 'ai.apiKey': $event })" />
                 <div class="mt-1 flex items-center justify-between">
                   <p class="text-xs text-text-muted">
-                    Stored locally in the app database.
+                    Stored locally, encrypted with your OS keychain when available.
                   </p>
                   <button
                     type="button"
