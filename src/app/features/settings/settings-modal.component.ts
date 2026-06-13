@@ -16,7 +16,7 @@ import { EmbeddingIndexerService } from '../ai/providers/indexing.service';
 import { ToolRegistryService } from '../ai/tools/tool-registry.service';
 import { SkillRegistryService } from '../ai/skills/skill-registry.service';
 import { IpcService } from '../../core/ipc.service';
-import type { Settings, SkillMeta, Theme } from '../../shared/types';
+import type { Settings, SkillMeta } from '../../shared/types';
 
 type SettingsSection = 'workspace' | 'ai' | 'index' | 'tools' | 'skills';
 
@@ -81,17 +81,6 @@ type SettingsSection = 'workspace' | 'ai' | 'index' | 'tools' | 'skills';
                     (click)="onChangeVault()">Change…</button>
                 </div>
                 <p class="mt-1 text-xs text-text-muted">Markdown files in this folder are indexed locally.</p>
-              </div>
-
-              <div class="mb-3">
-                <label class="mb-1 block text-xs text-text-secondary">Theme</label>
-                <select
-                  class="w-full rounded border border-border-subtle bg-surface-2 px-2 py-1.5 text-xs text-text-primary focus:border-accent focus:outline-none"
-                  [ngModel]="draft().theme"
-                  (ngModelChange)="patch({ theme: asTheme($event) })">
-                  <option value="dark">Dark</option>
-                  <option value="light">Light</option>
-                </select>
               </div>
 
               <div class="mb-3 flex items-center justify-between rounded border border-border-subtle bg-surface-2 px-3 py-2">
@@ -593,10 +582,6 @@ export class SettingsModalComponent {
 
   async openLocalSkillsFolder(): Promise<void> {
     await this.ipc.skillsOpenFolder('local', this.vault.vaultPath() ?? undefined);
-  }
-
-  asTheme(value: string): Theme {
-    return value === 'light' ? 'light' : 'dark';
   }
 
   toggleApiKey(): void {

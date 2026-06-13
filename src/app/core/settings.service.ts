@@ -1,10 +1,9 @@
-import { Injectable, computed, effect, inject, signal } from '@angular/core';
+import { Injectable, computed, inject, signal } from '@angular/core';
 import {
   DEFAULT_SETTINGS,
   SETTINGS_KEYS,
   type Settings,
   type SettingsKey,
-  type Theme,
 } from '../shared/types';
 import { IpcService } from './ipc.service';
 
@@ -34,7 +33,6 @@ export class SettingsService {
   readonly hydrated = this._hydrated.asReadonly();
   readonly saving = this._saving.asReadonly();
 
-  readonly theme = computed<Theme>(() => this._settings().theme);
   readonly vaultPath = computed<string | null>(() => this._settings().vaultPath);
   readonly editorAutoSave = computed(() => this._settings()['editor.autoSave']);
   readonly aiBaseUrl = computed(() => this._settings()['ai.baseUrl']);
@@ -56,16 +54,17 @@ export class SettingsService {
   readonly rightPaneWidth = computed(() => this._settings()['ui.rightPaneWidth']);
 
   constructor() {
-    // Reflect theme on <html> for Tailwind variants to pick up.
-    effect(() => {
-      const theme = this.theme();
-      if (typeof document !== 'undefined') {
-        const root = document.documentElement;
-        root.classList.remove('theme-dark', 'theme-light');
-        root.classList.add(theme === 'light' ? 'theme-light' : 'theme-dark');
-        root.dataset['theme'] = theme;
-      }
-    });
+    // SpecForge is dark-only (see DESIGN.md). The Tailwind `dark` variant in
+    // styles.css keys off the `.dark` class that index.html declares
+    // statically; assert it here too (plus `theme-dark` / data-theme for
+    // anything keying off those) so the theme can never drift, regardless of
+    // any legacy 'light' value still persisted under the `theme` setting key.
+    if (typeof document !== 'undefined') {
+      const root = document.documentElement;
+      root.classList.remove('theme-light');
+      root.classList.add('dark', 'theme-dark');
+      root.dataset['theme'] = 'dark';
+    }
   }
 
   async init(): Promise<void> {
