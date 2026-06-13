@@ -162,6 +162,42 @@ html, body {
 .cm-editor .cm-codeblock-copy:hover { color: var(--color-text-primary); background: var(--color-border-subtle); }
 .cm-editor .cm-codeblock-copy-success { color: #34d399; }
 
+/* Mermaid diagrams (in-repo mermaidField, mermaid-field.ts): ```mermaid fences
+   render as an SVG widget when the cursor is outside the fence. Chrome matches
+   .cm-codeblock-widget above — flat surface + 1px border, no shadows. The
+   min-height matches the widget's estimatedHeight to limit layout shift while
+   the first async render is pending. In source mode (cursor inside) the lines
+   carry both cm-mermaid-source (unstyled hook) and the package codeBlockField's
+   cm-codeblock-source, which provides the visible source styling. */
+.cm-editor .cm-mermaid-widget {
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 8px;
+  padding: 0.9em 1em;
+  margin: 0.2em 0;
+  min-height: 60px;
+  overflow-x: auto;
+}
+/* margin auto (not flex centering) so a diagram wider than the pane keeps its
+   left edge reachable via the container's horizontal scroll. */
+.cm-editor .cm-mermaid-widget svg {
+  display: block;
+  margin: 0 auto;
+  max-width: 100%;
+  height: auto;
+}
+.cm-editor .cm-mermaid-loading {
+  color: var(--color-text-muted);
+  font-size: 0.85em;
+  font-style: italic;
+}
+.cm-editor .cm-mermaid-error {
+  color: var(--color-danger);
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  white-space: pre-wrap;
+}
+
 /* highlight.js token colors. Shared by the editor's rendered code blocks
    (codemirror-live-markdown emits hljs-* classes but ships no theme CSS) and
    the AI chat bubbles (.prose-ai code blocks are highlighted via the shared
