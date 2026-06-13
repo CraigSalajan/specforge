@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-13
+
 ### Added
 
 - Editor tabs: every file you open gets a tab above the editor. Click to switch, middle-click or × to close, drag to reorder, right-click for Close / Close Others / Reopen Closed Tab. Keyboard: Ctrl+W closes, Ctrl+Shift+T reopens the last closed tab, Ctrl+Tab / Ctrl+Shift+Tab (and Ctrl+PgDn / Ctrl+PgUp) cycle. Open tabs are restored on launch, each tab remembers its cursor and scroll position for the session, and undo can no longer step across a file switch.
@@ -26,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Code blocks in AI chat replies are now syntax-highlighted, matching the editor and PDF export.
 - Editor error notices (save/export/read failures) use the app's dialog system instead of system alert popups.
 - Removed the non-functional Light theme option from Settings — SpecForge is dark-only by design.
+
+### Fixed
+
+- Opening a file right after closing every editor tab created the tab but left the editor blank — files now load reliably in that case. Two related edge cases were hardened along with it: opening a file whose contents are byte-identical to what's already shown, and a stale editor view lingering after the file pane had been emptied.
 
 ### Security
 
@@ -91,7 +97,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - DevTools are disabled in published production builds (F12 / Ctrl+Shift+I and the "Toggle Developer Tools" menu item are no-ops in official release builds). Local development and self-built packages keep DevTools available.
 
-[Unreleased]: https://github.com/CraigSalajan/specforge/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/CraigSalajan/specforge/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/CraigSalajan/specforge/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/CraigSalajan/specforge/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/CraigSalajan/specforge/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/CraigSalajan/specforge/compare/v0.2.1...v0.2.2
