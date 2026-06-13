@@ -13,9 +13,10 @@ import {
   untracked,
   viewChild,
 } from '@angular/core';
-import { EditorState } from '@codemirror/state';
+import { EditorSelection, EditorState, Prec, Transaction } from '@codemirror/state';
 import { EditorView, keymap } from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
+import { search, searchKeymap } from '@codemirror/search';
 import { markdown } from '@codemirror/lang-markdown';
 import { GFM } from '@lezer/markdown';
 import {

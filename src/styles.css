@@ -308,6 +308,91 @@ html, body {
   cursor: pointer;
 }
 
+/* ── In-file find/replace panel (@codemirror/search, docked top via
+   search({ top: true }) in editor.component.ts) ──────────────────────────
+   The plugin's base theme is light-first (white fields, silver borders,
+   gradient buttons), so every piece is restated on the SpecForge ramp: the
+   panel is a quiet surface-1 chrome row, fields and buttons sit on surface-2
+   with 1px subtle borders, and the accent is reserved for focus and match
+   highlights — matching the app's input/ghost-button vocabulary. */
+.cm-editor .cm-panels {
+  background: var(--color-surface-1);
+  color: var(--color-text-primary);
+  border: none;
+}
+.cm-editor .cm-panels-top { border-bottom: 1px solid var(--color-border-subtle); }
+.cm-editor .cm-panels-bottom { border-top: 1px solid var(--color-border-subtle); }
+.cm-editor .cm-panel.cm-search {
+  padding: 0.4rem 2.2rem 0.4rem 0.75rem; /* right inset clears the absolute × */
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+}
+.cm-editor .cm-panel.cm-search .cm-textfield {
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 4px;
+  color: var(--color-text-primary);
+  font-size: 0.75rem;
+  padding: 0.25rem 0.5rem;
+}
+.cm-editor .cm-panel.cm-search .cm-textfield:focus {
+  border-color: var(--color-accent);
+  outline: none;
+}
+.cm-editor .cm-panel.cm-search .cm-textfield::placeholder { color: var(--color-text-muted); }
+.cm-editor .cm-panel.cm-search .cm-button {
+  background-image: none; /* kill the plugin's gradient */
+  background-color: var(--color-surface-2);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 4px;
+  color: var(--color-text-secondary);
+  font-size: 0.75rem;
+  padding: 0.2rem 0.55rem;
+  cursor: pointer;
+}
+.cm-editor .cm-panel.cm-search .cm-button:hover {
+  background-color: var(--color-surface-3);
+  color: var(--color-text-primary);
+}
+.cm-editor .cm-panel.cm-search .cm-button:focus-visible {
+  border-color: var(--color-accent);
+  outline: none;
+}
+.cm-editor .cm-panel.cm-search label {
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+}
+.cm-editor .cm-panel.cm-search input[type="checkbox"] {
+  color-scheme: dark;
+  accent-color: var(--color-accent);
+  margin-right: 0.35em;
+  vertical-align: middle;
+}
+.cm-editor .cm-panel.cm-search button[name="close"] {
+  color: var(--color-text-muted);
+  font-size: 0.9rem;
+  padding: 0 0.4rem;
+  top: 0.35rem;
+  right: 0.35rem;
+  cursor: pointer;
+}
+.cm-editor .cm-panel.cm-search button[name="close"]:hover { color: var(--color-text-primary); }
+.cm-editor .cm-panel.cm-search button[name="close"]:focus-visible {
+  outline: 1px solid var(--color-accent);
+  border-radius: 4px;
+}
+/* Match highlights: same indigo family as text selection — dim wash for every
+   match, stronger fill + brighter outline for the current one. */
+.cm-editor .cm-searchMatch {
+  background: rgba(99, 102, 241, 0.18);
+  outline: 1px solid rgba(99, 102, 241, 0.35);
+  border-radius: 2px;
+}
+.cm-editor .cm-searchMatch-selected {
+  background: rgba(99, 102, 241, 0.45);
+  outline-color: rgba(129, 140, 248, 0.8);
+}
+
 .prose-preview { font-size: 1rem; line-height: 1.6; max-width: 900px; }
 .prose-preview h1 { font-size: 1.9em; font-weight: 700; margin: 0.6em 0 0.4em; border-bottom: 1px solid var(--color-border-subtle); padding-bottom: 0.3em; }
 .prose-preview h2 { font-size: 1.5em; font-weight: 600; margin: 1em 0 0.4em; }
