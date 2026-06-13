@@ -2,8 +2,7 @@ import { ChangeDetectionStrategy, Component, inject, output } from '@angular/cor
 import type { FileNode } from '../../shared/types';
 import { IpcService } from '../../core/ipc.service';
 import { VaultService } from '../../core/vault.service';
-import { InputDialogService } from '../../core/input-dialog.service';
-import { ConfirmDialogService } from '../../core/confirm-dialog.service';
+import { VaultFileOpsService } from '../../core/vault-file-ops.service';
 import { ContextMenuService, type ContextMenuItem } from '../../core/context-menu.service';
 import { PdfExportService } from '../../core/pdf-export.service';
 import { FileTreeNodeComponent } from './file-tree-node.component';
@@ -90,9 +89,8 @@ import { FileTreeNodeComponent } from './file-tree-node.component';
 })
 export class VaultTreeComponent {
   private readonly vault = inject(VaultService);
+  private readonly fileOps = inject(VaultFileOpsService);
   private readonly ipc = inject(IpcService);
-  private readonly inputDialog = inject(InputDialogService);
-  private readonly confirmDialog = inject(ConfirmDialogService);
   private readonly contextMenu = inject(ContextMenuService);
   private readonly pdfExport = inject(PdfExportService);
 
@@ -127,18 +125,7 @@ export class VaultTreeComponent {
   }
 
   async onMove({ sourcePath, targetDir }: { sourcePath: string; targetDir: string }): Promise<void> {
-    const filename = sourcePath.split(/[\\/]/).pop() ?? sourcePath;
-    const sourceParent = sourcePath.replace(/[\\/][^\\/]*$/, '');
-    if (sourceParent === targetDir) return;
-    const sep = targetDir.includes('\\') ? '\\' : '/';
-    const newPath = `${targetDir}${sep}${filename}`;
-    try {
-      await this.ipc.renameFile(sourcePath, newPath);
-      await this.vault.refreshTree();
-      if (this.vault.activeFilePath() === sourcePath) this.fileSelected.emit(newPath);
-    } catch (err) {
-      console.error('Failed to move: ' + (err instanceof Error ? err.message : String(err)));
-    }
+    await this.fileOps.moveFile(sourcePath, targetDir);
   }
 
   onBackgroundContextMenu(evt: MouseEvent): void {
@@ -174,92 +161,22 @@ export class VaultTreeComponent {
     this.contextMenu.open(evt.x, evt.y, items);
   }
 
+  // Creation flows live in VaultFileOpsService (shared with the command
+  // palette); the service opens created files via VaultService directly.
   async onCreateFile(): Promise<void> {
-    const vaultPath = this.vault.vaultPath();
-    if (!vaultPath) return;
-    const name = await this.inputDialog.prompt({
-      title: 'New File',
-      label: 'File name',
-      initialValue: '',
-      placeholder: 'untitled.md',
-      defaultValue: 'untitled.md',
-      confirmLabel: 'Create',
-    });
-    if (!name) return;
-    const filename = name.endsWith('.md') ? name : `${name}.md`;
-    const sep = vaultPath.includes('\\') ? '\\' : '/';
-    const target = `${vaultPath}${sep}${filename}`;
-    try {
-      await this.ipc.createFile(target);
-      await this.vault.refreshTree();
-      this.fileSelected.emit(target);
-    } catch (err) {
-      console.error('Failed to create file: ' + (err instanceof Error ? err.message : String(err)));
-    }
+    await this.fileOps.createFile();
   }
 
   async onCreateFolder(): Promise<void> {
-    const vaultPath = this.vault.vaultPath();
-    if (!vaultPath) return;
-    const name = await this.inputDialog.prompt({
-      title: 'New Folder',
-      label: 'Folder name',
-      initialValue: '',
-      placeholder: 'new-folder',
-      defaultValue: 'new-folder',
-      confirmLabel: 'Create',
-    });
-    if (!name) return;
-    const sep = vaultPath.includes('\\') ? '\\' : '/';
-    const target = `${vaultPath}${sep}${name}`;
-    try {
-      await this.ipc.createFolder(target);
-      await this.vault.refreshTree();
-    } catch (err) {
-      console.error('Failed to create folder: ' + (err instanceof Error ? err.message : String(err)));
-    }
+    await this.fileOps.createFolder();
   }
 
   async onCreateFileInside(dirPath: string): Promise<void> {
-    const name = await this.inputDialog.prompt({
-      title: 'New File',
-      label: 'File name',
-      initialValue: '',
-      placeholder: 'untitled.md',
-      defaultValue: 'untitled.md',
-      confirmLabel: 'Create',
-    });
-    if (!name) return;
-    const filename = name.endsWith('.md') ? name : `${name}.md`;
-    const sep = dirPath.includes('\\') ? '\\' : '/';
-    const target = `${dirPath}${sep}${filename}`;
-    try {
-      await this.ipc.createFile(target);
-      await this.vault.refreshTree();
-      this.fileSelected.emit(target);
-    } catch (err) {
-      console.error('Failed to create file: ' + (err instanceof Error ? err.message : String(err)));
-    }
+    await this.fileOps.createFile(dirPath);
   }
 
   async onCreateFolderInside(dirPath: string): Promise<void> {
-    const name = await this.inputDialog.prompt({
-      title: 'New Folder',
-      label: 'Folder name',
-      initialValue: '',
-      placeholder: 'new-folder',
-      defaultValue: 'new-folder',
-      confirmLabel: 'Create',
-    });
-    if (!name) return;
-    const sep = dirPath.includes('\\') ? '\\' : '/';
-    const target = `${dirPath}${sep}${name}`;
-    try {
-      await this.ipc.createFolder(target);
-      await this.vault.refreshTree();
-    } catch (err) {
-      console.error('Failed to create folder: ' + (err instanceof Error ? err.message : String(err)));
-    }
+    await this.fileOps.createFolder(dirPath);
   }
 
   async onExportPdf(path: string): Promise<void> {
@@ -276,70 +193,18 @@ export class VaultTreeComponent {
     }
   }
 
+  // Rename/move/delete flows live in VaultFileOpsService too: they flush the
+  // editor buffer where needed and keep open tabs / the active file pointed
+  // at the right paths.
   async onRename(path: string): Promise<void> {
-    const current = path.split(/[\\/]/).pop() ?? path;
-    const next = await this.inputDialog.prompt({
-      title: 'Rename File',
-      label: 'New name',
-      initialValue: current,
-      confirmLabel: 'Rename',
-    });
-    if (!next || next === current) return;
-    const finalName = next.endsWith('.md') ? next : `${next}.md`;
-    const parent = path.slice(0, path.length - current.length);
-    const newPath = `${parent}${finalName}`;
-    try {
-      await this.ipc.renameFile(path, newPath);
-      await this.vault.refreshTree();
-    } catch (err) {
-      console.error('Failed to rename: ' + (err instanceof Error ? err.message : String(err)));
-    }
+    await this.fileOps.renameFile(path);
   }
 
   async onDelete(path: string): Promise<void> {
-    const name = path.split(/[\\/]/).pop() ?? path;
-    const ok = await this.confirmDialog.confirm({
-      title: 'Delete File',
-      message: `Delete "${name}"? This cannot be undone.`,
-      confirmLabel: 'Delete',
-      danger: true,
-    });
-    if (!ok) return;
-    try {
-      await this.ipc.deleteFile(path);
-      await this.vault.refreshTree();
-    } catch (err) {
-      console.error('Failed to delete: ' + (err instanceof Error ? err.message : String(err)));
-    }
-  }
-
-  private countDescendants(n: FileNode): number {
-    const children = n.children ?? [];
-    let count = children.length;
-    for (const child of children) {
-      count += this.countDescendants(child);
-    }
-    return count;
+    await this.fileOps.deleteFile(path);
   }
 
   async onDeleteFolder(node: FileNode): Promise<void> {
-    const count = this.countDescendants(node);
-    const message =
-      count === 0
-        ? `Delete empty folder "${node.name}"?`
-        : `Delete folder "${node.name}" and everything inside it?\n\nThis will permanently delete ${count} item(s). This cannot be undone.`;
-    const ok = await this.confirmDialog.confirm({
-      title: 'Delete Folder',
-      message,
-      confirmLabel: 'Delete',
-      danger: true,
-    });
-    if (!ok) return;
-    try {
-      await this.ipc.deleteFolder(node.path);
-      await this.vault.refreshTree();
-    } catch (err) {
-      console.error('Failed to delete folder: ' + (err instanceof Error ? err.message : String(err)));
-    }
+    await this.fileOps.deleteFolder(node);
   }
 }

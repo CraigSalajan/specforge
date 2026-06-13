@@ -1,17 +1,38 @@
-import { ChangeDetectionStrategy, Component, OnInit, effect, inject, signal } from '@angular/core';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  HostListener,
+  OnInit,
+  effect,
+  inject,
+  signal,
+} from '@angular/core';
 import { VaultService } from './core/vault.service';
+import { OpenTabsService } from './core/open-tabs.service';
 import { VaultTreeComponent } from './features/vault/vault-tree.component';
 import { EditorComponent } from './features/editor/editor.component';
+import { EditorTabsComponent } from './features/editor/editor-tabs.component';
 import { AiPanelComponent } from './features/ai/ai-panel.component';
 import { IpcService } from './core/ipc.service';
-import { UiStateService } from './core/ui-state.service';
+import { UiStateService, type SidebarView } from './core/ui-state.service';
 import { SettingsService } from './core/settings.service';
+import { AppCommandsService } from './core/app-commands.service';
+import { CommandRegistryService } from './core/command-registry.service';
+import { ConfirmDialogService } from './core/confirm-dialog.service';
+import { ContextMenuService } from './core/context-menu.service';
+import { InputDialogService } from './core/input-dialog.service';
+import { AiOrchestratorService } from './features/ai/ai-orchestrator.service';
+import { isMacPlatform, primaryModifierLabel } from './shared/platform';
 import { SettingsModalComponent } from './features/settings/settings-modal.component';
 import { IndexStatusComponent } from './features/indexing/index-status.component';
 import { FileChangeProposalComponent } from './features/ai/file-change-proposal.component';
 import { InputDialogComponent } from './features/shared/input-dialog.component';
 import { ConfirmDialogComponent } from './features/shared/confirm-dialog.component';
 import { ContextMenuComponent } from './features/shared/context-menu.component';
+import { PaletteComponent } from './features/palette/palette.component';
+import { SearchPanelComponent } from './features/search/search-panel.component';
+import { OutlinePanelComponent } from './features/outline/outline-panel.component';
+import { LinksPanelComponent } from './features/links/links-panel.component';
 
 type PaneSide = 'left' | 'right';
 
@@ -24,6 +45,7 @@ const PANE_MAX = 600;
   imports: [
     VaultTreeComponent,
     EditorComponent,
+    EditorTabsComponent,
     AiPanelComponent,
     SettingsModalComponent,
     IndexStatusComponent,
@@ -31,6 +53,10 @@ const PANE_MAX = 600;
     InputDialogComponent,
     ConfirmDialogComponent,
     ContextMenuComponent,
+    PaletteComponent,
+    SearchPanelComponent,
+    OutlinePanelComponent,
+    LinksPanelComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
@@ -55,25 +81,93 @@ const PANE_MAX = 600;
       </header>
 
       <div class="flex min-h-0 flex-1">
+        <!-- Collapsed panes stay mounted (display:none) so tree expansion and
+             AI panel state survive a toggle from the command palette. The
+             same applies to the sidebar views below: all three stay mounted
+             so tree expansion and search results survive view switches. -->
         <aside
-          class="shrink-0 border-r border-border-subtle"
+          class="flex shrink-0 flex-col border-r border-border-subtle"
+          [class.hidden]="leftCollapsed()"
           [style.width.px]="leftWidth()">
-          <app-vault-tree (fileSelected)="onFileSelected($event)" />
+          <nav
+            class="flex shrink-0 items-center gap-1 border-b border-border-subtle bg-surface-1 px-2 py-1"
+            aria-label="Sidebar views">
+            <button
+              type="button"
+              class="rounded p-1.5 transition-colors"
+              [class]="sidebarTabClass('files')"
+              title="Files"
+              aria-label="Files"
+              [attr.aria-pressed]="sidebarView() === 'files'"
+              (click)="showSidebarView('files')">
+              <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" /></svg>
+            </button>
+            <button
+              type="button"
+              class="rounded p-1.5 transition-colors"
+              [class]="sidebarTabClass('search')"
+              [title]="'Search (' + modKey + '+Shift+F)'"
+              aria-label="Search"
+              [attr.aria-pressed]="sidebarView() === 'search'"
+              (click)="showSidebarView('search')">
+              <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></svg>
+            </button>
+            <button
+              type="button"
+              class="rounded p-1.5 transition-colors"
+              [class]="sidebarTabClass('outline')"
+              title="Outline"
+              aria-label="Outline"
+              [attr.aria-pressed]="sidebarView() === 'outline'"
+              (click)="showSidebarView('outline')">
+              <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h.01" /><path d="M3 18h.01" /><path d="M3 6h.01" /><path d="M8 12h13" /><path d="M8 18h13" /><path d="M8 6h13" /></svg>
+            </button>
+            <button
+              type="button"
+              class="rounded p-1.5 transition-colors"
+              [class]="sidebarTabClass('links')"
+              title="Links"
+              aria-label="Links"
+              [attr.aria-pressed]="sidebarView() === 'links'"
+              (click)="showSidebarView('links')">
+              <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></svg>
+            </button>
+          </nav>
+          <div class="min-h-0 flex-1">
+            <div class="h-full" [class.hidden]="sidebarView() !== 'files'">
+              <app-vault-tree (fileSelected)="onFileSelected($event)" />
+            </div>
+            <div class="h-full" [class.hidden]="sidebarView() !== 'search'">
+              <app-search-panel />
+            </div>
+            <div class="h-full" [class.hidden]="sidebarView() !== 'outline'">
+              <app-outline-panel />
+            </div>
+            <div class="h-full" [class.hidden]="sidebarView() !== 'links'">
+              <app-links-panel />
+            </div>
+          </div>
         </aside>
 
         <div
           class="group relative w-1 shrink-0 cursor-col-resize bg-transparent transition-colors hover:bg-accent"
+          [class.hidden]="leftCollapsed()"
           [class.bg-accent]="dragging() === 'left'"
           role="separator"
           aria-orientation="vertical"
           (pointerdown)="onResizeStart($event, 'left')"></div>
 
-        <main class="min-w-0 flex-1">
-          <app-editor [filePath]="activeFile()" (saved)="onSaved($event)" />
+        <main class="flex min-w-0 flex-1 flex-col">
+          <app-editor-tabs class="shrink-0" />
+          <app-editor
+            class="block min-h-0 flex-1"
+            [filePath]="activeFile()"
+            (saved)="onSaved($event)" />
         </main>
 
         <div
           class="group relative w-1 shrink-0 cursor-col-resize bg-transparent transition-colors hover:bg-accent"
+          [class.hidden]="rightCollapsed()"
           [class.bg-accent]="dragging() === 'right'"
           role="separator"
           aria-orientation="vertical"
@@ -81,6 +175,7 @@ const PANE_MAX = 600;
 
         <aside
           class="shrink-0 border-l border-border-subtle"
+          [class.hidden]="rightCollapsed()"
           [style.width.px]="rightWidth()">
           <app-ai-panel />
         </aside>
@@ -92,20 +187,37 @@ const PANE_MAX = 600;
     <app-input-dialog />
     <app-confirm-dialog />
     <app-context-menu />
+    <app-palette />
   `,
 })
 export class AppComponent implements OnInit {
   private readonly vault = inject(VaultService);
+  private readonly openTabs = inject(OpenTabsService);
   private readonly ipc = inject(IpcService);
   private readonly ui = inject(UiStateService);
   private readonly settings = inject(SettingsService);
+  private readonly registry = inject(CommandRegistryService);
+  private readonly appCommands = inject(AppCommandsService);
+  private readonly contextMenu = inject(ContextMenuService);
+  private readonly inputDialog = inject(InputDialogService);
+  private readonly confirmDialog = inject(ConfirmDialogService);
+  private readonly orchestrator = inject(AiOrchestratorService);
+
+  private readonly isMac = isMacPlatform();
+  protected readonly modKey = primaryModifierLabel();
 
   readonly activeFile = this.vault.activeFilePath;
   readonly ipcAvailable = signal(this.ipc.isAvailable);
+  readonly sidebarView = this.ui.sidebarView;
 
   readonly leftWidth = signal(this.settings.leftPaneWidth());
   readonly rightWidth = signal(this.settings.rightPaneWidth());
   readonly dragging = signal<PaneSide | null>(null);
+
+  // Session-only pane visibility (not persisted; widths are). Toggled via the
+  // command palette.
+  readonly leftCollapsed = signal(false);
+  readonly rightCollapsed = signal(false);
 
   private hydratedOnce = false;
   private dragPointerId: number | null = null;
@@ -121,14 +233,168 @@ export class AppComponent implements OnInit {
       this.leftWidth.set(this.clamp(this.settings.leftPaneWidth()));
       this.rightWidth.set(this.clamp(this.settings.rightPaneWidth()));
     });
+
+    // Built-in commands. Pane toggles and sidebar-view commands are
+    // registered here because this component owns the pane state (showing a
+    // sidebar view must also un-collapse the left pane); everything else
+    // lives in AppCommandsService.
+    this.appCommands.registerDefaults();
+    this.registry.register(
+      {
+        id: 'view.toggleLeftPane',
+        title: 'Toggle left pane',
+        category: 'View',
+        run: () => this.leftCollapsed.update((v) => !v),
+      },
+      {
+        id: 'view.toggleRightPane',
+        title: 'Toggle right pane',
+        category: 'View',
+        run: () => this.rightCollapsed.update((v) => !v),
+      },
+      {
+        id: 'view.showFiles',
+        title: 'Show files',
+        category: 'View',
+        run: () => this.revealSidebarView('files'),
+      },
+      {
+        id: 'view.showOutline',
+        title: 'Show outline',
+        category: 'View',
+        run: () => this.revealSidebarView('outline'),
+      },
+      {
+        id: 'view.showBacklinks',
+        title: 'Show backlinks',
+        category: 'View',
+        run: () => this.revealSidebarView('links'),
+      },
+      {
+        id: 'search.inVault',
+        title: 'Search in vault…',
+        category: 'Navigate',
+        shortcut: `${this.modKey}+Shift+F`,
+        run: () => this.revealSidebarView('search'),
+      },
+    );
   }
 
   ngOnInit(): void {
     void this.vault.init();
   }
 
+  /**
+   * Global Ctrl+P / Ctrl+Shift+P (quick switcher / command palette),
+   * Ctrl+Shift+F (search in vault), Ctrl+W (close tab) and Ctrl+Shift+T
+   * (reopen closed tab) — Cmd on macOS. Window-level (bubble phase) like the
+   * editor's Ctrl+S: CodeMirror binds none of these chords on the primary
+   * modifier, so the events always reach us. Each chord is always claimed
+   * (preventDefault) so Chromium can never run its own binding (print
+   * dialog), even while a modal is up.
+   *
+   * Tab cycling (Ctrl+Tab / Ctrl+Shift+Tab, Ctrl+PgDn / Ctrl+PgUp) uses the
+   * Control key on EVERY platform — macOS included, matching VS Code — so it
+   * is handled before the primary-modifier gate. Cycling deliberately allows
+   * key repeat (hold to keep stepping); close/reopen do not.
+   */
+  @HostListener('window:keydown', ['$event'])
+  onGlobalKeydown(evt: KeyboardEvent): void {
+    if (evt.ctrlKey && !evt.metaKey && !evt.altKey) {
+      if (evt.key === 'Tab') {
+        evt.preventDefault();
+        if (this.blockingOverlayOpen()) return;
+        if (evt.shiftKey) this.openTabs.previous();
+        else this.openTabs.next();
+        return;
+      }
+      if (!evt.shiftKey && (evt.key === 'PageDown' || evt.key === 'PageUp')) {
+        evt.preventDefault();
+        if (this.blockingOverlayOpen()) return;
+        if (evt.key === 'PageDown') this.openTabs.next();
+        else this.openTabs.previous();
+        return;
+      }
+    }
+
+    const primary = this.isMac ? evt.metaKey : evt.ctrlKey;
+    const wrongModifier = (this.isMac ? evt.ctrlKey : evt.metaKey) || evt.altKey;
+    if (!primary || wrongModifier) return;
+    const key = evt.key.toLowerCase();
+
+    if (key === 'p') {
+      evt.preventDefault();
+      if (evt.repeat) return;
+      // A blocking overlay owns the keyboard; re-invoking while the palette
+      // itself is open just re-arms it in the requested mode.
+      if (this.blockingOverlayOpen()) return;
+      this.contextMenu.close();
+      this.ui.openPalette(evt.shiftKey ? 'commands' : 'files');
+      return;
+    }
+
+    if (key === 'f' && evt.shiftKey) {
+      evt.preventDefault();
+      if (evt.repeat) return;
+      if (this.blockingOverlayOpen()) return;
+      this.contextMenu.close();
+      this.revealSidebarView('search');
+      return;
+    }
+
+    // Claimed even with no active tab: the chord must never fall through to
+    // anything else (the Electron menu deliberately drops its Close Window
+    // accelerator so this handler sees Ctrl+W at all).
+    if (key === 'w' && !evt.shiftKey) {
+      evt.preventDefault();
+      if (evt.repeat) return;
+      if (this.blockingOverlayOpen()) return;
+      const active = this.vault.activeFilePath();
+      if (active !== null) this.openTabs.closeTab(active);
+      return;
+    }
+
+    if (key === 't' && evt.shiftKey) {
+      evt.preventDefault();
+      if (evt.repeat) return;
+      if (this.blockingOverlayOpen()) return;
+      this.openTabs.reopenClosed();
+    }
+  }
+
+  /** Sidebar switcher tabs: plain view switch (the pane is already visible). */
+  showSidebarView(view: SidebarView): void {
+    this.ui.setSidebarView(view);
+  }
+
+  /**
+   * Command/shortcut entry point: switching views must also un-collapse the
+   * left pane, or the command would appear to do nothing. Activating the
+   * search view focuses its input (see UiStateService.setSidebarView).
+   */
+  private revealSidebarView(view: SidebarView): void {
+    this.leftCollapsed.set(false);
+    this.ui.setSidebarView(view);
+  }
+
+  /** Selected tab reads like a selected list row: surface-3 + primary ink. */
+  protected sidebarTabClass(view: SidebarView): string {
+    return this.sidebarView() === view
+      ? 'bg-surface-3 text-text-primary'
+      : 'text-text-secondary hover:bg-surface-2 hover:text-text-primary';
+  }
+
   openSettings(): void {
     this.ui.openSettings();
+  }
+
+  private blockingOverlayOpen(): boolean {
+    return (
+      this.ui.settingsOpen() ||
+      this.inputDialog.request() !== null ||
+      this.confirmDialog.request() !== null ||
+      this.orchestrator.pendingProposal() !== null
+    );
   }
 
   onFileSelected(path: string): void {
