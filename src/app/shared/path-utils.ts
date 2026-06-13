@@ -14,6 +14,11 @@ export function samePath(a: string, b: string): boolean {
   return normalizePath(a) === normalizePath(b);
 }
 
-function normalizePath(p: string): string {
+/**
+ * Canonical comparison key for an absolute path (lowercased, forward slashes,
+ * no trailing separator). Use as a Map/Set key wherever paths from different
+ * sources must collapse to one entry; for plain equality prefer `samePath`.
+ */
+export function normalizePath(p: string): string {
   return p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
 }
