@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Editor tabs: every file you open gets a tab above the editor. Click to switch, middle-click or × to close, drag to reorder, right-click for Close / Close Others / Reopen Closed Tab. Keyboard: Ctrl+W closes, Ctrl+Shift+T reopens the last closed tab, Ctrl+Tab / Ctrl+Shift+Tab (and Ctrl+PgDn / Ctrl+PgUp) cycle. Open tabs are restored on launch, each tab remembers its cursor and scroll position for the session, and undo can no longer step across a file switch.
+
+- Quick switcher (Ctrl+P) and command palette (Ctrl+Shift+P): fuzzy-open any vault file (recent files first), or run app commands — new file/folder, export PDF, rebuild index, toggle panes, focus the editor or AI composer, and more. Type `>` in the switcher to flip into command mode.
+- Search across the vault (Ctrl+Shift+F): a new Search view in the left sidebar runs full-text search over your notes, groups matches by file, and opens the matching line on click.
+- Outline view: a live table of contents for the open document in the left sidebar — click a heading to jump to it.
+- Links view: see every note that links to the open file ("linked mentions") and every link going out of it, with one-click navigation.
+- Wikilinks now work like you'd expect: click `[[a link]]` to open it (including `[[Note#Heading]]` jumps), links to files that don't exist yet are styled distinctly and offer to create the file, and typing `[[` autocompletes from your vault.
+- Find & replace inside the open document (Ctrl+F).
+- AI citations now jump to the cited section: clicking a citation badge opens the file and scrolls to the heading with a brief highlight.
+- SpecForge now reopens your last open file on launch, and the file tree remembers which folders you collapsed.
+- Mermaid diagrams: ` ```mermaid ` fenced code blocks render as diagrams in the editor (flowcharts, sequence diagrams, state machines, and more), themed to match the app. Click a diagram to edit its source; invalid diagrams show a quiet inline error instead of a broken block. PDF export keeps treating these blocks as code for now.
+
+### Changed
+
+- Code blocks in AI chat replies are now syntax-highlighted, matching the editor and PDF export.
+- Editor error notices (save/export/read failures) use the app's dialog system instead of system alert popups.
+- Removed the non-functional Light theme option from Settings — SpecForge is dark-only by design.
+
+### Security
+
+- The AI provider API key is now encrypted at rest with the operating system's keychain (Electron `safeStorage`) when available. Existing plaintext keys are migrated automatically on first launch; systems without OS-level encryption keep the previous behavior.
+
 ## [0.4.0] - 2026-06-12
 
 ### Added
