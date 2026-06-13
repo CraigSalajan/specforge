@@ -149,4 +149,23 @@ export const MIGRATIONS: ReadonlyArray<Migration> = [
       ALTER TABLE chat_sessions ADD COLUMN context_scope TEXT NOT NULL DEFAULT '{}';
     `,
   },
+  {
+    id: 6,
+    name: 'links_table',
+    sql: `
+      CREATE TABLE IF NOT EXISTS links (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_id         INTEGER NOT NULL,
+        target_raw      TEXT NOT NULL,
+        target_rel_path TEXT,
+        line            INTEGER NOT NULL,
+        created_at      INTEGER NOT NULL,
+        FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_links_file_id ON links(file_id);
+      CREATE INDEX IF NOT EXISTS idx_links_target_raw_lower ON links(lower(target_raw));
+      CREATE INDEX IF NOT EXISTS idx_links_target_rel_path_lower ON links(lower(target_rel_path));
+    `,
+  },
 ];

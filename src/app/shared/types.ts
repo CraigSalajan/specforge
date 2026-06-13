@@ -14,6 +14,9 @@ export const IpcChannels = {
   IndexRebuild: 'specforge:index-rebuild',
   IndexStatus: 'specforge:index-status',
   IndexSearch: 'specforge:index-search',
+  LinksBacklinks: 'specforge:links-backlinks',
+  LinksOutgoing: 'specforge:links-outgoing',
+  LinksResolve: 'specforge:links-resolve',
   SettingsGet: 'specforge:settings-get',
   SettingsGetAll: 'specforge:settings-get-all',
   SettingsSet: 'specforge:settings-set',
@@ -150,6 +153,28 @@ export interface Citation {
   relPath: string;
   headingPath: string;
   startLine?: number;
+}
+
+// Wikilink index (backlinks / traceability substrate)
+
+/** A file linking TO the queried file via a resolved wikilink. */
+export interface BacklinkRef {
+  /** Vault-relative path of the file containing the link. */
+  sourceRelPath: string;
+  /** 1-based line where the wikilink appears. */
+  line: number;
+  /** Link target as written (before any `|` alias or `#` fragment). */
+  targetRaw: string;
+}
+
+/** A wikilink FROM the queried file, resolved or not. */
+export interface OutgoingLinkRef {
+  /** Link target as written (before any `|` alias or `#` fragment). */
+  targetRaw: string;
+  /** Resolved vault-relative path, or null when the target does not exist. */
+  targetRelPath: string | null;
+  /** 1-based line where the wikilink appears. */
+  line: number;
 }
 
 /**
@@ -511,6 +536,11 @@ export interface SpecForgeApi {
     limit: number,
     filter?: { folders?: string[]; files?: string[] },
   ) => Promise<IndexSearchHit[]>;
+
+  // Wikilink index
+  linksBacklinks: (vaultPath: string, relPath: string) => Promise<BacklinkRef[]>;
+  linksOutgoing: (vaultPath: string, relPath: string) => Promise<OutgoingLinkRef[]>;
+  linksResolve: (vaultPath: string, target: string) => Promise<string | null>;
 
   // Phase 2: settings
   settingsGet: (key: string) => Promise<string | null>;

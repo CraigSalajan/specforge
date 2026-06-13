@@ -8,6 +8,7 @@ import { registerWatcherHandlers, disposeWatcher } from './ipc/watcher';
 import { registerSettingsHandlers } from './ipc/settings';
 import { migratePlaintextSecrets } from './ipc/secure-settings';
 import { registerIndexHandlers } from './ipc/index';
+import { registerLinkHandlers } from './ipc/links';
 import { registerChatHandlers } from './ipc/chats';
 import { registerEmbeddingHandlers } from './ipc/embeddings';
 import { registerAiHistoryHandlers } from './ipc/ai-history';
@@ -119,6 +120,7 @@ app.whenReady().then(async () => {
   registerWatcherHandlers(() => BrowserWindow.getAllWindows());
   registerSettingsHandlers();
   registerIndexHandlers();
+  registerLinkHandlers();
   registerChatHandlers();
   registerEmbeddingHandlers();
   registerAiHistoryHandlers();

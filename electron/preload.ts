@@ -17,6 +17,9 @@ const IpcChannels = {
   IndexRebuild: 'specforge:index-rebuild',
   IndexStatus: 'specforge:index-status',
   IndexSearch: 'specforge:index-search',
+  LinksBacklinks: 'specforge:links-backlinks',
+  LinksOutgoing: 'specforge:links-outgoing',
+  LinksResolve: 'specforge:links-resolve',
   SettingsGet: 'specforge:settings-get',
   SettingsGetAll: 'specforge:settings-get-all',
   SettingsSet: 'specforge:settings-set',
@@ -184,6 +187,14 @@ const api = {
     limit: number,
     filter?: { folders?: string[]; files?: string[] },
   ) => ipcRenderer.invoke(IpcChannels.IndexSearch, vaultPath, query, limit, filter),
+
+  // Wikilink index
+  linksBacklinks: (vaultPath: string, relPath: string) =>
+    ipcRenderer.invoke(IpcChannels.LinksBacklinks, vaultPath, relPath),
+  linksOutgoing: (vaultPath: string, relPath: string) =>
+    ipcRenderer.invoke(IpcChannels.LinksOutgoing, vaultPath, relPath),
+  linksResolve: (vaultPath: string, target: string): Promise<string | null> =>
+    ipcRenderer.invoke(IpcChannels.LinksResolve, vaultPath, target),
 
   // Phase 2: settings
   settingsGet: (key: string): Promise<string | null> =>

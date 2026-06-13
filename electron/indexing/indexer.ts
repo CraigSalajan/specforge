@@ -2,6 +2,8 @@ import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 import { chunkMarkdown } from './chunker';
+import { extractWikiLinks, type WikiLinkRef } from './link-parser';
+import { resolveLinkTarget } from './link-resolver';
 import {
   upsertFile,
   findFileByRelPath,
@@ -11,6 +13,12 @@ import {
   lastIndexedAt,
 } from '../db/repositories/files.repo';
 import { countChunks, replaceChunksForFile } from '../db/repositories/chunks.repo';
+import {
+  replaceLinksForFile,
+  listStaleLinks,
+  setLinkTarget,
+} from '../db/repositories/links.repo';
+import { transaction } from '../db/index';
 
 const IGNORED_DIRS = new Set([
   '.git',
@@ -71,7 +79,52 @@ async function walkMarkdown(dir: string): Promise<string[]> {
   return out;
 }
 
-export async function indexFile(vaultRoot: string, absFilePath: string): Promise<void> {
+/**
+ * Resolves and stores the wikilinks of a file (delete-then-insert, mirroring
+ * the chunks pattern). Resolution runs against the vault's current `files`
+ * rows, so it must happen after the file's own row is upserted.
+ */
+function storeLinksForFile(vaultRoot: string, fileId: number, refs: WikiLinkRef[]): void {
+  if (refs.length === 0) {
+    replaceLinksForFile(fileId, []);
+    return;
+  }
+  const relPaths = listFileRelPaths(vaultRoot);
+  replaceLinksForFile(
+    fileId,
+    refs.map((ref) => ({
+      targetRaw: ref.target,
+      targetRelPath: resolveLinkTarget(ref.target, relPaths),
+      line: ref.line,
+    })),
+  );
+}
+
+/**
+ * Cheap vault-wide re-resolution pass: re-resolves links that never resolved
+ * (NULL target) or whose resolved target no longer exists. Run after any file
+ * add/delete/rename so backlinks track the current file set.
+ */
+export function reresolveVaultLinks(vaultRoot: string): void {
+  const stale = listStaleLinks(vaultRoot);
+  if (stale.length === 0) return;
+  const relPaths = listFileRelPaths(vaultRoot);
+  transaction(() => {
+    for (const link of stale) {
+      setLinkTarget(link.id, resolveLinkTarget(link.targetRaw, relPaths));
+    }
+  });
+}
+
+export interface IndexFileResult {
+  /** True when the file row did not exist before this call. */
+  created: boolean;
+}
+
+export async function indexFile(
+  vaultRoot: string,
+  absFilePath: string,
+): Promise<IndexFileResult> {
   const stat = await fs.stat(absFilePath);
   const relPath = toRelPath(vaultRoot, absFilePath);
 
@@ -91,7 +144,10 @@ export async function indexFile(vaultRoot: string, absFilePath: string): Promise
       hash,
       indexed_at: now,
     });
-    return;
+    // Still refresh links: rows indexed before the links table existed would
+    // otherwise never be populated (the content hash is unchanged forever).
+    storeLinksForFile(vaultRoot, existing.id, extractWikiLinks(content));
+    return { created: false };
   }
 
   const fileId = upsertFile({
@@ -105,6 +161,8 @@ export async function indexFile(vaultRoot: string, absFilePath: string): Promise
 
   const chunks = chunkMarkdown(content);
   replaceChunksForFile(fileId, chunks);
+  storeLinksForFile(vaultRoot, fileId, extractWikiLinks(content));
+  return { created: existing === null };
 }
 
 /**
@@ -118,14 +176,19 @@ export async function reindexFile(vaultRoot: string, absFilePath: string): Promi
   if (!exists) {
     const relPath = toRelPath(vaultRoot, absFilePath);
     deleteFileByRelPath(vaultRoot, relPath);
+    reresolveVaultLinks(vaultRoot);
     return;
   }
-  await indexFile(vaultRoot, absFilePath);
+  const result = await indexFile(vaultRoot, absFilePath);
+  // A new file may satisfy previously unresolved links (or re-home links whose
+  // target was deleted, e.g. the second half of a rename).
+  if (result.created) reresolveVaultLinks(vaultRoot);
 }
 
 export async function removeFileFromIndex(vaultRoot: string, absFilePath: string): Promise<void> {
   const relPath = toRelPath(vaultRoot, absFilePath);
   deleteFileByRelPath(vaultRoot, relPath);
+  reresolveVaultLinks(vaultRoot);
 }
 
 export interface IndexRebuildResult {
@@ -158,6 +221,10 @@ export async function rebuildIndex(vaultRoot: string): Promise<IndexRebuildResul
       removed++;
     }
   }
+
+  // Single re-resolution pass once the file set is final: files indexed early
+  // in the walk could not resolve links to files indexed later.
+  reresolveVaultLinks(vaultRoot);
 
   return {
     scanned: absPaths.length,

@@ -11,6 +11,7 @@ import type {
   AiStreamChunkEvent,
   AiStreamDoneEvent,
   AiStreamErrorEvent,
+  BacklinkRef,
   ChatRole,
   ChatSession,
   ChatSessionSummary,
@@ -22,6 +23,7 @@ import type {
   FileNode,
   IndexSearchHit,
   IndexStatus,
+  OutgoingLinkRef,
   PendingChunkRef,
   PersistedChatMessage,
   SkillMeta,
@@ -112,6 +114,19 @@ export class IpcService {
     filter?: { folders?: string[]; files?: string[] },
   ): Promise<IndexSearchHit[]> {
     return this.requireApi().indexSearch(vaultPath, query, limit, filter);
+  }
+
+  // Wikilink index
+  linksBacklinks(vaultPath: string, relPath: string): Promise<BacklinkRef[]> {
+    return this.requireApi().linksBacklinks(vaultPath, relPath);
+  }
+
+  linksOutgoing(vaultPath: string, relPath: string): Promise<OutgoingLinkRef[]> {
+    return this.requireApi().linksOutgoing(vaultPath, relPath);
+  }
+
+  linksResolve(vaultPath: string, target: string): Promise<string | null> {
+    return this.requireApi().linksResolve(vaultPath, target);
   }
 
   // Phase 2: settings
