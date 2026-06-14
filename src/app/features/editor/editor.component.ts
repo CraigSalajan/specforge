@@ -109,10 +109,15 @@ const DELETED_BASELINE = '\0specforge:deleted-on-disk\0';
 // switches restore them). Map insertion order doubles as the eviction order.
 const VIEW_STATE_CACHE_MAX = 50;
 
-/** Selection (state JSON) + scroll captured when switching away from a file. */
+/**
+ * Selection (state JSON) + the document position at the top of the viewport,
+ * captured when switching away from a file. A doc anchor (not a pixel offset)
+ * is used because CM estimates off-screen line heights, so a raw scrollTop
+ * restores to the wrong place and drifts on every toggle.
+ */
 interface PerFileViewState {
   selection: unknown;
-  scrollTop: number;
+  topPos: number;
 }
 
 @Component({
@@ -662,7 +667,8 @@ export class EditorComponent implements OnDestroy {
       // the edit, so a selection inside a region both files happen to share
       // would survive the switch — and the debounced publish would resurrect
       // the just-cleared selection focus in a file the user never selected in.
-      if (this.view && this.loadedPath !== path) {
+      const isFileChange = this.loadedPath !== path;
+      if (this.view && isFileChange) {
         this.view.dispatch({ selection: { anchor: 0 } });
         // Reset the frontmatter form to collapsed so every file opens with the
         // compact summary bar. Gated on an actual file-path change (the view is
@@ -674,8 +680,17 @@ export class EditorComponent implements OnDestroy {
       this.loadedPath = path;
       // Arm the per-file selection/scroll restore (consumed once the view
       // holds this document; a pending reveal for this file outranks it).
+      // The view is reused across files, so a genuine switch to a file with no
+      // remembered position must reset scroll to the top — otherwise the new
+      // document inherits the previous file's scroll offset. Synthesizing a
+      // top-of-document pending state reuses the same restore plumbing
+      // (requestMeasure timing + pending-reveal guard) as a cached restore.
       const cached = this.viewStateCache.get(normalizePath(path));
-      this.pendingViewState = cached ? { ...cached, path } : null;
+      this.pendingViewState = cached
+        ? { ...cached, path }
+        : isFileChange
+          ? { path, selection: EditorSelection.single(0).toJSON(), topPos: 0 }
+          : null;
       // Apply the document to the (reused) view directly, then sync the
       // signal — mirroring the disk-reconcile paths. Relying on the
       // mount/sync effect alone is unsafe: it only re-runs when the _content
@@ -1024,10 +1039,15 @@ export class EditorComponent implements OnDestroy {
     const path = this.loadedPath;
     if (!view || !path) return;
     const key = normalizePath(path);
+    // Resolve the doc position at the top edge of the viewport. precise:false
+    // makes posAtCoords return a (clamped) number rather than null when the
+    // point falls in padding/empty space.
+    const rect = view.scrollDOM.getBoundingClientRect();
+    const topPos = view.posAtCoords({ x: rect.left + 1, y: rect.top + 1 }, false);
     this.viewStateCache.delete(key);
     this.viewStateCache.set(key, {
       selection: view.state.selection.toJSON(),
-      scrollTop: view.scrollDOM.scrollTop,
+      topPos,
     });
     if (this.viewStateCache.size > VIEW_STATE_CACHE_MAX) {
       const oldest = this.viewStateCache.keys().next().value;
@@ -1070,15 +1090,12 @@ export class EditorComponent implements OnDestroy {
     } catch {
       // Unusable stored selection — scroll restore below still applies.
     }
-    const scrollTop = pending.scrollTop;
-    // Apply after the view has measured, otherwise the not-yet-laid-out
-    // document clamps the scroll offset to a stale height.
-    view.requestMeasure({
-      read: () => null,
-      write: () => {
-        view.scrollDOM.scrollTop = scrollTop;
-      },
-    });
+    const topPos = Math.min(pending.topPos, docLen);
+    // Use CM's scrollIntoView effect rather than writing scrollDOM.scrollTop:
+    // it measures the real line around topPos and scrolls precisely, so the
+    // restore is stable even while off-screen line heights are still estimated
+    // (a raw scrollTop write clamps against a stale, estimated height).
+    view.dispatch({ effects: EditorView.scrollIntoView(topPos, { y: 'start', yMargin: 0 }) });
   }
 
   /**
