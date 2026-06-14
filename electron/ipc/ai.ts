@@ -4,6 +4,7 @@ import {
   assembleToolCalls,
   type StreamToolCallDelta,
 } from './tool-call-accumulator';
+import { createGemmaContentFilter, extractGemmaToolCalls } from './gemma-tool-call-parser';
 import {
   CONNECT_TIMEOUT_MS,
   RESPONSE_TIMEOUT_MS,
@@ -342,6 +343,10 @@ async function handleChatStream(
     // the `id`/`function.name` once and then streams `function.arguments` in
     // pieces, all keyed by the same index.
     const toolAccumulator = new Map<number, { id: string; name: string; args: string }>();
+    // Strips Gemma text-format tool-call markup out of streamed content and
+    // captures any calls it finds (some endpoints emit calls as raw text in
+    // `delta.content` instead of structured `tool_calls`).
+    const contentFilter = createGemmaContentFilter();
 
     // Watchdog: aborts the fetch when the provider goes silent — while
     // waiting for response headers and the first meaningful streamed event
@@ -425,7 +430,8 @@ async function handleChatStream(
                 if (idleTimeoutMs > 0) watchdog.arm('idle', idleTimeoutMs);
               }
               if (delta) {
-                safeSend(sender, Channels.StreamChunk, { streamId, delta });
+                const { emit } = contentFilter.push(delta);
+                if (emit) safeSend(sender, Channels.StreamChunk, { streamId, delta: emit });
               }
             } catch {
               // Skip malformed SSE payloads rather than crashing the stream.
@@ -440,7 +446,10 @@ async function handleChatStream(
         }
       }
 
-      const toolCalls = assembleToolCalls(toolAccumulator);
+      const { emit: tailEmit, toolCalls: gemmaCalls } = contentFilter.flush();
+      if (tailEmit) safeSend(sender, Channels.StreamChunk, { streamId, delta: tailEmit });
+      const merged = [...(assembleToolCalls(toolAccumulator) ?? []), ...gemmaCalls];
+      const toolCalls = merged.length > 0 ? merged : undefined;
 
       safeSend(sender, Channels.StreamDone, { streamId, finishReason, toolCalls });
     } catch (err) {
@@ -536,12 +545,15 @@ async function handleChatComplete(
 
     const json = (await res.json()) as ChatCompletionResponse;
     const choice = json.choices?.[0];
-    const toolCalls = choice?.message?.tool_calls;
+    const { cleanedText, toolCalls: gemmaCalls } = extractGemmaToolCalls(
+      choice?.message?.content ?? '',
+    );
+    const merged = [...(choice?.message?.tool_calls ?? []), ...gemmaCalls];
     return {
       ok: true,
       data: {
-        content: choice?.message?.content ?? '',
-        toolCalls: toolCalls && toolCalls.length > 0 ? toolCalls : undefined,
+        content: cleanedText,
+        toolCalls: merged.length > 0 ? merged : undefined,
         finishReason: choice?.finish_reason ?? undefined,
       },
     };
