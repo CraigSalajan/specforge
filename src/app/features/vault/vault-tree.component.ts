@@ -6,6 +6,7 @@ import { VaultFileOpsService } from '../../core/vault-file-ops.service';
 import { ContextMenuService, type ContextMenuItem } from '../../core/context-menu.service';
 import { PdfExportService } from '../../core/pdf-export.service';
 import { FileTreeNodeComponent } from './file-tree-node.component';
+import { TreeExpansionService } from './tree-expansion.service';
 
 @Component({
   selector: 'app-vault-tree',
@@ -18,6 +19,16 @@ import { FileTreeNodeComponent } from './file-tree-node.component';
         <h2 class="text-sm font-semibold uppercase tracking-wider text-text-secondary">Vault</h2>
         @if (hasVault()) {
           <span class="flex items-center gap-1">
+            @if (hasFolders()) {
+              <button
+                type="button"
+                class="rounded px-1.5 py-0.5 text-xs text-text-secondary hover:bg-surface-3 hover:text-text-primary"
+                [title]="anyCollapsed() ? 'Expand all folders' : 'Collapse all folders'"
+                [attr.aria-label]="anyCollapsed() ? 'Expand all folders' : 'Collapse all folders'"
+                (click)="onToggleExpandAll()">
+                {{ anyCollapsed() ? '▾' : '▸' }}
+              </button>
+            }
             <button
               type="button"
               class="rounded px-1.5 py-0.5 text-xs text-text-secondary hover:bg-surface-3 hover:text-text-primary"
@@ -30,7 +41,7 @@ import { FileTreeNodeComponent } from './file-tree-node.component';
               class="rounded px-1.5 py-0.5 text-xs text-text-secondary hover:bg-surface-3 hover:text-text-primary"
               title="New folder"
               (click)="onCreateFolder()">
-              ＋▣
+              ⊞
             </button>
           </span>
         }
@@ -93,6 +104,7 @@ export class VaultTreeComponent {
   private readonly ipc = inject(IpcService);
   private readonly contextMenu = inject(ContextMenuService);
   private readonly pdfExport = inject(PdfExportService);
+  private readonly expansion = inject(TreeExpansionService);
 
   readonly fileSelected = output<string>();
 
@@ -101,6 +113,8 @@ export class VaultTreeComponent {
   readonly tree = this.vault.tree;
   readonly isLoading = this.vault.isLoading;
   readonly activePath = this.vault.activeFilePath;
+  readonly anyCollapsed = this.expansion.anyCollapsed;
+  readonly hasFolders = this.expansion.hasFolders;
 
   onSelectVault(): void {
     void this.vault.selectVault();
@@ -108,6 +122,10 @@ export class VaultTreeComponent {
 
   onChangeVault(): void {
     void this.vault.selectVault();
+  }
+
+  onToggleExpandAll(): void {
+    this.expansion.toggleAll();
   }
 
   onBackgroundDragOver(evt: DragEvent): void {

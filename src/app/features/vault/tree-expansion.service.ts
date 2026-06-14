@@ -1,4 +1,4 @@
-import { Injectable, effect, inject, signal, untracked } from '@angular/core';
+import { Injectable, computed, effect, inject, signal, untracked } from '@angular/core';
 import { SettingsService } from '../../core/settings.service';
 import { VaultService } from '../../core/vault.service';
 import type { FileNode } from '../../shared/types';
@@ -24,6 +24,12 @@ export class TreeExpansionService {
   private readonly settings = inject(SettingsService);
 
   private readonly _collapsed = signal<ReadonlySet<string>>(new Set());
+
+  /** Reactive: true when at least one folder is currently collapsed. */
+  readonly anyCollapsed = computed(() => this._collapsed().size > 0);
+
+  /** Reactive: true when the current vault tree contains at least one folder. */
+  readonly hasFolders = computed(() => collectFolderPaths(this.vault.tree()).length > 0);
 
   constructor() {
     // Re-hydrate from the persisted setting whenever the vault identity
@@ -72,6 +78,40 @@ export class TreeExpansionService {
     const next = new Set(this._collapsed());
     next.delete(key);
     this.commit(next);
+  }
+
+  /** Collapses every folder in the current vault tree. */
+  collapseAll(): void {
+    const vaultPath = this.vault.vaultPath();
+    if (vaultPath === null) return;
+    const tree = this.vault.tree();
+    const next = new Set<string>();
+    for (const dir of collectFolderPaths(tree)) {
+      const key = toVaultRel(vaultPath, dir)?.toLowerCase();
+      if (key) next.add(key);
+    }
+    if (next.size === this._collapsed().size && [...next].every((k) => this._collapsed().has(k))) {
+      return;
+    }
+    this.commit(next);
+  }
+
+  /** Expands every folder (clears the collapsed set). */
+  expandAll(): void {
+    if (this._collapsed().size === 0) return;
+    this.commit(new Set());
+  }
+
+  /**
+   * One-button toggle for the header: if anything is currently collapsed,
+   * expand everything; otherwise collapse every folder.
+   */
+  toggleAll(): void {
+    if (this._collapsed().size > 0) {
+      this.expandAll();
+    } else {
+      this.collapseAll();
+    }
   }
 
   private prune(tree: readonly FileNode[]): void {
