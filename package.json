@@ -19,6 +19,7 @@
     "build": "npm run build:angular && npm run build:electron",
     "watch": "ng build --watch --configuration development",
     "test": "ng test",
+    "test:ci": "ng test --watch=false --reporters=junit --reporters=default --output-file=test-results/junit.xml",
     "package": "npm run build && electron-builder --publish never",
     "package:win": "npm run build && electron-builder --win --publish never",
     "package:mac": "npm run build && electron-builder --mac --publish never",
