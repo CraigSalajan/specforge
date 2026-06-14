@@ -61,7 +61,6 @@ jobs:
           path: test-results/junit.xml
           reporter: java-junit
           fail-on-error: true
-          use-actions-summary: false
 
   release:
     needs: test
