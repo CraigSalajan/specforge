@@ -198,6 +198,386 @@ html, body {
   white-space: pre-wrap;
 }
 
+/* YAML frontmatter property editor (in-repo frontmatterField, frontmatter-field.ts):
+   a leading `---` … `---` block renders as an inline form of typed controls when
+   the cursor is outside it. Chrome matches the mermaid/table widgets — flat
+   surface-2 panel, 1px subtle border, no shadows. Dense two-column rows: a
+   JetBrains Mono key label (text-secondary) and a system-sans control. In source
+   mode (cursor inside) the lines carry the subtle cm-frontmatter-source tint and
+   the raw YAML shows as ordinary editable text. */
+.cm-editor .cm-frontmatter-widget {
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 8px;
+  padding: 0.5em 0.75em;
+  margin: 0.2em 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25em;
+}
+.cm-editor .cm-frontmatter-row {
+  display: grid;
+  grid-template-columns: minmax(6em, 12em) 1fr auto;
+  align-items: center;
+  gap: 0.6em;
+}
+/* Key (property NAME) input: reads as a quiet mono label by default — no fill,
+   transparent border — but is editable. Hover/focus reveal it as an input
+   (surface-3 fill, accent focus ring) so renaming is discoverable, matching the
+   value controls. Flat, no shadows. */
+.cm-editor .cm-frontmatter-key {
+  font-family: var(--font-mono);
+  font-size: 0.82em;
+  color: var(--color-text-secondary);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  padding: 0.2em 0.4em;
+  width: 100%;
+  min-width: 0;
+  text-overflow: ellipsis;
+}
+.cm-editor .cm-frontmatter-key:hover {
+  background: var(--color-surface-3);
+  border-color: var(--color-border-subtle);
+}
+.cm-editor .cm-frontmatter-key:focus,
+.cm-editor .cm-frontmatter-key:focus-visible {
+  background: var(--color-surface-3);
+  color: var(--color-text-primary);
+  outline: 2px solid var(--color-accent);
+  outline-offset: -1px;
+  border-color: var(--color-accent);
+  text-overflow: clip;
+}
+.cm-editor .cm-frontmatter-value {
+  display: flex;
+  min-width: 0;
+}
+/* Inputs/selects: surface-3 fill, subtle 1px border, accent focus ring. Flat —
+   no shadows. Checkboxes keep their intrinsic size (auto width). */
+.cm-editor .cm-frontmatter-control {
+  background: var(--color-surface-3);
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 5px;
+  padding: 0.2em 0.45em;
+  font-size: 0.85em;
+  font-family: inherit;
+  width: 100%;
+  min-width: 0;
+}
+.cm-editor .cm-frontmatter-control[type="checkbox"] {
+  width: auto;
+  accent-color: var(--color-accent);
+}
+.cm-editor .cm-frontmatter-control:focus,
+.cm-editor .cm-frontmatter-control:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -1px;
+  border-color: var(--color-accent);
+}
+/* Add-property row: a quiet ghost button that swaps to an inline key input. */
+.cm-editor .cm-frontmatter-add {
+  display: flex;
+  margin-top: 0.1em;
+}
+.cm-editor .cm-frontmatter-add-button {
+  background: transparent;
+  color: var(--color-text-muted);
+  border: 1px dashed var(--color-border-subtle);
+  border-radius: 5px;
+  padding: 0.2em 0.55em;
+  font-size: 0.78em;
+  font-family: inherit;
+  cursor: pointer;
+}
+.cm-editor .cm-frontmatter-add-button:hover {
+  color: var(--color-text-secondary);
+  border-color: var(--color-border-strong);
+}
+.cm-editor .cm-frontmatter-add-input {
+  font-family: var(--font-mono);
+  max-width: 14em;
+}
+/* Per-row remove control: the symmetric counterpart to the add button. Quiet by
+   default (muted glyph, no background/border), shifting to the danger token on
+   hover/focus. Flat — no shadows. Carries the same accent focus ring as the
+   other controls for keyboard parity. */
+.cm-editor .cm-frontmatter-remove {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.4em;
+  height: 1.4em;
+  padding: 0;
+  background: transparent;
+  color: var(--color-text-muted);
+  border: 1px solid transparent;
+  border-radius: 5px;
+  font-size: 1em;
+  line-height: 1;
+  font-family: inherit;
+  cursor: pointer;
+}
+.cm-editor .cm-frontmatter-remove:hover {
+  color: var(--color-danger);
+}
+.cm-editor .cm-frontmatter-remove:focus,
+.cm-editor .cm-frontmatter-remove:focus-visible {
+  color: var(--color-danger);
+  outline: 2px solid var(--color-accent);
+  outline-offset: -1px;
+  border-color: var(--color-accent);
+}
+/* Source-mode tint (cursor inside the block): subtle, just enough to read as a
+   distinct region without competing with normal text. */
+.cm-editor .cm-frontmatter-source {
+  font-family: var(--font-mono);
+  background: color-mix(in srgb, var(--color-surface-2) 55%, transparent);
+}
+/* Degrade-to-source hint: quiet danger text, never hides the raw YAML. */
+.cm-editor .cm-frontmatter-invalid {
+  color: var(--color-danger);
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  cursor: pointer;
+}
+/* Collapsed summary bar (default state): a dense single-line button that reads
+   as quiet metadata, not content. Flat surface-2 panel, 1px subtle border, no
+   shadows — same chrome as the expanded form so the toggle feels in-place. The
+   whole bar is the expand control. */
+.cm-editor .cm-frontmatter-collapsed {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  width: 100%;
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 8px;
+  padding: 0.3em 0.6em;
+  margin: 0.2em 0;
+  font-family: inherit;
+  font-size: 0.85em;
+  color: var(--color-text-secondary);
+  text-align: left;
+  cursor: pointer;
+}
+.cm-editor .cm-frontmatter-collapsed:hover {
+  border-color: var(--color-border-strong);
+}
+.cm-editor .cm-frontmatter-collapsed:focus,
+.cm-editor .cm-frontmatter-collapsed:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -1px;
+  border-color: var(--color-accent);
+}
+/* Header row in the expanded form: collapse chevron + "Properties" label +
+   count, sitting above the property rows. */
+.cm-editor .cm-frontmatter-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  padding-bottom: 0.1em;
+}
+.cm-editor .cm-frontmatter-header-label,
+.cm-editor .cm-frontmatter-summary-label {
+  font-size: 0.85em;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+}
+/* Quiet key count beside the label (collapsed bar and expanded header). */
+.cm-editor .cm-frontmatter-summary-count {
+  font-family: var(--font-mono);
+  font-size: 0.75em;
+  color: var(--color-text-muted);
+}
+/* Chevron glyph: a small triangle marking collapsed (▸) / expanded (▾) state. */
+.cm-editor .cm-frontmatter-chevron {
+  display: inline-flex;
+  font-size: 0.7em;
+  color: var(--color-text-muted);
+  line-height: 1;
+}
+/* Collapse toggle button in the expanded header: quiet, accent focus ring. */
+.cm-editor .cm-frontmatter-chevron-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.4em;
+  height: 1.4em;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.cm-editor .cm-frontmatter-chevron-button:hover .cm-frontmatter-chevron {
+  color: var(--color-text-secondary);
+}
+.cm-editor .cm-frontmatter-chevron-button:focus,
+.cm-editor .cm-frontmatter-chevron-button:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -1px;
+  border-color: var(--color-accent);
+}
+/* Status value shown inline on the collapsed bar: a small indigo-tinted pill so
+   the most-scanned property reads at a glance. Mono, flat, no shadow. */
+.cm-editor .cm-frontmatter-status-pill {
+  font-family: var(--font-mono);
+  font-size: 0.72em;
+  color: var(--color-accent-hover);
+  background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-accent) 35%, transparent);
+  border-radius: 999px;
+  padding: 0.05em 0.5em;
+  margin-left: auto;
+}
+/* Tags surfaced on the collapsed bar: small read-only mono chips after the
+   status pill (or hard against the right when no status), with a `+N` overflow
+   indicator when more than a few exist. Quiet surface-3 fill so they read as
+   metadata, not as the indigo status accent. The first tag claims the right edge
+   via margin-left:auto only when the status pill hasn't already pushed there
+   (sibling combinator), so the row stays compact in both cases. */
+.cm-editor .cm-frontmatter-tag {
+  font-family: var(--font-mono);
+  font-size: 0.7em;
+  color: var(--color-text-secondary);
+  background: var(--color-surface-3);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 999px;
+  padding: 0.05em 0.45em;
+  max-width: 8em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cm-editor .cm-frontmatter-status-pill ~ .cm-frontmatter-tag {
+  margin-left: 0;
+}
+.cm-editor .cm-frontmatter-summary-count ~ .cm-frontmatter-tag:first-of-type {
+  margin-left: auto;
+}
+.cm-editor .cm-frontmatter-tag-overflow {
+  font-family: var(--font-mono);
+  font-size: 0.68em;
+  color: var(--color-text-muted);
+}
+/* List values render as editable chips: a wrapping row of compact pills plus a
+   trailing "add item" input. Flat, dense, reads as a single value cell. */
+.cm-editor .cm-frontmatter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3em;
+  width: 100%;
+  min-width: 0;
+}
+/* One chip: a mono text input for the item value with a quiet remove × tucked
+   to its right inside a surface-3 pill. Flat, 1px subtle border, no shadow. */
+.cm-editor .cm-frontmatter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15em;
+  background: var(--color-surface-3);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 999px;
+  padding: 0.05em 0.15em 0.05em 0.35em;
+}
+.cm-editor .cm-frontmatter-chip-input {
+  font-family: var(--font-mono);
+  font-size: 0.78em;
+  color: var(--color-text-primary);
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  padding: 0.1em 0.1em;
+  width: auto;
+  min-width: 2em;
+  max-width: 12em;
+  field-sizing: content;
+}
+.cm-editor .cm-frontmatter-chip-input:focus,
+.cm-editor .cm-frontmatter-chip-input:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 0;
+  border-radius: 4px;
+}
+/* Chip remove ×: tiny, muted by default, danger token on hover/focus — mirrors
+   the per-row remove control but sized for a chip. Accent focus ring for parity. */
+.cm-editor .cm-frontmatter-chip-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.1em;
+  height: 1.1em;
+  padding: 0;
+  background: transparent;
+  color: var(--color-text-muted);
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 0.85em;
+  line-height: 1;
+  font-family: inherit;
+  cursor: pointer;
+}
+.cm-editor .cm-frontmatter-chip-remove:hover {
+  color: var(--color-danger);
+}
+.cm-editor .cm-frontmatter-chip-remove:focus,
+.cm-editor .cm-frontmatter-chip-remove:focus-visible {
+  color: var(--color-danger);
+  outline: 2px solid var(--color-accent);
+  outline-offset: -1px;
+}
+/* "Add item" input trailing the chips: a quiet mono field that appends a new
+   list item on Enter/Tab/blur. Dashed border echoes the add-property button so
+   it reads as an append affordance, not a value. */
+.cm-editor .cm-frontmatter-chip-add {
+  font-family: var(--font-mono);
+  font-size: 0.78em;
+  color: var(--color-text-primary);
+  background: var(--color-surface-3);
+  border: 1px dashed var(--color-border-subtle);
+  border-radius: 999px;
+  padding: 0.1em 0.5em;
+  width: auto;
+  min-width: 4.5em;
+  max-width: 10em;
+  field-sizing: content;
+}
+.cm-editor .cm-frontmatter-chip-add:focus,
+.cm-editor .cm-frontmatter-chip-add:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -1px;
+  border-color: var(--color-accent);
+  border-style: solid;
+}
+/* Nested map: an indented sub-group with a subtle left border so a child map
+   reads as a grouped block under its key. Holds child property rows and a nested
+   add-row, recursing to arbitrary depth (each level adds another indent step). */
+.cm-editor .cm-frontmatter-nested {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25em;
+  width: 100%;
+  min-width: 0;
+  padding-left: 0.6em;
+  border-left: 1px solid var(--color-border-subtle);
+}
+/* A nested row's grid loses the wide top-level key column so deeper keys don't
+   over-indent: keys size to content here, values take the rest. */
+.cm-editor .cm-frontmatter-nested .cm-frontmatter-row {
+  grid-template-columns: minmax(4em, 9em) 1fr auto;
+}
+/* Chevron rotation is a nicety, gated behind a motion-allowed query so the
+   reduced-motion path simply swaps the static ▸ / ▾ glyphs (no animation). */
+@media (prefers-reduced-motion: no-preference) {
+  .cm-editor .cm-frontmatter-chevron {
+    transition: transform 120ms ease;
+  }
+}
+
 /* highlight.js token colors. Shared by the editor's rendered code blocks
    (codemirror-live-markdown emits hljs-* classes but ships no theme CSS) and
    the AI chat bubbles (.prose-ai code blocks are highlighted via the shared

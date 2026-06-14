@@ -16,6 +16,7 @@ import type {
   ChatSession,
   ChatSessionSummary,
   ContextScope,
+  DocPropertyMatch,
   EmbeddingUpsertItem,
   ExportPdfPayload,
   ExportPdfResult,
@@ -66,8 +67,8 @@ export class IpcService {
     return this.requireApi().writeFile(path, content);
   }
 
-  createFile(path: string): Promise<void> {
-    return this.requireApi().createFile(path);
+  createFile(path: string, content?: string): Promise<void> {
+    return this.requireApi().createFile(path, content);
   }
 
   createFolder(path: string): Promise<void> {
@@ -127,6 +128,19 @@ export class IpcService {
 
   linksResolve(vaultPath: string, target: string): Promise<string | null> {
     return this.requireApi().linksResolve(vaultPath, target);
+  }
+
+  // Document properties (YAML frontmatter index)
+  docPropertiesQuery(vaultPath: string, key: string, value: string): Promise<DocPropertyMatch[]> {
+    return this.requireApi().docPropertiesQuery(vaultPath, key, value);
+  }
+
+  docPropertiesKeys(vaultPath: string): Promise<string[]> {
+    return this.requireApi().docPropertiesKeys(vaultPath);
+  }
+
+  docPropertiesValues(vaultPath: string, key: string): Promise<string[]> {
+    return this.requireApi().docPropertiesValues(vaultPath, key);
   }
 
   // Phase 2: settings

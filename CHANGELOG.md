@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Document properties: the YAML frontmatter block at the top of a file (`--- … ---`) now renders as an inline property editor instead of raw text. Status shows a draft / review / approved / published dropdown, date fields (created, updated, …) get a date picker, true/false values get checkboxes, lists like `tags` become add/remove chips, and nested properties render as indented, editable sub-groups. You can rename, add, and remove properties; value fields autocomplete from values you've used for the same property in other files (so `tags` suggests your existing tags, never unrelated fields); and Tab moves between the fields. The block is collapsible (collapsed by default, with status and tags surfaced in the summary), your hand-written YAML — comments and key order — is preserved on every edit, and malformed frontmatter falls back to editable source so nothing is ever hidden. New files are seeded with a starter `status: draft` / `created` block. See `docs/FRONTMATTER.md`.
+- Docs view: a new view in the left sidebar filters the vault by any frontmatter property — for example, show every document where `status` is `approved`. Pick a property and a value to list the matching files, then click to open.
+
 ## [0.5.0] - 2026-06-13
 
 ### Added

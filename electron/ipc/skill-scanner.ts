@@ -22,6 +22,8 @@
  *    concern.
  */
 
+import { parseFrontmatter as parseFrontmatterRegion } from '../frontmatter/frontmatter';
+
 export const SKILL_FILE = 'SKILL.md';
 export const RESOURCE_EXTS: ReadonlySet<string> = new Set(['.md', '.txt', '.json']);
 export const DEFAULT_MAX_DEPTH = 5;
@@ -78,46 +80,30 @@ export interface ScanSkillsOptions {
 // ---------------------------------------------------------------------------
 
 /**
- * Strips one layer of surrounding single/double quotes from a YAML scalar and
- * trims surrounding whitespace.
+ * Coerces a parsed frontmatter scalar to a string: a string passes through,
+ * any other non-null value is `String`-coerced, and `null`/`undefined` (or a
+ * missing key) becomes the empty string.
  */
-function unquote(value: string): string {
-  const trimmed = value.trim();
-  if (trimmed.length >= 2) {
-    const first = trimmed[0];
-    const last = trimmed[trimmed.length - 1];
-    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
-      return trimmed.slice(1, -1);
-    }
-  }
-  return trimmed;
+function stringField(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (value === null || value === undefined) return '';
+  return String(value);
 }
 
 /**
- * Minimal frontmatter parser. Reads a leading `---\n ... \n---\n` block and
- * extracts the `name:` and `description:` keys; everything after the closing
- * `---` becomes the body. Files with no frontmatter return empty name/description
- * and the whole file as the body. No YAML dependency is used.
+ * Reads a SKILL.md's leading YAML frontmatter, extracting the `name` and
+ * `description` keys; everything after the closing `---` becomes the body.
+ * Files with no frontmatter return empty name/description and the whole file as
+ * the body. Delegates to the shared, round-trip-capable frontmatter module so
+ * quoting, multi-line scalars and CRLF are handled by a real YAML parser.
  */
 export function parseFrontmatter(raw: string): ParsedSkill {
-  // Normalize CRLF so the delimiter regex behaves identically on Windows.
-  const text = raw.replace(/\r\n/g, '\n');
-  const match = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(text);
-  if (!match) {
-    return { name: '', description: '', body: text };
-  }
-  const [, frontmatter, body] = match;
-  let name = '';
-  let description = '';
-  for (const line of frontmatter.split('\n')) {
-    const sep = line.indexOf(':');
-    if (sep === -1) continue;
-    const key = line.slice(0, sep).trim();
-    const value = line.slice(sep + 1);
-    if (key === 'name') name = unquote(value);
-    else if (key === 'description') description = unquote(value);
-  }
-  return { name, description, body };
+  const { data, body } = parseFrontmatterRegion(raw);
+  return {
+    name: stringField(data['name']),
+    description: stringField(data['description']),
+    body,
+  };
 }
 
 // ---------------------------------------------------------------------------

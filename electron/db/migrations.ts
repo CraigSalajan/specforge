@@ -168,4 +168,21 @@ export const MIGRATIONS: ReadonlyArray<Migration> = [
       CREATE INDEX IF NOT EXISTS idx_links_target_rel_path_lower ON links(lower(target_rel_path));
     `,
   },
+  {
+    id: 7,
+    name: 'doc_properties_table',
+    sql: `
+      CREATE TABLE IF NOT EXISTS doc_properties (
+        id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_id  INTEGER NOT NULL,
+        key      TEXT NOT NULL,
+        value    TEXT,
+        idx      INTEGER NOT NULL DEFAULT 0,
+        FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_doc_properties_file_id ON doc_properties(file_id);
+      CREATE INDEX IF NOT EXISTS idx_doc_properties_key_value ON doc_properties(lower(key), lower(value));
+    `,
+  },
 ];

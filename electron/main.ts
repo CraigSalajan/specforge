@@ -10,6 +10,7 @@ import { registerSettingsHandlers } from './ipc/settings';
 import { migratePlaintextSecrets } from './ipc/secure-settings';
 import { registerIndexHandlers } from './ipc/index';
 import { registerLinkHandlers } from './ipc/links';
+import { registerDocPropertiesHandlers } from './ipc/doc-properties';
 import { registerChatHandlers } from './ipc/chats';
 import { registerEmbeddingHandlers } from './ipc/embeddings';
 import { registerAiHistoryHandlers } from './ipc/ai-history';
@@ -144,6 +145,7 @@ app.whenReady().then(async () => {
   registerSettingsHandlers();
   registerIndexHandlers();
   registerLinkHandlers();
+  registerDocPropertiesHandlers();
   registerChatHandlers();
   registerEmbeddingHandlers();
   registerAiHistoryHandlers();

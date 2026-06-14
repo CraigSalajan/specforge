@@ -49,7 +49,7 @@ Not PKM polish — the substrate for requirement traceability in Tier 3.
 The differentiator. Candidates, roughly ordered by leverage-per-effort:
 
 - **`/generate-ac`** — Gherkin/EARS acceptance criteria from a story + its PRD context. Kiro and ChatPRD have made this an expected capability; here it is mostly a new prompt file in the existing planning-command system. Low effort, high signal.
-- **Document properties/status** — frontmatter UI for status (draft / review / approved), owner, dates; enables "show me all approved specs".
+- [x] **Document properties/status** (shipped 2026-06-14) — in-editor YAML frontmatter widget (status draft / review / approved / published, owner, dates), a queryable `doc_properties` index, a Docs sidebar filter ("show me all approved specs"), and default-frontmatter seeding on new files.
 - **Doc health indicators** — staleness ("PRD untouched 30 days"), completeness ("3 stories missing AC").
 - **Traceability queries** — "which stories trace to this requirement?", built on the Tier 2 link index.
 - **AI change-history view** — surface the existing `ai_file_changes` ledger with per-entry revert instead of blind "Undo last".

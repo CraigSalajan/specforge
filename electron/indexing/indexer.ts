@@ -18,6 +18,8 @@ import {
   listStaleLinks,
   setLinkTarget,
 } from '../db/repositories/links.repo';
+import { replacePropertiesForFile } from '../db/repositories/doc-properties.repo';
+import { parseFrontmatter, flattenProperties } from '../frontmatter/frontmatter';
 import { transaction } from '../db/index';
 
 const IGNORED_DIRS = new Set([
@@ -100,6 +102,15 @@ function storeLinksForFile(vaultRoot: string, fileId: number, refs: WikiLinkRef[
   );
 }
 
+/** Extracts and stores the frontmatter properties of a file (delete-then-insert). */
+function storePropertiesForFile(fileId: number, content: string): void {
+  const { data } = parseFrontmatter(content);
+  replacePropertiesForFile(
+    fileId,
+    flattenProperties(data).map((p) => ({ key: p.key, value: p.value, idx: p.idx })),
+  );
+}
+
 /**
  * Cheap vault-wide re-resolution pass: re-resolves links that never resolved
  * (NULL target) or whose resolved target no longer exists. Run after any file
@@ -147,6 +158,10 @@ export async function indexFile(
     // Still refresh links: rows indexed before the links table existed would
     // otherwise never be populated (the content hash is unchanged forever).
     storeLinksForFile(vaultRoot, existing.id, extractWikiLinks(content));
+    // Likewise refresh properties: rows indexed before the doc_properties table
+    // existed would otherwise never be populated (the content hash is unchanged
+    // forever). This backfills existing vaults.
+    storePropertiesForFile(existing.id, content);
     return { created: false };
   }
 
@@ -162,6 +177,7 @@ export async function indexFile(
   const chunks = chunkMarkdown(content);
   replaceChunksForFile(fileId, chunks);
   storeLinksForFile(vaultRoot, fileId, extractWikiLinks(content));
+  storePropertiesForFile(fileId, content);
   return { created: existing === null };
 }
 

@@ -33,6 +33,7 @@ import { PaletteComponent } from './features/palette/palette.component';
 import { SearchPanelComponent } from './features/search/search-panel.component';
 import { OutlinePanelComponent } from './features/outline/outline-panel.component';
 import { LinksPanelComponent } from './features/links/links-panel.component';
+import { DocsPanelComponent } from './features/docs/docs-panel.component';
 
 type PaneSide = 'left' | 'right';
 
@@ -57,6 +58,7 @@ const PANE_MAX = 600;
     SearchPanelComponent,
     OutlinePanelComponent,
     LinksPanelComponent,
+    DocsPanelComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
@@ -132,6 +134,16 @@ const PANE_MAX = 600;
               (click)="showSidebarView('links')">
               <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></svg>
             </button>
+            <button
+              type="button"
+              class="rounded p-1.5 transition-colors"
+              [class]="sidebarTabClass('docs')"
+              title="Docs"
+              aria-label="Docs"
+              [attr.aria-pressed]="sidebarView() === 'docs'"
+              (click)="showSidebarView('docs')">
+              <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8 8a2 2 0 0 0 2.828 0l7.172-7.172a2 2 0 0 0 0-2.828Z" /><circle cx="7.5" cy="7.5" r=".5" fill="currentColor" /></svg>
+            </button>
           </nav>
           <div class="min-h-0 flex-1">
             <div class="h-full" [class.hidden]="sidebarView() !== 'files'">
@@ -145,6 +157,9 @@ const PANE_MAX = 600;
             </div>
             <div class="h-full" [class.hidden]="sidebarView() !== 'links'">
               <app-links-panel />
+            </div>
+            <div class="h-full" [class.hidden]="sidebarView() !== 'docs'">
+              <app-docs-panel />
             </div>
           </div>
         </aside>
@@ -269,6 +284,12 @@ export class AppComponent implements OnInit {
         title: 'Show backlinks',
         category: 'View',
         run: () => this.revealSidebarView('links'),
+      },
+      {
+        id: 'view.showDocs',
+        title: 'Show document properties',
+        category: 'View',
+        run: () => this.revealSidebarView('docs'),
       },
       {
         id: 'search.inVault',

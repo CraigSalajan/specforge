@@ -20,6 +20,9 @@ const IpcChannels = {
   LinksBacklinks: 'specforge:links-backlinks',
   LinksOutgoing: 'specforge:links-outgoing',
   LinksResolve: 'specforge:links-resolve',
+  DocPropertiesQuery: 'specforge:doc-properties-query',
+  DocPropertiesKeys: 'specforge:doc-properties-keys',
+  DocPropertiesValues: 'specforge:doc-properties-values',
   SettingsGet: 'specforge:settings-get',
   SettingsGetAll: 'specforge:settings-get-all',
   SettingsSet: 'specforge:settings-set',
@@ -164,7 +167,8 @@ const api = {
   readFile: (filePath: string) => ipcRenderer.invoke(IpcChannels.ReadFile, filePath),
   writeFile: (filePath: string, content: string) =>
     ipcRenderer.invoke(IpcChannels.WriteFile, filePath, content),
-  createFile: (filePath: string) => ipcRenderer.invoke(IpcChannels.CreateFile, filePath),
+  createFile: (filePath: string, content?: string) =>
+    ipcRenderer.invoke(IpcChannels.CreateFile, filePath, content),
   createFolder: (folderPath: string) => ipcRenderer.invoke(IpcChannels.CreateFolder, folderPath),
   renameFile: (oldPath: string, newPath: string) =>
     ipcRenderer.invoke(IpcChannels.RenameFile, oldPath, newPath),
@@ -195,6 +199,14 @@ const api = {
     ipcRenderer.invoke(IpcChannels.LinksOutgoing, vaultPath, relPath),
   linksResolve: (vaultPath: string, target: string): Promise<string | null> =>
     ipcRenderer.invoke(IpcChannels.LinksResolve, vaultPath, target),
+
+  // Document properties (YAML frontmatter index)
+  docPropertiesQuery: (vaultPath: string, key: string, value: string) =>
+    ipcRenderer.invoke(IpcChannels.DocPropertiesQuery, vaultPath, key, value),
+  docPropertiesKeys: (vaultPath: string) =>
+    ipcRenderer.invoke(IpcChannels.DocPropertiesKeys, vaultPath),
+  docPropertiesValues: (vaultPath: string, key: string) =>
+    ipcRenderer.invoke(IpcChannels.DocPropertiesValues, vaultPath, key),
 
   // Phase 2: settings
   settingsGet: (key: string): Promise<string | null> =>

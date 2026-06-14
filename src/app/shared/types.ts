@@ -17,6 +17,9 @@ export const IpcChannels = {
   LinksBacklinks: 'specforge:links-backlinks',
   LinksOutgoing: 'specforge:links-outgoing',
   LinksResolve: 'specforge:links-resolve',
+  DocPropertiesQuery: 'specforge:doc-properties-query',
+  DocPropertiesKeys: 'specforge:doc-properties-keys',
+  DocPropertiesValues: 'specforge:doc-properties-values',
   SettingsGet: 'specforge:settings-get',
   SettingsGetAll: 'specforge:settings-get-all',
   SettingsSet: 'specforge:settings-set',
@@ -175,6 +178,12 @@ export interface OutgoingLinkRef {
   targetRelPath: string | null;
   /** 1-based line where the wikilink appears. */
   line: number;
+}
+
+/** A file whose frontmatter matched a `key = value` property query. */
+export interface DocPropertyMatch {
+  /** Vault-relative path of the matching file. */
+  relPath: string;
 }
 
 /**
@@ -546,7 +555,7 @@ export interface SpecForgeApi {
   listFiles: (vaultPath: string) => Promise<FileNode[]>;
   readFile: (path: string) => Promise<string>;
   writeFile: (path: string, content: string) => Promise<void>;
-  createFile: (path: string) => Promise<void>;
+  createFile: (path: string, content?: string) => Promise<void>;
   createFolder: (path: string) => Promise<void>;
   renameFile: (oldPath: string, newPath: string) => Promise<void>;
   deleteFile: (path: string) => Promise<void>;
@@ -569,6 +578,11 @@ export interface SpecForgeApi {
   linksBacklinks: (vaultPath: string, relPath: string) => Promise<BacklinkRef[]>;
   linksOutgoing: (vaultPath: string, relPath: string) => Promise<OutgoingLinkRef[]>;
   linksResolve: (vaultPath: string, target: string) => Promise<string | null>;
+
+  // Document properties (YAML frontmatter index)
+  docPropertiesQuery: (vaultPath: string, key: string, value: string) => Promise<DocPropertyMatch[]>;
+  docPropertiesKeys: (vaultPath: string) => Promise<string[]>;
+  docPropertiesValues: (vaultPath: string, key: string) => Promise<string[]>;
 
   // Phase 2: settings
   settingsGet: (key: string) => Promise<string | null>;

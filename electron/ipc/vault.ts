@@ -153,12 +153,12 @@ export function registerVaultHandlers(): void {
     await fs.writeFile(safe, content, 'utf-8');
   });
 
-  ipcMain.handle(Channels.CreateFile, async (_e, filePath: string): Promise<void> => {
+  ipcMain.handle(Channels.CreateFile, async (_e, filePath: string, content?: string): Promise<void> => {
     const safe = safePath(filePath);
     assertMarkdown(safe);
     await fs.mkdir(path.dirname(safe), { recursive: true });
     await assertDoesNotExist(safe, 'File');
-    await fs.writeFile(safe, '', 'utf-8');
+    await fs.writeFile(safe, typeof content === 'string' ? content : '', 'utf-8');
   });
 
   ipcMain.handle(Channels.CreateFolder, async (_e, folderPath: string): Promise<void> => {

@@ -44,6 +44,12 @@ import { computeMinimalChange, threeWayMerge } from '../../shared/merge-utils';
 import { normalizePath, samePath } from '../../shared/path-utils';
 import type { FileChangeEvent } from '../../shared/types';
 import { appLinkPlugin, refreshLinkResolution } from './link-plugin';
+import {
+  frontmatterCollapsedField,
+  frontmatterField,
+  frontmatterValueSource,
+  setFrontmatterCollapsed,
+} from './frontmatter-field';
 import { mermaidField } from './mermaid-field';
 import { REVEAL_HIGHLIGHT_MS, revealLineExtension, setRevealHighlight } from './reveal-line';
 import { richTableField } from './rich-table-field';
@@ -658,6 +664,12 @@ export class EditorComponent implements OnDestroy {
       // the just-cleared selection focus in a file the user never selected in.
       if (this.view && this.loadedPath !== path) {
         this.view.dispatch({ selection: { anchor: 0 } });
+        // Reset the frontmatter form to collapsed so every file opens with the
+        // compact summary bar. Gated on an actual file-path change (the view is
+        // reused across files, so a per-widget flag would leak the previous
+        // file's expanded state); same-file disk reloads/merges go through
+        // applyContentToView directly and are deliberately left untouched.
+        this.view.dispatch({ effects: setFrontmatterCollapsed.of(true) });
       }
       this.loadedPath = path;
       // Arm the per-file selection/scroll restore (consumed once the view
@@ -905,6 +917,20 @@ export class EditorComponent implements OnDestroy {
         // overlapping replace decorations resolve by precedence, and the
         // diagram must win. In source mode both fields only emit line classes,
         // which coexist.
+        // Leading YAML frontmatter renders as an inline property editor when the
+        // cursor is outside it (frontmatter-field.ts). Prec.high so the form's
+        // block replace, sitting at the very top of the document, out-prioritizes
+        // any thematic-break/HR line decoration the live-markdown package emits
+        // for the `---` delimiter lines. frontmatterCollapsedField holds the
+        // summary-bar/expanded toggle (default collapsed) the form reads — it
+        // must be registered for the form to find it.
+        frontmatterCollapsedField,
+        // Per-property VALUE autocomplete for the frontmatter form: the widget
+        // reads this facet to suggest values already used for the SAME property
+        // elsewhere in the vault (scoped + per-property via the doc-properties
+        // index). Decoupled from Angular — the widget never imports a service.
+        frontmatterValueSource.of((key) => this.frontmatterValueSuggestions(key)),
+        Prec.high(frontmatterField),
         Prec.high(mermaidField),
         codeBlockField({ copyButton: true }),
         // In-repo replacement for the package's linkPlugin (see link-plugin.ts):
@@ -952,6 +978,20 @@ export class EditorComponent implements OnDestroy {
     // decorations don't flicker / rebuild mid-drag.
     view.contentDOM.addEventListener('mousedown', this.onMouseDown);
     document.addEventListener('mouseup', this.onMouseUp);
+  }
+
+  /**
+   * Vault-scoped, per-property value suggestions for the frontmatter form's
+   * autocomplete (injected via the frontmatterValueSource facet). `key` is the
+   * doc-properties index key the widget derives from the edited property's path
+   * (e.g. `tags`, `status`, `author.name`). Resolves to `[]` when no vault is
+   * open or IPC is unavailable, and swallows lookup failures — autocomplete is
+   * additive and must never surface an error into the editor.
+   */
+  private frontmatterValueSuggestions(key: string): Promise<string[]> {
+    const vaultPath = this.vault.vaultPath();
+    if (!vaultPath || !this.ipc.isAvailable) return Promise.resolve([]);
+    return this.ipc.docPropertiesValues(vaultPath, key).catch(() => []);
   }
 
   // Single code path for programmatic content application. Dispatching only

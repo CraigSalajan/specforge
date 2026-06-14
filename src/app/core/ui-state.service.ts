@@ -4,7 +4,7 @@ import { Injectable, signal } from '@angular/core';
 export type PaletteMode = 'files' | 'commands';
 
 /** Which view the left sidebar shows (session-only, not persisted). */
-export type SidebarView = 'files' | 'search' | 'outline' | 'links';
+export type SidebarView = 'files' | 'search' | 'outline' | 'links' | 'docs';
 
 /**
  * An open (or re-open) request for the palette overlay. `seq` is monotonic so

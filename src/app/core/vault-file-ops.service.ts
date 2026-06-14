@@ -47,8 +47,13 @@ export class VaultFileOpsService {
     if (!name) return;
     const filename = name.endsWith('.md') ? name : `${name}.md`;
     const target = joinPath(parent, filename);
+    // Seed default YAML frontmatter so new specs start as `draft` — this feeds
+    // the property index that powers workflows like "show all approved specs".
+    // Always on for now; a future `editor.seedFrontmatter` setting can gate it.
+    const today = new Date().toISOString().slice(0, 10);
+    const content = `---\nstatus: draft\nowner:\ncreated: ${today}\n---\n\n`;
     try {
-      await this.ipc.createFile(target);
+      await this.ipc.createFile(target, content);
       await this.vault.refreshTree();
       this.vault.setActiveFile(target);
     } catch (err) {
