@@ -185,4 +185,23 @@ export const MIGRATIONS: ReadonlyArray<Migration> = [
       CREATE INDEX IF NOT EXISTS idx_doc_properties_key_value ON doc_properties(lower(key), lower(value));
     `,
   },
+  {
+    id: 8,
+    name: 'sync_links_table',
+    sql: `
+      CREATE TABLE IF NOT EXISTS sync_links (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        spec_item_id     TEXT NOT NULL,
+        connection_id    TEXT NOT NULL,
+        external_id      TEXT NOT NULL,
+        external_url     TEXT NOT NULL,
+        last_pushed_hash TEXT NOT NULL,
+        last_pushed_at   INTEGER NOT NULL,
+        UNIQUE (spec_item_id, connection_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_sync_links_spec_item  ON sync_links(spec_item_id);
+      CREATE INDEX IF NOT EXISTS idx_sync_links_connection ON sync_links(connection_id);
+    `,
+  },
 ];
