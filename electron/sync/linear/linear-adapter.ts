@@ -10,12 +10,13 @@
  * drive it with a fake client (no network, no DB).
  *
  * ## Implementation status
- * `getMetadata` (TER-16) is implemented: it queries the configured team's
- * workflow states and labels (and the optional project) and returns a normalized
- * {@link ProjectMetadata}. The remaining {@link IAdapter} operations are still
- * stubbed and throw a clear "not implemented yet" error tagged with the ticket
- * that fills them in: `createItem` (TER-17), `updateItem` (TER-18), and
- * `linkItems` (TER-20).
+ * `getMetadata` (TER-16) and `createItem` (TER-17) are implemented: the former
+ * queries the configured team's workflow states and labels (and the optional
+ * project) and returns a normalized {@link ProjectMetadata}; the latter creates a
+ * Linear issue from a {@link CanonicalItem} and returns its external id/url. The
+ * remaining {@link IAdapter} operations are still stubbed and throw a clear "not
+ * implemented yet" error tagged with the ticket that fills them in: `updateItem`
+ * (TER-18) and `linkItems` (TER-20).
  *
  * ## Why the token is not in the config
  * {@link LinearConnectionConfig} carries only the *where* (team/project target),
@@ -50,6 +51,8 @@ export interface LinearConnectionConfig {
   teamId: string;
   /** Optional Linear project id to group created issues under. */
   projectId?: string;
+  /** Optional Linear label id applied to created Features (level === 'feature'). */
+  featureLabelId?: string;
 }
 
 /** All canonical levels Linear can represent (see `../level-mapping`). */
@@ -87,6 +90,14 @@ interface MetadataResponse {
     labels: { nodes: LabelNode[] };
   } | null;
   project?: { id: string; name: string; url: string } | null;
+}
+
+/** Shape of the `issueCreate` mutation's `data` payload. */
+interface CreateIssueResponse {
+  issueCreate: {
+    success: boolean;
+    issue: { id: string; url: string } | null;
+  };
 }
 
 /**
@@ -200,9 +211,84 @@ export class LinearAdapter implements IAdapter {
     return { query, variables };
   }
 
-  /** @inheritdoc */
+  /**
+   * @inheritdoc
+   *
+   * Maps a {@link CanonicalItem} onto Linear's `issueCreate` mutation: the title
+   * and (when present) description become the issue's fields, the configured team
+   * always targets the new issue, the configured project is attached when set,
+   * and the configured `featureLabelId` is applied only to `feature`-level items.
+   * An `auth` failure is re-thrown with team context so callers see which
+   * token/team lacks write access; all other failures propagate unchanged. A
+   * soft failure (Linear returns `success: false`, a null issue, or an issue
+   * missing its id/url) is surfaced as a non-retryable `bad_request` naming the
+   * item so the failure is diagnosable rather than persisted as a broken link.
+   * Parent linkage is deferred to TER-18.
+   */
   async createItem(item: CanonicalItem): Promise<ExternalItemResult> {
-    throw new Error('LinearAdapter.createItem not implemented yet (TER-17)');
+    const { query, variables } = this.buildCreateIssueMutation(item);
+
+    let data: CreateIssueResponse;
+    try {
+      data = await this.client.request<CreateIssueResponse>(query, variables);
+    } catch (err) {
+      if (err instanceof LinearRequestError && err.info.code === 'auth') {
+        throw new LinearRequestError({
+          ...err.info,
+          message: `Linear issue creation failed for team ${this.config.teamId}: ${err.info.message}. Check that the configured token has write access to this team.`,
+        });
+      }
+      throw err;
+    }
+
+    // A soft failure (`success: false` / null issue) and a malformed success
+    // (an issue missing its id or url) are both treated as a non-retryable
+    // `bad_request`: returning an `ExternalItemResult` with an empty/undefined
+    // id or url would let the engine persist a SyncLink that can never address
+    // the created issue, silently breaking idempotency.
+    const issue = data.issueCreate?.issue;
+    if (!data.issueCreate?.success || !issue || !issue.id || !issue.url) {
+      throw new LinearRequestError({
+        code: 'bad_request',
+        retryable: false,
+        message: `Linear rejected creation of ${item.level} "${item.title}" for team ${this.config.teamId}.`,
+      });
+    }
+
+    return { externalId: issue.id, externalUrl: issue.url };
+  }
+
+  /**
+   * Builds the `issueCreate` mutation and its single `$input` variable. The
+   * input object is composed in TypeScript so optional fields appear only when
+   * present: `description` only when defined, `projectId` only when the config
+   * targets a project, and `labelIds` only for `feature`-level items when a
+   * `featureLabelId` is configured. The team always targets the new issue.
+   */
+  private buildCreateIssueMutation(item: CanonicalItem): {
+    query: string;
+    variables: Record<string, unknown>;
+  } {
+    const query = `
+      mutation LinearCreateIssue($input: IssueCreateInput!) {
+        issueCreate(input: $input) {
+          success
+          issue { id url }
+        }
+      }
+    `;
+
+    const input: Record<string, unknown> = {
+      title: item.title,
+      teamId: this.config.teamId,
+    };
+    if (item.description !== undefined) input['description'] = item.description;
+    if (this.config.projectId !== undefined) input['projectId'] = this.config.projectId;
+    if (item.level === 'feature' && this.config.featureLabelId !== undefined) {
+      input['labelIds'] = [this.config.featureLabelId];
+    }
+
+    return { query, variables: { input } };
   }
 
   /** @inheritdoc */
