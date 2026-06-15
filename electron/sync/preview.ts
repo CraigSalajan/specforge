@@ -181,7 +181,7 @@ export function buildPushPreview(plan: PushPlan, provider: AdapterName): PushPre
   const counts: PreviewCounts = { create: 0, update: 0, skip: 0, total: 0 };
 
   for (const diff of plan.ordered) {
-    const { item, decision, link } = diff;
+    const { item, decision } = diff;
     const native = resolveLevel(provider, item.level);
 
     const node: PreviewNode = {
