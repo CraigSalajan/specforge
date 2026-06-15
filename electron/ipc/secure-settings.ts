@@ -17,7 +17,7 @@ import { getSetting, setSetting } from '../db/repositories/settings.repo';
 const ENC_PREFIX = 'enc:v1:';
 
 /** Settings keys whose values are encrypted at rest via `safeStorage`. */
-const SECRET_SETTING_KEYS: ReadonlySet<string> = new Set(['ai.apiKey']);
+const SECRET_SETTING_KEYS: ReadonlySet<string> = new Set(['ai.apiKey', 'linear.pat']);
 
 function isSecretSettingKey(key: string): boolean {
   return SECRET_SETTING_KEYS.has(key);
