@@ -10,7 +10,6 @@ import {
   type LinearAuth,
 } from '../../../electron/sync/linear/auth';
 import {
-  LinearRequestError,
   parseRateLimitHeaders,
   rateLimitRetryAfterMs,
 } from '../../../electron/sync/linear/errors';
