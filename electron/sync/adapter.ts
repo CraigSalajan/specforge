@@ -35,7 +35,7 @@ export interface LabelInfo {
   color?: string;
   /** Parent label id when this label belongs to a label group. */
   parentId?: string;
-  /** True when this is a label group (container) rather than an applyable label. */
+  /** True when this is a label group (container) rather than an applicable label. */
   isGroup?: boolean;
 }
 
