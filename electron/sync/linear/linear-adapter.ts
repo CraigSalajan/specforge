@@ -10,13 +10,14 @@
  * drive it with a fake client (no network, no DB).
  *
  * ## Implementation status
- * `getMetadata` (TER-16) and `createItem` (TER-17) are implemented: the former
- * queries the configured team's workflow states and labels (and the optional
- * project) and returns a normalized {@link ProjectMetadata}; the latter creates a
- * Linear issue from a {@link CanonicalItem} and returns its external id/url. The
- * remaining {@link IAdapter} operations are still stubbed and throw a clear "not
- * implemented yet" error tagged with the ticket that fills them in: `updateItem`
- * (TER-18) and `linkItems` (TER-20).
+ * `getMetadata` (TER-16), `createItem` (TER-17), and `updateItem` (TER-18) are
+ * implemented: the first queries the configured team's workflow states and labels
+ * (and the optional project) and returns a normalized {@link ProjectMetadata}; the
+ * second creates a Linear issue from a {@link CanonicalItem} and returns its
+ * external id/url; the third pushes title/description changes to an existing issue
+ * via `issueUpdate`. The remaining {@link IAdapter} operation is still stubbed and
+ * throws a clear "not implemented yet" error tagged with the ticket that fills it
+ * in: `linkItems` (TER-20).
  *
  * ## Why the token is not in the config
  * {@link LinearConnectionConfig} carries only the *where* (team/project target),
@@ -100,10 +101,18 @@ interface CreateIssueResponse {
   };
 }
 
+/** Shape of the `issueUpdate` mutation's `data` payload. */
+interface UpdateIssueResponse {
+  issueUpdate: {
+    success: boolean;
+    issue: { id: string; url: string } | null;
+  };
+}
+
 /**
  * Linear {@link IAdapter}. Holds the connection target and the injected
- * transport. `getMetadata` is implemented; the write operations remain stubs
- * awaiting their follow-up tickets.
+ * transport. `getMetadata`, `createItem`, and `updateItem` are implemented;
+ * `linkItems` remains a stub awaiting its follow-up ticket.
  */
 export class LinearAdapter implements IAdapter {
   /** Which provider this adapter targets. */
@@ -291,9 +300,82 @@ export class LinearAdapter implements IAdapter {
     return { query, variables: { input } };
   }
 
-  /** @inheritdoc */
+  /**
+   * @inheritdoc
+   *
+   * Pushes the managed fields of a {@link CanonicalItem} onto Linear's
+   * `issueUpdate` mutation: the title and (when present) description overwrite the
+   * existing issue's fields, with the issue targeted by the top-level `id` rather
+   * than by team. An `auth` failure is re-thrown with team context so callers see
+   * which token/team lacks write access; all other failures propagate unchanged. A
+   * soft failure (Linear returns `success: false`) is surfaced as a non-retryable
+   * `bad_request` naming the issue and item so the failure is diagnosable.
+   *
+   * Material-change gating is the engine's responsibility, not this method's: the
+   * executor diffs unchanged items as `skip` and never calls `updateItem` for them
+   * (see `electron/sync/executor.ts`), so when invoked this method always pushes
+   * the current managed fields. It resolves to `void` — the executor refreshes the
+   * SyncLink hash/timestamp on resolve and records `failed` on throw.
+   */
   async updateItem(id: string, item: CanonicalItem): Promise<void> {
-    throw new Error('LinearAdapter.updateItem not implemented yet (TER-18)');
+    const { query, variables } = this.buildUpdateIssueMutation(id, item);
+
+    let data: UpdateIssueResponse;
+    try {
+      data = await this.client.request<UpdateIssueResponse>(query, variables);
+    } catch (err) {
+      if (err instanceof LinearRequestError && err.info.code === 'auth') {
+        throw new LinearRequestError({
+          ...err.info,
+          message: `Linear issue update failed for team ${this.config.teamId}: ${err.info.message}. Check that the configured token has write access to this team.`,
+        });
+      }
+      throw err;
+    }
+
+    // A soft failure (`success: false`) is surfaced as a non-retryable
+    // `bad_request`: resolving anyway would let the engine refresh the SyncLink
+    // hash/timestamp as if the change had landed, masking the rejection.
+    if (!data.issueUpdate?.success) {
+      throw new LinearRequestError({
+        code: 'bad_request',
+        retryable: false,
+        message: `Linear rejected update of issue ${id} (${item.level} "${item.title}") for team ${this.config.teamId}.`,
+      });
+    }
+
+    return;
+  }
+
+  /**
+   * Builds the `issueUpdate` mutation and its `$id` / `$input` variables. The
+   * issue is targeted by the top-level `id`, so the input never carries `teamId`
+   * (it is not part of `IssueUpdateInput`). The title is always set; `description`
+   * is composed in only when defined. Title and description are the full scope of
+   * TER-18 — projectId/labelIds are intentionally not touched here.
+   */
+  private buildUpdateIssueMutation(
+    id: string,
+    item: CanonicalItem,
+  ): {
+    query: string;
+    variables: Record<string, unknown>;
+  } {
+    const query = `
+      mutation LinearUpdateIssue($id: String!, $input: IssueUpdateInput!) {
+        issueUpdate(id: $id, input: $input) {
+          success
+          issue { id url }
+        }
+      }
+    `;
+
+    const input: Record<string, unknown> = {
+      title: item.title,
+    };
+    if (item.description !== undefined) input['description'] = item.description;
+
+    return { query, variables: { id, input } };
   }
 
   /** @inheritdoc */

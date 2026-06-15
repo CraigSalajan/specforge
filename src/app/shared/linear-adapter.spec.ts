@@ -12,32 +12,20 @@ import type { CanonicalItem } from '../../../electron/sync/canonical-item';
  * Unit tests for the Linear adapter. The adapter is a pure translation layer
  * over the injected transport, so the suite drives it with fake clients and
  * never touches the network, the DB, or Electron. The TER-14 cases below cover
- * the provider name and the still-stubbed write operations (which never call the
- * client, so a hollow fake suffices); the TER-16 suite further down fakes the
- * `request` method to exercise the implemented `getMetadata`.
+ * the provider name and the still-stubbed `linkItems` (which never calls the
+ * client, so a hollow fake suffices); the TER-16/TER-17/TER-18 suites further
+ * down fake the `request` method to exercise the implemented `getMetadata`,
+ * `createItem`, and `updateItem`.
  */
 
 /** The stubbed operations never call the client, so a hollow fake is enough. */
 const fakeClient = {} as unknown as LinearGraphQLClient;
-
-/** A minimal canonical item using only the fields CanonicalItem requires. */
-const sampleItem: CanonicalItem = {
-  localId: 'local-1',
-  level: 'story',
-  title: 'A sample story',
-};
 
 describe('LinearAdapter — AC1: name & stubbed operations', () => {
   it('reports the linear provider name', () => {
     const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClient);
 
     expect(adapter.name).toBe('linear');
-  });
-
-  it('rejects updateItem as not implemented', async () => {
-    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClient);
-
-    await expect(adapter.updateItem('ext-1', sampleItem)).rejects.toThrow(/not implemented/i);
   });
 
   it('rejects linkItems as not implemented', async () => {
@@ -384,6 +372,137 @@ describe('LinearAdapter — TER-17: createItem', () => {
     const error = await adapter.createItem(item).then(
       () => {
         throw new Error('expected createItem to reject');
+      },
+      (err: unknown) => err,
+    );
+
+    expect(error).toBeInstanceOf(LinearRequestError);
+    expect((error as LinearRequestError).info.code).toBe('bad_request');
+    expect((error as LinearRequestError).info.retryable).toBe(false);
+  });
+});
+
+/**
+ * TER-18: updateItem pushes the managed fields of a {@link CanonicalItem} onto
+ * Linear's `issueUpdate` mutation — the title and (when present) description
+ * overwrite the existing issue, which is targeted by the top-level `id` rather
+ * than by team. The injected transport is faked with a `vi.fn()` `request`, so
+ * the suite touches no network. The `id` and `input` variables passed to
+ * `request` are inspected to prove the issue is addressed by id and that
+ * `description` is composed in only when defined. Material-change gating lives in
+ * the engine, so this method always pushes the current managed fields when called.
+ */
+describe('LinearAdapter — TER-18: updateItem', () => {
+  /** Fakes the GraphQL transport with a single recordable `request` method. */
+  function fakeClientWith(request: ReturnType<typeof vi.fn>): LinearGraphQLClient {
+    return { request } as unknown as LinearGraphQLClient;
+  }
+
+  /** Reads the query string from the most recent `request` call. */
+  function lastQuery(request: ReturnType<typeof vi.fn>): string {
+    return request.mock.calls.at(-1)?.[0] as string;
+  }
+
+  /** Reads the `id` variable from the most recent `request` call. */
+  function lastId(request: ReturnType<typeof vi.fn>): string {
+    return (request.mock.calls.at(-1)?.[1] as { id: string }).id;
+  }
+
+  /** Reads the `input` variable from the most recent `request` call. */
+  function lastInput(request: ReturnType<typeof vi.fn>): Record<string, unknown> {
+    return (request.mock.calls.at(-1)?.[1] as { input: Record<string, unknown> }).input;
+  }
+
+  /** A resolved `issueUpdate` payload for the given issue fields. */
+  function updatedIssue(issue: { id: string; url: string }) {
+    return { issueUpdate: { success: true, issue } };
+  }
+
+  it('issues an issueUpdate mutation targeting the issue by id with title/description', async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValue(updatedIssue({ id: 'iss-1', url: 'https://linear.app/x/issue/iss-1' }));
+    const item: CanonicalItem = {
+      localId: 'local-1',
+      level: 'story',
+      title: 'Implement updateItem',
+      description: 'Map canonical items onto issueUpdate.',
+    };
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    await adapter.updateItem('issue-ext-id', item);
+
+    expect(lastQuery(request)).toContain('issueUpdate');
+    expect(lastId(request)).toBe('issue-ext-id');
+    expect(lastInput(request)).toEqual({
+      title: 'Implement updateItem',
+      description: 'Map canonical items onto issueUpdate.',
+    });
+    // The issue is targeted by the top-level id, never by team.
+    expect(lastInput(request)['teamId']).toBeUndefined();
+  });
+
+  it('omits description from input when the item has none', async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValue(updatedIssue({ id: 'iss-1', url: 'https://linear.app/x/issue/iss-1' }));
+    const item: CanonicalItem = {
+      localId: 'local-1',
+      level: 'story',
+      title: 'A story',
+    };
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    await adapter.updateItem('issue-ext-id', item);
+
+    expect(lastInput(request)['title']).toBe('A story');
+    expect(lastInput(request)).not.toHaveProperty('description');
+  });
+
+  it('resolves to undefined on success', async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValue(updatedIssue({ id: 'iss-1', url: 'https://linear.app/x/issue/iss-1' }));
+    const item: CanonicalItem = { localId: 'local-1', level: 'story', title: 'A story' };
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    expect(await adapter.updateItem('issue-ext-id', item)).toBeUndefined();
+  });
+
+  it('surfaces an auth failure with team context while preserving the structured info', async () => {
+    const request = vi
+      .fn()
+      .mockRejectedValue(
+        new LinearRequestError({ code: 'auth', retryable: false, message: 'Unauthorized' }),
+      );
+    const item: CanonicalItem = { localId: 'local-1', level: 'story', title: 'A story' };
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    const error = await adapter.updateItem('issue-ext-id', item).then(
+      () => {
+        throw new Error('expected updateItem to reject');
+      },
+      (err: unknown) => err,
+    );
+
+    expect(error).toBeInstanceOf(LinearRequestError);
+    expect((error as LinearRequestError).info.code).toBe('auth');
+    expect((error as LinearRequestError).info.retryable).toBe(false);
+    // The structured info is preserved while the original message is augmented
+    // with team context and a write-permission hint.
+    expect((error as LinearRequestError).info.message).toContain('team-1');
+    expect((error as LinearRequestError).info.message).toContain('Unauthorized');
+    expect((error as LinearRequestError).info.message).toMatch(/write access/i);
+  });
+
+  it('rejects with a non-retryable bad_request when Linear reports success:false', async () => {
+    const request = vi.fn().mockResolvedValue({ issueUpdate: { success: false, issue: null } });
+    const item: CanonicalItem = { localId: 'local-1', level: 'story', title: 'A story' };
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    const error = await adapter.updateItem('issue-ext-id', item).then(
+      () => {
+        throw new Error('expected updateItem to reject');
       },
       (err: unknown) => err,
     );
