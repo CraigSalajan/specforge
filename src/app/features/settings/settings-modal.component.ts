@@ -1,6 +1,7 @@
 import {
   ChangeDetectionStrategy,
   Component,
+  DestroyRef,
   computed,
   effect,
   inject,
@@ -16,7 +17,8 @@ import { EmbeddingIndexerService } from '../ai/providers/indexing.service';
 import { ToolRegistryService } from '../ai/tools/tool-registry.service';
 import { SkillRegistryService } from '../ai/skills/skill-registry.service';
 import { IpcService } from '../../core/ipc.service';
-import type { Settings, SkillMeta } from '../../shared/types';
+import { toAiErrorInfo } from '../ai/providers/ai-harness-error';
+import type { AiModelInfo, Settings, SkillMeta } from '../../shared/types';
 
 type SettingsSection = 'workspace' | 'ai' | 'index' | 'tools' | 'skills';
 
@@ -130,25 +132,64 @@ type SettingsSection = 'workspace' | 'ai' | 'index' | 'tools' | 'skills';
                 </div>
               </div>
 
-              <div class="mb-3 grid grid-cols-2 gap-3">
+              <div class="mb-1 grid grid-cols-2 gap-3">
                 <div>
                   <label class="mb-1 block text-xs text-text-secondary">Chat model</label>
-                  <input
-                    type="text"
-                    class="w-full rounded border border-border-subtle bg-surface-2 px-2 py-1.5 font-mono text-xs text-text-primary focus:border-accent focus:outline-none"
-                    placeholder="gpt-4o-mini"
-                    [ngModel]="draft()['ai.chatModel']"
-                    (ngModelChange)="patch({ 'ai.chatModel': $event })" />
+                  @if (useManualChatEntry()) {
+                    <input
+                      type="text"
+                      class="w-full rounded border border-border-subtle bg-surface-2 px-2 py-1.5 font-mono text-xs text-text-primary focus:border-accent focus:outline-none"
+                      placeholder="gpt-4o-mini"
+                      [ngModel]="draft()['ai.chatModel']"
+                      (ngModelChange)="patch({ 'ai.chatModel': $event })" />
+                  } @else {
+                    <select
+                      class="w-full rounded border border-border-subtle bg-surface-2 px-2 py-1.5 font-mono text-xs text-text-primary focus:border-accent focus:outline-none"
+                      [ngModel]="draft()['ai.chatModel']"
+                      (ngModelChange)="patch({ 'ai.chatModel': $event })">
+                      @for (m of chatModelOptions(); track m.id) {
+                        <option [value]="m.id">{{ m.id }}</option>
+                      }
+                    </select>
+                  }
                 </div>
                 <div>
                   <label class="mb-1 block text-xs text-text-secondary">Embedding model</label>
-                  <input
-                    type="text"
-                    class="w-full rounded border border-border-subtle bg-surface-2 px-2 py-1.5 font-mono text-xs text-text-primary focus:border-accent focus:outline-none"
-                    placeholder="text-embedding-3-small"
-                    [ngModel]="draft()['ai.embeddingModel']"
-                    (ngModelChange)="patch({ 'ai.embeddingModel': $event })" />
+                  @if (useManualEmbeddingEntry()) {
+                    <input
+                      type="text"
+                      class="w-full rounded border border-border-subtle bg-surface-2 px-2 py-1.5 font-mono text-xs text-text-primary focus:border-accent focus:outline-none"
+                      placeholder="text-embedding-3-small"
+                      [ngModel]="draft()['ai.embeddingModel']"
+                      (ngModelChange)="patch({ 'ai.embeddingModel': $event })" />
+                  } @else {
+                    <select
+                      class="w-full rounded border border-border-subtle bg-surface-2 px-2 py-1.5 font-mono text-xs text-text-primary focus:border-accent focus:outline-none"
+                      [ngModel]="draft()['ai.embeddingModel']"
+                      (ngModelChange)="patch({ 'ai.embeddingModel': $event })">
+                      @for (m of embeddingModelOptions(); track m.id) {
+                        <option [value]="m.id">{{ m.id }}</option>
+                      }
+                    </select>
+                  }
                 </div>
+              </div>
+
+              <div class="mb-3 flex items-center gap-2">
+                <button
+                  type="button"
+                  class="rounded border border-border-subtle bg-surface-2 px-3 py-1.5 text-xs text-text-secondary hover:bg-surface-3 hover:text-text-primary disabled:opacity-50"
+                  [disabled]="modelsLoading()"
+                  (click)="refreshModels()">{{ modelsLoading() ? 'Loading…' : 'Refresh' }}</button>
+                @if (modelsLoading()) {
+                  <span class="text-xs text-accent">Loading models…</span>
+                } @else if (modelsError()) {
+                  <span class="text-xs text-danger">{{ modelsError() }}</span>
+                } @else if (useManualModelEntry()) {
+                  <span class="text-xs text-text-muted">Enter a model id manually.</span>
+                } @else {
+                  <span class="text-xs text-text-muted">Models from your provider's /models endpoint.</span>
+                }
               </div>
 
               <div class="mb-3 flex items-center justify-between rounded border border-border-subtle bg-surface-2 px-3 py-2">
@@ -410,6 +451,7 @@ export class SettingsModalComponent {
   private readonly toolRegistry = inject(ToolRegistryService);
   protected readonly skillRegistry = inject(SkillRegistryService);
   private readonly ipc = inject(IpcService);
+  private readonly destroyRef = inject(DestroyRef);
 
   /** Tools are static after construction, so a plain readonly snapshot is fine. */
   readonly toolList = this.toolRegistry.list();
@@ -440,6 +482,79 @@ export class SettingsModalComponent {
   readonly draftVaultPath = this._draftVaultPath.asReadonly();
   readonly showApiKey = this._showApiKey.asReadonly();
 
+  // Provider model list (TER-5). One shared list feeds both the chat and
+  // embedding dropdowns; the fetch always reads the DRAFT base URL / key so it
+  // probes the not-yet-saved config the user is editing.
+  private readonly _models = signal<AiModelInfo[]>([]);
+  private readonly _modelsLoading = signal(false);
+  private readonly _modelsError = signal<string | null>(null);
+
+  readonly modelsLoading = this._modelsLoading.asReadonly();
+  readonly modelsError = this._modelsError.asReadonly();
+
+  /** Monotonic token to discard responses from superseded fetches. */
+  private modelsRequestToken = 0;
+  /** Pending debounce timer for the auto-fetch effect. */
+  private modelsDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * Builds the option list for a model dropdown: the fetched models, plus a
+   * synthetic entry for the currently-saved value when it is non-empty and not
+   * already present, so the saved selection always stays selectable (AC3).
+   */
+  private withCurrent(current: string): AiModelInfo[] {
+    const models = this._models();
+    if (current.length > 0 && !models.some((m) => m.id === current)) {
+      return [{ id: current }, ...models];
+    }
+    return models;
+  }
+
+  readonly chatModelOptions = computed(() => this.withCurrent(this._draft()['ai.chatModel'] ?? ''));
+  readonly embeddingModelOptions = computed(() =>
+    this.withCurrent(this._draft()['ai.embeddingModel'] ?? ''),
+  );
+
+  /**
+   * The only draft fields the model fetch actually depends on, projected to a
+   * single primitive so the auto-fetch effect's dependency narrows to these two
+   * values (plus the section flag). Reading `_draft()` whole would re-run the
+   * effect on every unrelated edit — top-K, timeout, max-context — re-arming the
+   * debounce and re-hitting `/models`; a string keeps the default value equality
+   * from notifying unless the base URL or key actually changes. A newline can't
+   * appear in either field, so it is a safe delimiter.
+   */
+  private readonly modelFetchKey = computed(() => {
+    const draft = this._draft();
+    const baseUrl = (draft['ai.baseUrl'] ?? '').trim();
+    const apiKey = draft['ai.apiKey'] ?? '';
+    return `${baseUrl}\n${apiKey}`;
+  });
+
+  /**
+   * Whether free-text entry must be used instead of a dropdown, evaluated per
+   * field so a populated field never forces an empty dropdown on the other. We
+   * fall back when the model list can't serve as a source of truth — the IPC
+   * bridge is unavailable, a fetch errored, or that field has no options
+   * (nothing fetched and nothing saved). This keeps Save working in every case.
+   */
+  private manualEntryFor(options: AiModelInfo[]): boolean {
+    return !this.ipc.isAvailable || this._modelsError() !== null || options.length === 0;
+  }
+
+  readonly useManualChatEntry = computed(() => this.manualEntryFor(this.chatModelOptions()));
+  readonly useManualEmbeddingEntry = computed(() =>
+    this.manualEntryFor(this.embeddingModelOptions()),
+  );
+
+  /**
+   * Drives the informational hint under the Refresh button. True when both
+   * fields are in manual mode, i.e. there is no usable list at all.
+   */
+  readonly useManualModelEntry = computed(
+    () => this.useManualChatEntry() && this.useManualEmbeddingEntry(),
+  );
+
   readonly isDirty = computed(() => JSON.stringify(this._draft()) !== this._initialJson());
 
   readonly lastIndexedLabel = computed(() => {
@@ -465,12 +580,52 @@ export class SettingsModalComponent {
           this._initialJson.set(JSON.stringify(current));
           this._showApiKey.set(false);
           this.activeSection.set('workspace');
+          // Reset any model list from a previous open so the dropdowns reflect
+          // the freshly snapshotted draft. Bump the request token and drop any
+          // pending debounce so an in-flight fetch from the previous open cannot
+          // resolve after this reset and repopulate the cleared list.
+          this.modelsRequestToken++;
+          if (this.modelsDebounceTimer) {
+            clearTimeout(this.modelsDebounceTimer);
+            this.modelsDebounceTimer = null;
+          }
+          this._models.set([]);
+          this._modelsError.set(null);
+          this._modelsLoading.set(false);
           // Refresh the skill list so the Skills section reflects what is on
           // disk right now (a skill could have been added since last open).
           void this.skillRegistry.reload();
         });
       }
       this.wasOpen = open;
+    });
+
+    // Debounced auto-fetch of the provider model list. Depends only on the AI
+    // section flag and `modelFetchKey` (base URL + API key) so unrelated draft
+    // edits (e.g. timeout, top-K) don't re-trigger it. The actual fetch runs
+    // inside `untracked` so reading other signals there can't widen the
+    // dependency set and clobber this effect.
+    effect(() => {
+      const active = this.activeSection() === 'ai';
+      const key = this.modelFetchKey();
+      // key is `<baseUrl>\n<apiKey>`; an empty base URL leaves nothing before
+      // the delimiter.
+      const baseUrl = key.split('\n', 1)[0];
+      if (!active) return;
+      if (baseUrl.length === 0) {
+        // No base URL to probe: clear any models fetched from a previous URL so
+        // the dropdowns don't keep showing options that no longer apply.
+        untracked(() => {
+          this._models.set([]);
+          this._modelsError.set(null);
+        });
+        return;
+      }
+      untracked(() => this.scheduleModelsFetch());
+    });
+
+    this.destroyRef.onDestroy(() => {
+      if (this.modelsDebounceTimer) clearTimeout(this.modelsDebounceTimer);
     });
   }
 
@@ -586,6 +741,65 @@ export class SettingsModalComponent {
 
   toggleApiKey(): void {
     this._showApiKey.update((v) => !v);
+  }
+
+  /** Re-fetches the model list immediately, bypassing the debounce. */
+  refreshModels(): void {
+    if (this.modelsDebounceTimer) {
+      clearTimeout(this.modelsDebounceTimer);
+      this.modelsDebounceTimer = null;
+    }
+    void this.fetchModels();
+  }
+
+  /** (Re)arms the ~400ms debounce that drives the auto-fetch. */
+  private scheduleModelsFetch(): void {
+    if (this.modelsDebounceTimer) clearTimeout(this.modelsDebounceTimer);
+    this.modelsDebounceTimer = setTimeout(() => {
+      this.modelsDebounceTimer = null;
+      void this.fetchModels();
+    }, 400);
+  }
+
+  /**
+   * Fetches the provider's model list from the DRAFT base URL / key (never the
+   * saved config) via the main process. Stale responses are discarded using a
+   * monotonic request token so a slow earlier fetch can't overwrite a newer
+   * one. Skips entirely when the draft base URL is empty or IPC is unavailable.
+   */
+  private async fetchModels(): Promise<void> {
+    if (!this.ipc.isAvailable) return;
+    const draft = this._draft();
+    const baseUrl = (draft['ai.baseUrl'] ?? '').trim();
+    if (baseUrl.length === 0) {
+      // Nothing to fetch — drop any stale list so the dropdowns don't show
+      // options from a base URL the user has since cleared.
+      this._models.set([]);
+      this._modelsError.set(null);
+      return;
+    }
+    const apiKey = draft['ai.apiKey'] ?? '';
+    const timeoutMs = (draft['ai.timeoutSeconds'] ?? 30) * 1000;
+
+    const token = ++this.modelsRequestToken;
+    this._modelsLoading.set(true);
+    this._modelsError.set(null);
+    try {
+      const res = await this.ipc.aiListModels({ baseUrl, apiKey, timeoutMs });
+      if (token !== this.modelsRequestToken) return;
+      if (res.ok) {
+        this._models.set(res.data.models);
+      } else {
+        this._models.set([]);
+        this._modelsError.set(res.error.message);
+      }
+    } catch (err) {
+      if (token !== this.modelsRequestToken) return;
+      this._models.set([]);
+      this._modelsError.set(toAiErrorInfo(err).message);
+    } finally {
+      if (token === this.modelsRequestToken) this._modelsLoading.set(false);
+    }
   }
 
   async onChangeVault(): Promise<void> {

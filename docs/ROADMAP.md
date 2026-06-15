@@ -62,6 +62,7 @@ Sequence after the core is dense:
 - [x] **Tabs** (shipped 2026-06-12) — multi-file tab bar, drag reorder, per-tab cursor/scroll, session restore; **split view** still pending.
 - **Git-backed version history** with a diff viewer — fits local-first perfectly; auto-snapshot-on-save is the emerging pattern.
 - [x] **Mermaid rendering** (shipped 2026-06-12) — live-preview widget over ```mermaid fences, lazy-loaded, dark-themed; **clipboard image paste** still pending.
+- **PM tool integration** — push the epic/feature/story chain to Jira / ADO / Linear / GitHub Projects (one-way first, idempotent re-push). Design captured in `docs/PM-TOOL-INTEGRATION.md`.
 - **Canvas / spatial planning view** — expensive; only after the above.
 - Remaining deferred items as demand appears: auto-embed on save (opt-in + debounce), multi-window.
 
