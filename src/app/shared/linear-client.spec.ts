@@ -231,15 +231,13 @@ describe('LinearGraphQLClient', () => {
       const { options } = baseOptions(new PatAuth(() => PAT_TOKEN), fn);
       const client = new LinearGraphQLClient(options);
 
-      try {
-        await client.request('query { bogus }');
-        throw new Error('expected request to reject');
-      } catch (err) {
-        expect(err).toBeInstanceOf(LinearRequestError);
-        expect((err as LinearRequestError).info.code).toBe('bad_request');
-        expect((err as LinearRequestError).info.retryable).toBe(false);
-        expect((err as LinearRequestError).info.message).toContain('bogus');
-      }
+      await expect(client.request('query { bogus }')).rejects.toMatchObject({
+        info: {
+          code: 'bad_request',
+          retryable: false,
+          message: expect.stringContaining('bogus'),
+        },
+      });
       expect(calls).toHaveLength(1);
     });
 
@@ -387,6 +385,20 @@ describe('LinearGraphQLClient', () => {
         name: 'LinearRequestError',
         info: { code: 'bad_request', message: 'Something broke' },
       });
+    });
+
+    it('throws (does not return null) on a 2xx with neither data nor errors', async () => {
+      const { fn, calls } = queuedFetch([jsonResponse({})]);
+      const { options, waits } = baseOptions(new PatAuth(() => PAT_TOKEN), fn);
+      const client = new LinearGraphQLClient(options);
+
+      await expect(client.request('query { x }')).rejects.toMatchObject({
+        name: 'LinearRequestError',
+        info: { code: 'unknown', retryable: false },
+      });
+      // A contract violation, not a transient fault — it must fail fast.
+      expect(calls).toHaveLength(1);
+      expect(waits).toEqual([]);
     });
   });
 });

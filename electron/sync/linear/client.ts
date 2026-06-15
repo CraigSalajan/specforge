@@ -41,6 +41,7 @@ import { fetchFailureInfo } from '../../ipc/ai-error';
 import type { LinearAuth } from './auth';
 import {
   LinearRequestError,
+  MAX_RATE_LIMIT_WAIT_MS,
   classifyLinearResponse,
   parseRateLimitHeaders,
   type GraphQLResponseBody,
@@ -238,7 +239,22 @@ export class LinearGraphQLClient {
 
     // Success: HTTP 2xx with no GraphQL errors.
     if (res.ok && (!errors || errors.length === 0)) {
-      return { ok: true, data: (body?.data ?? null) as T };
+      const data = body?.data;
+      // A 2xx that carries neither GraphQL errors nor a `data` payload violates
+      // Linear's response contract. Surface it as a (non-retryable) failure
+      // rather than returning `null as T` and handing the caller a value that
+      // lies about its type.
+      if (data == null) {
+        return {
+          ok: false,
+          info: {
+            code: 'unknown',
+            retryable: false,
+            message: 'Linear returned a successful response with no data.',
+          },
+        };
+      }
+      return { ok: true, data: data as T };
     }
 
     return {
@@ -302,8 +318,11 @@ export class LinearGraphQLClient {
     const { requestsRemaining, requestsResetMs } = this.snapshot;
     if (requestsRemaining === undefined || requestsRemaining > 0) return;
     if (requestsResetMs === undefined) return;
-    const waitMs = requestsResetMs - this.now();
-    if (waitMs <= 0) return;
+    const rawWaitMs = requestsResetMs - this.now();
+    if (rawWaitMs <= 0) return;
+    // Cap the wait like the retry path (errors.ts) so a skewed or malformed
+    // reset header can't turn the proactive throttle into an apparent hang.
+    const waitMs = Math.min(rawWaitMs, MAX_RATE_LIMIT_WAIT_MS);
     console.warn(`[linear] request budget exhausted; waiting ${waitMs}ms for reset.`);
     await this.sleep(waitMs);
   }
