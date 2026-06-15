@@ -13,7 +13,7 @@
  * unchanged items to skip.
  */
 
-import type { CanonicalItem, CanonicalItemType } from './canonical-item';
+import type { CanonicalItem, CanonicalLevel } from './canonical-item';
 
 /** Identifier of a supported PM provider. */
 export type AdapterName = 'jira' | 'ado' | 'linear' | 'github';
@@ -39,7 +39,7 @@ export interface ProjectMetadata {
    * Hierarchy levels this target can represent natively; drives graceful
    * degradation where the target is flatter than the canonical model.
    */
-  supportedLevels: CanonicalItemType[];
+  supportedLevels: CanonicalLevel[];
 }
 
 /**
