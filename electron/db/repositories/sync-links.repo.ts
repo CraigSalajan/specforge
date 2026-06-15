@@ -45,10 +45,17 @@ export function findSyncLink(specItemId: string, connectionId: string): SyncLink
 /**
  * Insert or update the link for (specItemId, connectionId). Idempotent: a second
  * push for the same item+connection updates the existing row rather than
- * duplicating. `lastPushedAt` is accepted as an ISO string and stored as epoch ms.
+ * duplicating. `lastPushedAt` is accepted as an ISO string and stored as epoch
+ * ms; throws if it is not a valid date so a bad input fails with a clear message
+ * rather than a downstream NOT NULL constraint error.
  */
 export function upsertSyncLink(input: SyncLink): SyncLink {
   const lastPushedAt = new Date(input.lastPushedAt).getTime();
+  if (Number.isNaN(lastPushedAt)) {
+    throw new Error(
+      `upsertSyncLink: invalid lastPushedAt (expected an ISO-8601 date): ${input.lastPushedAt}`,
+    );
+  }
   getDb()
     .prepare(
       `INSERT INTO sync_links
