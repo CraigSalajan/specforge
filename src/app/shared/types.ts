@@ -470,6 +470,21 @@ export interface AiEmbedResponse {
   dim: number;
 }
 
+export interface AiModelInfo {
+  id: string;
+  object?: string;
+}
+
+export interface AiListModelsRequest {
+  baseUrl: string;
+  apiKey: string;
+  timeoutMs?: number;
+}
+
+export interface AiListModelsResponse {
+  models: AiModelInfo[];
+}
+
 export interface AiStreamChunkEvent {
   streamId: string;
   delta: string;
@@ -532,6 +547,10 @@ export type AiChatCompleteIpcResult =
 
 export type AiEmbedIpcResult =
   | { ok: true; data: AiEmbedResponse }
+  | { ok: false; error: AiErrorInfo };
+
+export type AiListModelsIpcResult =
+  | { ok: true; data: AiListModelsResponse }
   | { ok: false; error: AiErrorInfo };
 
 // PDF export. The renderer sends sanitized HTML; the main process shows the
@@ -635,6 +654,7 @@ export interface SpecForgeApi {
   aiChatAbort: (streamId: string) => Promise<void>;
   aiChatComplete: (req: AiChatCompleteRequest) => Promise<AiChatCompleteIpcResult>;
   aiEmbed: (req: AiEmbedRequest) => Promise<AiEmbedIpcResult>;
+  aiListModels: (req: AiListModelsRequest) => Promise<AiListModelsIpcResult>;
   onAiStreamChunk: (cb: (evt: AiStreamChunkEvent) => void) => () => void;
   onAiStreamDone: (cb: (evt: AiStreamDoneEvent) => void) => () => void;
   onAiStreamError: (cb: (evt: AiStreamErrorEvent) => void) => () => void;

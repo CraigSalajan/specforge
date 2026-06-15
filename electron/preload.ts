@@ -46,6 +46,7 @@ const IpcChannels = {
   AiChatAbort: 'specforge:ai-chat-abort',
   AiChatComplete: 'specforge:ai-chat-complete',
   AiEmbed: 'specforge:ai-embed',
+  AiListModels: 'specforge:ai-list-models',
   AiStreamChunk: 'specforge:ai-stream-chunk',
   AiStreamDone: 'specforge:ai-stream-done',
   AiStreamError: 'specforge:ai-stream-error',
@@ -123,6 +124,21 @@ interface AiEmbedResponseDto {
   dim: number;
 }
 
+interface AiModelInfoDto {
+  id: string;
+  object?: string;
+}
+
+interface AiListModelsRequestDto {
+  baseUrl: string;
+  apiKey: string;
+  timeoutMs?: number;
+}
+
+interface AiListModelsResponseDto {
+  models: AiModelInfoDto[];
+}
+
 interface AiStreamChunkEventDto {
   streamId: string;
   delta: string;
@@ -153,6 +169,10 @@ type AiChatCompleteIpcResultDto =
   | { ok: false; error: AiErrorInfoDto };
 
 type AiEmbedIpcResultDto = { ok: true; data: AiEmbedResponseDto } | { ok: false; error: AiErrorInfoDto };
+
+type AiListModelsIpcResultDto =
+  | { ok: true; data: AiListModelsResponseDto }
+  | { ok: false; error: AiErrorInfoDto };
 
 interface AiStreamErrorEventDto {
   streamId: string;
@@ -272,6 +292,8 @@ const api = {
     ipcRenderer.invoke(IpcChannels.AiChatComplete, req),
   aiEmbed: (req: AiEmbedRequestDto): Promise<AiEmbedIpcResultDto> =>
     ipcRenderer.invoke(IpcChannels.AiEmbed, req),
+  aiListModels: (req: AiListModelsRequestDto): Promise<AiListModelsIpcResultDto> =>
+    ipcRenderer.invoke(IpcChannels.AiListModels, req),
   onAiStreamChunk: (cb: (evt: AiStreamChunkEventDto) => void): (() => void) => {
     const handler = (_e: Electron.IpcRendererEvent, payload: AiStreamChunkEventDto) => cb(payload);
     ipcRenderer.on(IpcChannels.AiStreamChunk, handler);

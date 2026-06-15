@@ -23,6 +23,7 @@ const Channels = {
   ChatAbort: 'specforge:ai-chat-abort',
   ChatComplete: 'specforge:ai-chat-complete',
   Embed: 'specforge:ai-embed',
+  ListModels: 'specforge:ai-list-models',
   StreamChunk: 'specforge:ai-stream-chunk',
   StreamDone: 'specforge:ai-stream-done',
   StreamError: 'specforge:ai-stream-error',
@@ -106,6 +107,18 @@ interface EmbedResponse {
   dim: number;
 }
 
+interface ModelInfo {
+  id: string;
+  object?: string;
+}
+
+interface ListModelsRequest {
+  baseUrl: string;
+  apiKey: string;
+  /** Connect bound in ms; 0 waits indefinitely. Values above the default also extend the response bound. */
+  timeoutMs?: number;
+}
+
 interface ChatCompletionStreamPayload {
   choices?: Array<{
     delta?: { content?: string; tool_calls?: StreamToolCallDelta[] };
@@ -138,8 +151,16 @@ type ChatCompleteIpcResult =
 
 type EmbedIpcResult = { ok: true; data: EmbedResponse } | { ok: false; error: AiErrorInfo };
 
+type ListModelsIpcResult =
+  | { ok: true; data: { models: ModelInfo[] } }
+  | { ok: false; error: AiErrorInfo };
+
 interface EmbeddingsResponsePayload {
   data?: Array<{ index: number; embedding: number[] }>;
+}
+
+interface ModelsResponsePayload {
+  data?: Array<{ id?: string; object?: string }>;
 }
 
 interface ActiveStream {
@@ -635,11 +656,75 @@ async function handleEmbed(_event: IpcMainInvokeEvent, req: EmbedRequest): Promi
   }
 }
 
+async function handleListModels(
+  _event: IpcMainInvokeEvent,
+  req: ListModelsRequest,
+): Promise<ListModelsIpcResult> {
+  let baseUrl: string;
+  let apiKey: string;
+  try {
+    if (!req || typeof req !== 'object') throw new Error('Invalid request payload');
+    baseUrl = assertNonEmptyString(req.baseUrl, 'baseUrl');
+    // apiKey is optional: keyless local providers (Ollama, LM Studio) expose
+    // /models without auth, so only forward an Authorization header when a
+    // non-empty key is present.
+    apiKey = typeof req.apiKey === 'string' ? req.apiKey : '';
+  } catch (err) {
+    return { ok: false, error: invalidRequestInfo(err instanceof Error ? err.message : String(err)) };
+  }
+
+  const controller = new AbortController();
+  const connectTimeoutMs = resolveConnectTimeoutMs(req.timeoutMs);
+  const watchdog = createAbortWatchdog<'connect' | 'response'>(controller);
+  if (connectTimeoutMs > 0) watchdog.arm('connect', connectTimeoutMs);
+
+  try {
+    const headers: Record<string, string> = {};
+    if (apiKey.length > 0) headers['Authorization'] = `Bearer ${apiKey}`;
+    const res = await fetch(`${trimBaseUrl(baseUrl)}/models`, {
+      method: 'GET',
+      headers,
+      signal: controller.signal,
+    });
+
+    // Headers arrived: swap the connect watchdog for a body-completion bound.
+    // 0 keeps waiting indefinitely; otherwise the user's bound may extend —
+    // but never shrink — the default response window.
+    if (connectTimeoutMs > 0) {
+      watchdog.arm('response', Math.max(connectTimeoutMs, RESPONSE_TIMEOUT_MS));
+    }
+
+    if (!res.ok) {
+      const text = await readErrorBody(res);
+      return {
+        ok: false,
+        error: httpErrorInfo(res.status, res.statusText, text, res.headers.get('retry-after')),
+      };
+    }
+
+    const json = (await res.json()) as ModelsResponsePayload;
+    const models = (json.data ?? [])
+      .filter((m): m is { id: string; object?: string } => typeof m?.id === 'string' && m.id.length > 0)
+      .map((m) => ({ id: m.id, object: m.object }))
+      .sort((a, b) => a.id.localeCompare(b.id));
+    return { ok: true, data: { models } };
+  } catch (err) {
+    if (isAbortError(err)) {
+      const fired = watchdog.fired();
+      return { ok: false, error: fired ? timeoutInfo(fired.kind, fired.ms) : abortedInfo() };
+    }
+    return { ok: false, error: fetchFailureInfo(err) };
+  } finally {
+    watchdog.disarm();
+  }
+}
+
 export function registerAiHandlers(): void {
   ipcMain.handle(Channels.ChatStream, handleChatStream);
   ipcMain.handle(Channels.ChatAbort, handleChatAbort);
   ipcMain.handle(Channels.ChatComplete, handleChatComplete);
   ipcMain.handle(Channels.Embed, handleEmbed);
+  ipcMain.handle(Channels.ListModels, handleListModels);
 }
 
 export function disposeAiHandlers(): void {

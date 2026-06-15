@@ -6,6 +6,9 @@ import type {
   AiEmbedIpcResult,
   AiEmbedRequest,
   AiErrorInfo,
+  AiListModelsIpcResult,
+  AiListModelsRequest,
+  AiModelInfo,
   AiStreamChunkEvent,
   AiStreamDoneEvent,
   AiStreamErrorEvent,
@@ -46,6 +49,7 @@ export interface AiIpcAdapter {
   aiChatAbort(streamId: string): Promise<void>;
   aiChatComplete(req: AiChatCompleteRequest): Promise<AiChatCompleteIpcResult>;
   aiEmbed(req: AiEmbedRequest): Promise<AiEmbedIpcResult>;
+  aiListModels(req: AiListModelsRequest): Promise<AiListModelsIpcResult>;
   onAiStreamChunk(cb: (evt: AiStreamChunkEvent) => void): () => void;
   onAiStreamDone(cb: (evt: AiStreamDoneEvent) => void): () => void;
   onAiStreamError(cb: (evt: AiStreamErrorEvent) => void): () => void;
@@ -217,6 +221,28 @@ export class OpenAiCompatibleChatProvider implements ChatProvider {
         opts.signal.removeEventListener('abort', abortHandler);
       }
     }
+  }
+
+  /**
+   * Lists the provider's available models via the OpenAI-compatible
+   * `GET {baseUrl}/models` endpoint. Takes an explicit config so callers
+   * (e.g. the Settings draft) can probe a not-yet-saved base URL / key
+   * without going through {@link getConfig}. apiKey may be empty for keyless
+   * local providers.
+   */
+  async listModels(cfg: { baseUrl: string; apiKey: string; timeoutMs?: number }): Promise<AiModelInfo[]> {
+    let res: AiListModelsIpcResult;
+    try {
+      res = await this.ipc.aiListModels({
+        baseUrl: cfg.baseUrl,
+        apiKey: cfg.apiKey,
+        timeoutMs: cfg.timeoutMs,
+      });
+    } catch (err) {
+      throw new AiHarnessError(toAiErrorInfo(err));
+    }
+    if (!res.ok) throw new AiHarnessError(res.error);
+    return res.data.models;
   }
 
   async chatComplete(

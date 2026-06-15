@@ -5,6 +5,8 @@ import type {
   AiChatStreamRequest,
   AiEmbedIpcResult,
   AiEmbedRequest,
+  AiListModelsIpcResult,
+  AiListModelsRequest,
   AiFileChange,
   AiHistoryRecordInput,
   AiMode,
@@ -257,6 +259,10 @@ export class IpcService {
 
   aiEmbed(req: AiEmbedRequest): Promise<AiEmbedIpcResult> {
     return this.requireApi().aiEmbed(req);
+  }
+
+  aiListModels(req: AiListModelsRequest): Promise<AiListModelsIpcResult> {
+    return this.requireApi().aiListModels(req);
   }
 
   onAiStreamChunk(cb: (evt: AiStreamChunkEvent) => void): () => void {
