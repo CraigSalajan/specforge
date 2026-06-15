@@ -581,7 +581,14 @@ export class SettingsModalComponent {
           this._showApiKey.set(false);
           this.activeSection.set('workspace');
           // Reset any model list from a previous open so the dropdowns reflect
-          // the freshly snapshotted draft.
+          // the freshly snapshotted draft. Bump the request token and drop any
+          // pending debounce so an in-flight fetch from the previous open cannot
+          // resolve after this reset and repopulate the cleared list.
+          this.modelsRequestToken++;
+          if (this.modelsDebounceTimer) {
+            clearTimeout(this.modelsDebounceTimer);
+            this.modelsDebounceTimer = null;
+          }
           this._models.set([]);
           this._modelsError.set(null);
           this._modelsLoading.set(false);
@@ -604,7 +611,16 @@ export class SettingsModalComponent {
       // key is `<baseUrl>\n<apiKey>`; an empty base URL leaves nothing before
       // the delimiter.
       const baseUrl = key.split('\n', 1)[0];
-      if (!active || baseUrl.length === 0) return;
+      if (!active) return;
+      if (baseUrl.length === 0) {
+        // No base URL to probe: clear any models fetched from a previous URL so
+        // the dropdowns don't keep showing options that no longer apply.
+        untracked(() => {
+          this._models.set([]);
+          this._modelsError.set(null);
+        });
+        return;
+      }
       untracked(() => this.scheduleModelsFetch());
     });
 
@@ -755,7 +771,13 @@ export class SettingsModalComponent {
     if (!this.ipc.isAvailable) return;
     const draft = this._draft();
     const baseUrl = (draft['ai.baseUrl'] ?? '').trim();
-    if (baseUrl.length === 0) return;
+    if (baseUrl.length === 0) {
+      // Nothing to fetch — drop any stale list so the dropdowns don't show
+      // options from a base URL the user has since cleared.
+      this._models.set([]);
+      this._modelsError.set(null);
+      return;
+    }
     const apiKey = draft['ai.apiKey'] ?? '';
     const timeoutMs = (draft['ai.timeoutSeconds'] ?? 30) * 1000;
 
