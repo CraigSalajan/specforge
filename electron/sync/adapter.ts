@@ -18,6 +18,27 @@ import type { CanonicalItem, CanonicalLevel } from './canonical-item';
 /** Identifier of a supported PM provider. */
 export type AdapterName = 'jira' | 'ado' | 'linear' | 'github';
 
+/** A workflow state (issue status) exposed by the target. */
+export interface WorkflowStateInfo {
+  id: string;
+  name: string;
+  /** Provider state category, e.g. Linear's triage|backlog|unstarted|started|completed|canceled. */
+  type: string;
+  position?: number;
+  color?: string;
+}
+
+/** A label exposed by the target, for the label-sync feature. */
+export interface LabelInfo {
+  id: string;
+  name: string;
+  color?: string;
+  /** Parent label id when this label belongs to a label group. */
+  parentId?: string;
+  /** True when this is a label group (container) rather than an applyable label. */
+  isGroup?: boolean;
+}
+
 /**
  * Metadata describing the connected target project and its capabilities.
  * First pass — expected to be extended with provider-specific fields as each
@@ -40,6 +61,10 @@ export interface ProjectMetadata {
    * degradation where the target is flatter than the canonical model.
    */
   supportedLevels: CanonicalLevel[];
+  /** Workflow states the target exposes. Optional; populated by adapters that support discovery. */
+  workflowStates?: WorkflowStateInfo[];
+  /** Labels available in the target. Optional; populated by adapters that support discovery. */
+  labels?: LabelInfo[];
 }
 
 /**
