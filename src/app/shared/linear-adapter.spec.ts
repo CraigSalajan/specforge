@@ -11,27 +11,21 @@ import type { CanonicalItem } from '../../../electron/sync/canonical-item';
 /**
  * Unit tests for the Linear adapter. The adapter is a pure translation layer
  * over the injected transport, so the suite drives it with fake clients and
- * never touches the network, the DB, or Electron. The TER-14 cases below cover
- * the provider name and the still-stubbed `linkItems` (which never calls the
- * client, so a hollow fake suffices); the TER-16/TER-17/TER-18 suites further
- * down fake the `request` method to exercise the implemented `getMetadata`,
- * `createItem`, and `updateItem`.
+ * never touches the network, the DB, or Electron. The TER-14 case below covers
+ * the provider name (which never calls the client, so a hollow fake suffices);
+ * the TER-16/TER-17/TER-18/TER-19 suites further down fake the `request` method
+ * to exercise the implemented `getMetadata`, `createItem`, `updateItem`, and
+ * `linkItems`.
  */
 
-/** The stubbed operations never call the client, so a hollow fake is enough. */
+/** A name check never calls the client, so a hollow fake is enough. */
 const fakeClient = {} as unknown as LinearGraphQLClient;
 
-describe('LinearAdapter — AC1: name & stubbed operations', () => {
+describe('LinearAdapter — AC1: name', () => {
   it('reports the linear provider name', () => {
     const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClient);
 
     expect(adapter.name).toBe('linear');
-  });
-
-  it('rejects linkItems as not implemented', async () => {
-    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClient);
-
-    await expect(adapter.linkItems('parent-1', ['child-1'])).rejects.toThrow(/not implemented/i);
   });
 });
 
@@ -503,6 +497,133 @@ describe('LinearAdapter — TER-18: updateItem', () => {
     const error = await adapter.updateItem('issue-ext-id', item).then(
       () => {
         throw new Error('expected updateItem to reject');
+      },
+      (err: unknown) => err,
+    );
+
+    expect(error).toBeInstanceOf(LinearRequestError);
+    expect((error as LinearRequestError).info.code).toBe('bad_request');
+    expect((error as LinearRequestError).info.retryable).toBe(false);
+  });
+});
+
+/**
+ * TER-19: linkItems sets each child issue's `parent` field via Linear's
+ * `issueUpdate` mutation (`input: { parentId }`), targeting the child by its
+ * top-level `id`. Each child is updated in its own request, fail-fast. The
+ * injected transport is faked with a `vi.fn()` `request`, so the suite touches
+ * no network. The `id` and `input` variables passed to `request` are inspected
+ * to prove each child is addressed by id and carries the parent id. Idempotency
+ * is delegated to Linear, so this method never reads before writing.
+ */
+describe('LinearAdapter.linkItems', () => {
+  /** Fakes the GraphQL transport with a single recordable `request` method. */
+  function fakeClientWith(request: ReturnType<typeof vi.fn>): LinearGraphQLClient {
+    return { request } as unknown as LinearGraphQLClient;
+  }
+
+  /** Reads the query string from the most recent `request` call. */
+  function lastQuery(request: ReturnType<typeof vi.fn>): string {
+    return request.mock.calls.at(-1)?.[0] as string;
+  }
+
+  /** Reads the `id` variable from the most recent `request` call. */
+  function lastId(request: ReturnType<typeof vi.fn>): string {
+    return (request.mock.calls.at(-1)?.[1] as { id: string }).id;
+  }
+
+  /** Reads the `input` variable from the most recent `request` call. */
+  function lastInput(request: ReturnType<typeof vi.fn>): Record<string, unknown> {
+    return (request.mock.calls.at(-1)?.[1] as { input: Record<string, unknown> }).input;
+  }
+
+  /** A resolved `issueUpdate` payload for the given issue fields. */
+  function updatedIssue(issue: { id: string; url: string }) {
+    return { issueUpdate: { success: true, issue } };
+  }
+
+  it('sets parentId on the child via an issueUpdate mutation targeting it by id', async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValue(updatedIssue({ id: 'child-1', url: 'https://linear.app/x/issue/child-1' }));
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    await adapter.linkItems('parent-1', ['child-1']);
+
+    expect(lastQuery(request)).toContain('issueUpdate');
+    expect(lastId(request)).toBe('child-1');
+    expect(lastInput(request)['parentId']).toBe('parent-1');
+  });
+
+  it('links multiple children, one request each with the correct child id', async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValue(updatedIssue({ id: 'child', url: 'https://linear.app/x/issue/child' }));
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    await adapter.linkItems('parent-1', ['child-1', 'child-2']);
+
+    expect(request).toHaveBeenCalledTimes(2);
+    expect((request.mock.calls[0]?.[1] as { id: string }).id).toBe('child-1');
+    expect(
+      (request.mock.calls[0]?.[1] as { input: Record<string, unknown> }).input['parentId'],
+    ).toBe('parent-1');
+    expect((request.mock.calls[1]?.[1] as { id: string }).id).toBe('child-2');
+    expect(
+      (request.mock.calls[1]?.[1] as { input: Record<string, unknown> }).input['parentId'],
+    ).toBe('parent-1');
+  });
+
+  it('resolves without calling the client when childIds is empty', async () => {
+    const request = vi.fn();
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    await adapter.linkItems('parent-1', []);
+
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it('resolves to undefined on success', async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValue(updatedIssue({ id: 'child-1', url: 'https://linear.app/x/issue/child-1' }));
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    expect(await adapter.linkItems('parent-1', ['child-1'])).toBeUndefined();
+  });
+
+  it('surfaces an auth failure with team context while preserving the structured info', async () => {
+    const request = vi
+      .fn()
+      .mockRejectedValue(
+        new LinearRequestError({ code: 'auth', retryable: false, message: 'Unauthorized' }),
+      );
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    const error = await adapter.linkItems('parent-1', ['child-1']).then(
+      () => {
+        throw new Error('expected linkItems to reject');
+      },
+      (err: unknown) => err,
+    );
+
+    expect(error).toBeInstanceOf(LinearRequestError);
+    expect((error as LinearRequestError).info.code).toBe('auth');
+    expect((error as LinearRequestError).info.retryable).toBe(false);
+    // The structured info is preserved while the original message is augmented
+    // with team context and a write-permission hint.
+    expect((error as LinearRequestError).info.message).toContain('team-1');
+    expect((error as LinearRequestError).info.message).toContain('Unauthorized');
+    expect((error as LinearRequestError).info.message).toMatch(/write access/i);
+  });
+
+  it('rejects with a non-retryable bad_request when Linear reports success:false', async () => {
+    const request = vi.fn().mockResolvedValue({ issueUpdate: { success: false, issue: null } });
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    const error = await adapter.linkItems('parent-1', ['child-1']).then(
+      () => {
+        throw new Error('expected linkItems to reject');
       },
       (err: unknown) => err,
     );
