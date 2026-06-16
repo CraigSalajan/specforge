@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { executePush, type PushExecutionDeps } from '../../../electron/sync/executor';
-import type { IAdapter, ExternalItemResult, ProjectMetadata } from '../../../electron/sync/adapter';
+import type {
+  IAdapter,
+  ExternalItemResult,
+  ProjectMetadata,
+  CreateItemContext,
+} from '../../../electron/sync/adapter';
 import type { CanonicalItem } from '../../../electron/sync/canonical-item';
 import type { ItemDiff, PushPlan, SyncDecision } from '../../../electron/sync/sync-engine';
 import type { SyncLink } from '../../../electron/db/repositories/sync-links.repo';
@@ -48,6 +53,8 @@ function plan(ordered: ItemDiff[]): PushPlan {
 
 interface CreateCall {
   item: CanonicalItem;
+  /** The container context the engine threaded in (TER-20); undefined when absent. */
+  context?: CreateItemContext;
 }
 interface UpdateCall {
   id: string;
@@ -94,8 +101,8 @@ function fakeAdapter(
         supportedLevels: ['epic', 'feature', 'story', 'criterion'],
       });
     },
-    createItem(it: CanonicalItem): Promise<ExternalItemResult> {
-      creates.push({ item: it });
+    createItem(it: CanonicalItem, context?: CreateItemContext): Promise<ExternalItemResult> {
+      creates.push({ item: it, context });
       if (failCreate.has(it.localId)) {
         return Promise.reject(new Error(`createItem failed for ${it.localId}`));
       }
@@ -182,8 +189,10 @@ describe('executePush — order & dispatch', () => {
 
 describe('executePush — parent id capture & threading (AC #2)', () => {
   it('links a created child to the PARENT created earlier in the pass', async () => {
-    const parent = item({ localId: 'e1', level: 'epic' });
-    const child = item({ localId: 'f1', level: 'feature', parentLocalId: 'e1' });
+    // A feature→story edge: neither is a container, so the generic native parent
+    // link path runs (epic→feature container membership is covered separately).
+    const parent = item({ localId: 'e1', level: 'feature' });
+    const child = item({ localId: 'f1', level: 'story', parentLocalId: 'e1' });
     const adapter = fakeAdapter();
     const { deps } = fakeDeps(adapter);
 
@@ -204,8 +213,9 @@ describe('executePush — parent id capture & threading (AC #2)', () => {
 
 describe('executePush — skipped/updated parent still links children (AC #2)', () => {
   it('links a created child to a SKIPPED parent via the parent link external id', async () => {
-    const parent = item({ localId: 'e1', level: 'epic' });
-    const child = item({ localId: 'f1', level: 'feature', parentLocalId: 'e1' });
+    // Non-container feature→story edge so the generic parent-link path runs.
+    const parent = item({ localId: 'e1', level: 'feature' });
+    const child = item({ localId: 'f1', level: 'story', parentLocalId: 'e1' });
     const adapter = fakeAdapter();
     const { deps } = fakeDeps(adapter);
 
@@ -221,8 +231,9 @@ describe('executePush — skipped/updated parent still links children (AC #2)', 
   });
 
   it('links a created child to an UPDATED parent via the parent link external id', async () => {
-    const parent = item({ localId: 'e1', level: 'epic' });
-    const child = item({ localId: 'f1', level: 'feature', parentLocalId: 'e1' });
+    // Non-container feature→story edge so the generic parent-link path runs.
+    const parent = item({ localId: 'e1', level: 'feature' });
+    const child = item({ localId: 'f1', level: 'story', parentLocalId: 'e1' });
     const adapter = fakeAdapter();
     const { deps } = fakeDeps(adapter);
 
@@ -349,8 +360,9 @@ describe('executePush — partial-failure isolation (AC #4)', () => {
   });
 
   it('a link failure flags linkError but keeps the child created and its link written', async () => {
-    const parent = item({ localId: 'e1', level: 'epic' });
-    const child = item({ localId: 'f1', level: 'feature', parentLocalId: 'e1' });
+    // Non-container feature→story edge so a real linkItems call is attempted.
+    const parent = item({ localId: 'e1', level: 'feature' });
+    const child = item({ localId: 'f1', level: 'story', parentLocalId: 'e1' });
     // Linking the child's external id throws.
     const adapter = fakeAdapter({ failLink: new Set(['ext-f1']) });
     const { deps, writtenLinks } = fakeDeps(adapter);
@@ -378,10 +390,11 @@ describe('executePush — child of a failed parent (AC #4)', () => {
   it('creates the child but reports linked=false with a linkError; other branches unaffected', async () => {
     // Branch 1: parent p1 fails to create; its child c1 still creates but can't link.
     // Branch 2: parent p2 + child c2 both succeed and link fine.
-    const p1 = item({ localId: 'p1', level: 'epic' });
-    const c1 = item({ localId: 'c1', level: 'feature', parentLocalId: 'p1' });
-    const p2 = item({ localId: 'p2', level: 'epic' });
-    const c2 = item({ localId: 'c2', level: 'feature', parentLocalId: 'p2' });
+    // Non-container feature→story edges so the generic native parent-link path runs.
+    const p1 = item({ localId: 'p1', level: 'feature' });
+    const c1 = item({ localId: 'c1', level: 'story', parentLocalId: 'p1' });
+    const p2 = item({ localId: 'p2', level: 'feature' });
+    const c2 = item({ localId: 'c2', level: 'story', parentLocalId: 'p2' });
     const adapter = fakeAdapter({ failCreate: new Set(['p1']) });
     const { deps, writtenLinks } = fakeDeps(adapter);
 
@@ -480,5 +493,86 @@ describe('executePush — data-error & edge cases', () => {
     expect(adapter.links).toEqual([{ parentId: 'ext-c', childIds: ['ext-p'] }]);
     expect(result.created).toBe(2);
     expect(result.failed).toBe(0);
+  });
+});
+
+/**
+ * TER-20: Epic → Project container membership. The fake adapter reports
+ * `name: 'linear'`, and Linear maps `epic` to a project container
+ * (`containerForChildren: true`). So an Epic owns itself, its descendants inherit
+ * that owner, and a child whose parent IS its container joins via `projectId` at
+ * create rather than a native parent link — the executor threads the owner into
+ * `createItem`'s context and skips `linkItems` for the epic→feature edge.
+ */
+describe('executePush — Epic container membership (TER-20)', () => {
+  it('threads the epic project into the feature and skips its parent link', async () => {
+    const epic = item({ localId: 'e1', level: 'epic' });
+    const feature = item({ localId: 'f1', level: 'feature', parentLocalId: 'e1' });
+    const adapter = fakeAdapter();
+    const { deps, writtenLinks } = fakeDeps(adapter);
+
+    const result = await executePush(
+      plan([diff(epic, 'create'), diff(feature, 'create')]),
+      CONNECTION_ID,
+      deps,
+    );
+
+    // The feature was created with its epic's project as the container context.
+    const featureCreate = adapter.creates.find((c) => c.item.localId === 'f1');
+    expect(featureCreate?.context).toEqual({ projectExternalId: 'ext-e1' });
+
+    // The epic IS the feature's container, so no native parent link is emitted.
+    expect(adapter.links).toHaveLength(0);
+    const featureResult = result.results.find((r) => r.localId === 'f1');
+    expect(featureResult?.linked).toBe(true);
+    expect(featureResult?.linkError).toBeUndefined();
+
+    // Both SyncLinks were still written.
+    expect(writtenLinks.map((l) => l.specItemId).sort()).toEqual(['e1', 'f1']);
+  });
+
+  it('inherits the epic project down to a story but preserves the feature→story sub-issue link', async () => {
+    const epic = item({ localId: 'e1', level: 'epic' });
+    const feature = item({ localId: 'f1', level: 'feature', parentLocalId: 'e1' });
+    const story = item({ localId: 's1', level: 'story', parentLocalId: 'f1' });
+    const adapter = fakeAdapter();
+    const { deps } = fakeDeps(adapter);
+
+    const result = await executePush(
+      plan([diff(epic, 'create'), diff(feature, 'create'), diff(story, 'create')]),
+      CONNECTION_ID,
+      deps,
+    );
+
+    // The story inherits the epic's project (its nearest container ancestor).
+    const storyCreate = adapter.creates.find((c) => c.item.localId === 's1');
+    expect(storyCreate?.context).toEqual({ projectExternalId: 'ext-e1' });
+
+    // The story's parent is the feature, NOT the container, so the sub-issue link
+    // is preserved: linkItems fires with the feature's and story's external ids.
+    expect(adapter.links).toEqual([{ parentId: 'ext-f1', childIds: ['ext-s1'] }]);
+    expect(result.results.find((r) => r.localId === 's1')?.linked).toBe(true);
+  });
+
+  it('threads a SKIPPED epic project (from its link) into a re-pushed feature', async () => {
+    const epic = item({ localId: 'e1', level: 'epic' });
+    const feature = item({ localId: 'f1', level: 'feature', parentLocalId: 'e1' });
+    const adapter = fakeAdapter();
+    const { deps } = fakeDeps(adapter);
+
+    // Re-push: the epic is unchanged (skip) and carries its project handle EXT-e1;
+    // the feature is created and must still receive that project as its container.
+    const result = await executePush(
+      plan([diff(epic, 'skip', { hash: 'h' }), diff(feature, 'create')]),
+      CONNECTION_ID,
+      deps,
+    );
+
+    const featureCreate = adapter.creates.find((c) => c.item.localId === 'f1');
+    expect(featureCreate?.context).toEqual({ projectExternalId: 'EXT-e1' });
+
+    // The feature's parent (the skipped epic) IS its container, so no parent link.
+    expect(adapter.links).toHaveLength(0);
+    expect(result.results.find((r) => r.localId === 'f1')?.linked).toBe(true);
   });
 });

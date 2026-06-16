@@ -11,10 +11,22 @@ const LEVELS: CanonicalLevel[] = ['epic', 'feature', 'story', 'criterion'];
 
 describe('resolveLevel', () => {
   it('maps a Linear epic to a Project work item (AC #3)', () => {
+    // The Linear epic is also a container for its children (TER-20): descendants
+    // join its project rather than being parent-linked to it.
     expect(resolveLevel('linear', 'epic')).toEqual({
       nativeType: 'Project',
       representation: 'item',
+      containerForChildren: true,
     });
+  });
+
+  it('marks the Linear epic as a container for its children (TER-20)', () => {
+    expect(resolveLevel('linear', 'epic').containerForChildren).toBe(true);
+    // No other provider/level opts into container membership.
+    expect(resolveLevel('linear', 'feature').containerForChildren).toBeUndefined();
+    expect(resolveLevel('ado', 'epic').containerForChildren).toBeUndefined();
+    expect(resolveLevel('jira', 'epic').containerForChildren).toBeUndefined();
+    expect(resolveLevel('github', 'epic').containerForChildren).toBeUndefined();
   });
 
   it('folds criteria inline for flatter hierarchies', () => {

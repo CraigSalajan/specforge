@@ -82,6 +82,21 @@ export interface ExternalItemResult {
   externalUrl: string;
 }
 
+/**
+ * Optional per-call context the Sync Engine threads into createItem so an item
+ * can be attached to a provider "container" resolved at runtime — e.g. the
+ * Linear Project created for an ancestor Epic. Adapters whose provider doesn't
+ * model such a container ignore it.
+ */
+export interface CreateItemContext {
+  /**
+   * External id of the provider container (e.g. Linear project) this item should
+   * join, resolved by the engine from the nearest ancestor the provider maps to a
+   * container. Absent when the item has no container ancestor.
+   */
+  projectExternalId?: string;
+}
+
 export interface IAdapter {
   /** Which provider this adapter targets. */
   readonly name: AdapterName;
@@ -103,11 +118,15 @@ export interface IAdapter {
    * this method just performs the create and reports the new item's handle.
    *
    * @param item the canonical item to create.
+   * @param context optional engine-supplied container context (e.g. the external
+   * id of the Linear Project resolved from an ancestor Epic) the item should join
+   * at create time. Optional so callers and providers that don't model a
+   * container are unaffected.
    * @returns the external id and deep link of the created item.
    * @throws Rejects on validation failure (missing required provider fields),
    * auth failure, or transport failure.
    */
-  createItem(item: CanonicalItem): Promise<ExternalItemResult>;
+  createItem(item: CanonicalItem, context?: CreateItemContext): Promise<ExternalItemResult>;
 
   /**
    * Update the existing provider item identified by `id` to match the canonical

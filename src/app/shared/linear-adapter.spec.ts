@@ -633,3 +633,203 @@ describe('LinearAdapter.linkItems', () => {
     expect((error as LinearRequestError).info.retryable).toBe(false);
   });
 });
+
+/**
+ * TER-20: Epic → Project. Linear maps `epic → Project` and `feature/story →
+ * Issue`. An `epic`-level create/update therefore targets a Linear *project*:
+ * `createItem` delegates to `projectCreate` and `updateItem` to `projectUpdate`.
+ * Descendant issues join their Epic's project via `projectId`, resolved by the
+ * engine and threaded into `createItem` via the {@link CreateItemContext}; that
+ * resolved id falls back to the static `config.projectId`. The injected transport
+ * is faked with a `vi.fn()` `request`, so the suite touches no network.
+ */
+describe('LinearAdapter — TER-20: Epic → Project', () => {
+  /** Fakes the GraphQL transport with a single recordable `request` method. */
+  function fakeClientWith(request: ReturnType<typeof vi.fn>): LinearGraphQLClient {
+    return { request } as unknown as LinearGraphQLClient;
+  }
+
+  /** Reads the query string from the most recent `request` call. */
+  function lastQuery(request: ReturnType<typeof vi.fn>): string {
+    return request.mock.calls.at(-1)?.[0] as string;
+  }
+
+  /** Reads the `id` variable from the most recent `request` call. */
+  function lastId(request: ReturnType<typeof vi.fn>): string {
+    return (request.mock.calls.at(-1)?.[1] as { id: string }).id;
+  }
+
+  /** Reads the `input` variable from the most recent `request` call. */
+  function lastInput(request: ReturnType<typeof vi.fn>): Record<string, unknown> {
+    return (request.mock.calls.at(-1)?.[1] as { input: Record<string, unknown> }).input;
+  }
+
+  /** A resolved `projectCreate` payload for the given project fields. */
+  function createdProject(project: { id: string; url: string }) {
+    return { projectCreate: { success: true, project } };
+  }
+
+  /** A resolved `projectUpdate` payload for the given project fields. */
+  function updatedProject(project: { id: string; url: string }) {
+    return { projectUpdate: { success: true, project } };
+  }
+
+  it('creates an epic as a Linear project, targeting the team via teamIds', async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValue(
+        createdProject({ id: 'proj-1', url: 'https://linear.app/x/project/proj-1' }),
+      );
+    const epic: CanonicalItem = {
+      localId: 'local-1',
+      level: 'epic',
+      title: 'An epic',
+      description: 'Epic body.',
+    };
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    const result = await adapter.createItem(epic);
+
+    expect(lastQuery(request)).toContain('projectCreate');
+    expect(lastInput(request)).toEqual({
+      name: 'An epic',
+      description: 'Epic body.',
+      teamIds: ['team-1'],
+    });
+    expect(result).toEqual({
+      externalId: 'proj-1',
+      externalUrl: 'https://linear.app/x/project/proj-1',
+    });
+  });
+
+  it('omits description from the project input when the epic has none', async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValue(
+        createdProject({ id: 'proj-1', url: 'https://linear.app/x/project/proj-1' }),
+      );
+    const epic: CanonicalItem = { localId: 'local-1', level: 'epic', title: 'An epic' };
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    await adapter.createItem(epic);
+
+    expect(lastInput(request)).toEqual({ name: 'An epic', teamIds: ['team-1'] });
+    expect(lastInput(request)).not.toHaveProperty('description');
+  });
+
+  it('sets a non-epic issue projectId from the context container even when config has none', async () => {
+    const request = vi.fn().mockResolvedValue({
+      issueCreate: {
+        success: true,
+        issue: { id: 'iss-1', url: 'https://linear.app/x/issue/iss-1' },
+      },
+    });
+    const story: CanonicalItem = { localId: 'local-1', level: 'story', title: 'A story' };
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    await adapter.createItem(story, { projectExternalId: 'proj-9' });
+
+    expect(lastQuery(request)).toContain('issueCreate');
+    expect(lastInput(request)['projectId']).toBe('proj-9');
+  });
+
+  it('prefers the context container over the configured projectId', async () => {
+    const request = vi.fn().mockResolvedValue({
+      issueCreate: {
+        success: true,
+        issue: { id: 'iss-1', url: 'https://linear.app/x/issue/iss-1' },
+      },
+    });
+    const story: CanonicalItem = { localId: 'local-1', level: 'story', title: 'A story' };
+    const adapter = new LinearAdapter(
+      { teamId: 'team-1', projectId: 'cfg' },
+      fakeClientWith(request),
+    );
+
+    await adapter.createItem(story, { projectExternalId: 'ctx' });
+
+    expect(lastInput(request)['projectId']).toBe('ctx');
+  });
+
+  it('updates an epic via projectUpdate, targeting the project by id', async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValue(
+        updatedProject({ id: 'proj-1', url: 'https://linear.app/x/project/proj-1' }),
+      );
+    const epic: CanonicalItem = {
+      localId: 'local-1',
+      level: 'epic',
+      title: 'Updated epic',
+      description: 'New body.',
+    };
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    await adapter.updateItem('proj-1', epic);
+
+    expect(lastQuery(request)).toContain('projectUpdate');
+    expect(lastId(request)).toBe('proj-1');
+    expect(lastInput(request)).toEqual({ name: 'Updated epic', description: 'New body.' });
+  });
+
+  it('surfaces an auth failure on projectCreate with team context and a write-access hint', async () => {
+    const request = vi
+      .fn()
+      .mockRejectedValue(
+        new LinearRequestError({ code: 'auth', retryable: false, message: 'Unauthorized' }),
+      );
+    const epic: CanonicalItem = { localId: 'local-1', level: 'epic', title: 'An epic' };
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    const error = await adapter.createItem(epic).then(
+      () => {
+        throw new Error('expected createItem to reject');
+      },
+      (err: unknown) => err,
+    );
+
+    expect(error).toBeInstanceOf(LinearRequestError);
+    expect((error as LinearRequestError).info.code).toBe('auth');
+    expect((error as LinearRequestError).info.message).toContain('team-1');
+    expect((error as LinearRequestError).info.message).toContain('Unauthorized');
+    expect((error as LinearRequestError).info.message).toMatch(/write access/i);
+  });
+
+  it('rejects with a bad_request when projectCreate reports a soft failure', async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValue({ projectCreate: { success: false, project: null } });
+    const epic: CanonicalItem = { localId: 'local-1', level: 'epic', title: 'An epic' };
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    const error = await adapter.createItem(epic).then(
+      () => {
+        throw new Error('expected createItem to reject');
+      },
+      (err: unknown) => err,
+    );
+
+    expect(error).toBeInstanceOf(LinearRequestError);
+    expect((error as LinearRequestError).info.code).toBe('bad_request');
+    expect((error as LinearRequestError).info.retryable).toBe(false);
+  });
+
+  it('rejects a malformed project success whose project lacks an id or url', async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValue({ projectCreate: { success: true, project: { id: '', url: '' } } });
+    const epic: CanonicalItem = { localId: 'local-1', level: 'epic', title: 'An epic' };
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    const error = await adapter.createItem(epic).then(
+      () => {
+        throw new Error('expected createItem to reject');
+      },
+      (err: unknown) => err,
+    );
+
+    expect(error).toBeInstanceOf(LinearRequestError);
+    expect((error as LinearRequestError).info.code).toBe('bad_request');
+    expect((error as LinearRequestError).info.retryable).toBe(false);
+  });
+});
