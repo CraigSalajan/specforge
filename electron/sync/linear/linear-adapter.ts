@@ -10,14 +10,13 @@
  * drive it with a fake client (no network, no DB).
  *
  * ## Implementation status
- * `getMetadata` (TER-16), `createItem` (TER-17), and `updateItem` (TER-18) are
- * implemented: the first queries the configured team's workflow states and labels
- * (and the optional project) and returns a normalized {@link ProjectMetadata}; the
- * second creates a Linear issue from a {@link CanonicalItem} and returns its
- * external id/url; the third pushes title/description changes to an existing issue
- * via `issueUpdate`. The remaining {@link IAdapter} operation is still stubbed and
- * throws a clear "not implemented yet" error tagged with the ticket that fills it
- * in: `linkItems` (TER-20).
+ * All {@link IAdapter} operations are implemented: `getMetadata` (TER-16) queries
+ * the configured team's workflow states and labels (and the optional project) and
+ * returns a normalized {@link ProjectMetadata}; `createItem` (TER-17) creates a
+ * Linear issue from a {@link CanonicalItem} and returns its external id/url;
+ * `updateItem` (TER-18) pushes title/description changes to an existing issue via
+ * `issueUpdate`; and `linkItems` (TER-19) sets each child issue's `parent` field
+ * via `issueUpdate`.
  *
  * ## Why the token is not in the config
  * {@link LinearConnectionConfig} carries only the *where* (team/project target),
@@ -111,8 +110,8 @@ interface UpdateIssueResponse {
 
 /**
  * Linear {@link IAdapter}. Holds the connection target and the injected
- * transport. `getMetadata`, `createItem`, and `updateItem` are implemented;
- * `linkItems` remains a stub awaiting its follow-up ticket.
+ * transport. All four operations — `getMetadata`, `createItem`, `updateItem`,
+ * and `linkItems` — are implemented.
  */
 export class LinearAdapter implements IAdapter {
   /** Which provider this adapter targets. */
@@ -232,7 +231,7 @@ export class LinearAdapter implements IAdapter {
    * soft failure (Linear returns `success: false`, a null issue, or an issue
    * missing its id/url) is surfaced as a non-retryable `bad_request` naming the
    * item so the failure is diagnosable rather than persisted as a broken link.
-   * Parent linkage is deferred to TER-18.
+   * Parent linkage is handled separately by `linkItems` (TER-19).
    */
   async createItem(item: CanonicalItem): Promise<ExternalItemResult> {
     const { query, variables } = this.buildCreateIssueMutation(item);
@@ -378,8 +377,79 @@ export class LinearAdapter implements IAdapter {
     return { query, variables: { id, input } };
   }
 
-  /** @inheritdoc */
+  /**
+   * @inheritdoc
+   *
+   * Establishes parent/child links by setting each child issue's `parent` field
+   * via Linear's `issueUpdate` mutation (`input: { parentId }`), targeting the
+   * child by its top-level `id`. Each child is updated in its own request,
+   * fail-fast: the first child that fails throws and aborts the rest, matching
+   * the `void` contract and `updateItem`'s single-write throw behavior. An empty
+   * `childIds` resolves immediately with no network call.
+   *
+   * Idempotency is delegated to Linear: re-setting an identical `parentId` is a
+   * no-op that still returns `success: true`, so this method never reads before
+   * writing — staying symmetric with `createItem`/`updateItem`. An `auth` failure
+   * is re-thrown with team context so callers see which token/team lacks write
+   * access; all other failures propagate unchanged. A soft failure (Linear
+   * returns `success: false`) is surfaced as a non-retryable `bad_request` naming
+   * the child and the parent it was being linked to so the failure is diagnosable.
+   */
   async linkItems(parentId: string, childIds: string[]): Promise<void> {
-    throw new Error('LinearAdapter.linkItems not implemented yet (TER-20)');
+    if (childIds.length === 0) return;
+
+    for (const childId of childIds) {
+      const { query, variables } = this.buildLinkParentMutation(childId, parentId);
+
+      let data: UpdateIssueResponse;
+      try {
+        data = await this.client.request<UpdateIssueResponse>(query, variables);
+      } catch (err) {
+        if (err instanceof LinearRequestError && err.info.code === 'auth') {
+          throw new LinearRequestError({
+            ...err.info,
+            message: `Linear parent linkage failed for team ${this.config.teamId}: ${err.info.message}. Check that the configured token has write access to this team.`,
+          });
+        }
+        throw err;
+      }
+
+      // A soft failure (`success: false`) is surfaced as a non-retryable
+      // `bad_request`: resolving anyway would let the engine mark the link
+      // established when Linear rejected it.
+      if (!data.issueUpdate?.success) {
+        throw new LinearRequestError({
+          code: 'bad_request',
+          retryable: false,
+          message: `Linear rejected linking issue ${childId} to parent ${parentId} for team ${this.config.teamId}.`,
+        });
+      }
+    }
+
+    return;
+  }
+
+  /**
+   * Builds the `issueUpdate` mutation and its `$id` / `$input` variables for a
+   * parent link. The child is targeted by the top-level `id`, and the input
+   * carries only `parentId` — the single field this operation manages.
+   */
+  private buildLinkParentMutation(
+    childId: string,
+    parentId: string,
+  ): {
+    query: string;
+    variables: Record<string, unknown>;
+  } {
+    const query = `
+      mutation LinearLinkParent($id: String!, $input: IssueUpdateInput!) {
+        issueUpdate(id: $id, input: $input) {
+          success
+          issue { id url }
+        }
+      }
+    `;
+
+    return { query, variables: { id: childId, input: { parentId } } };
   }
 }
