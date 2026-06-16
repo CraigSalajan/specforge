@@ -28,6 +28,13 @@ export interface NativeLevel {
    *            into a Linear description or a GitHub checklist); no standalone item.
    */
   representation: LevelRepresentation;
+  /**
+   * When true, children of an item at this level join it as members (e.g. Linear
+   * project membership) rather than being parent-linked to it. Lets the engine
+   * choose project association over a native parent link without knowing provider
+   * specifics.
+   */
+  containerForChildren?: boolean;
 }
 
 /** A provider's complete strategy: every canonical level → its native representation. */
@@ -47,7 +54,7 @@ export const LEVEL_MAPPINGS: Record<AdapterName, LevelMappingStrategy> = {
     criterion: { nativeType: 'Task', representation: 'item' },
   },
   linear: {
-    epic: { nativeType: 'Project', representation: 'item' },
+    epic: { nativeType: 'Project', representation: 'item', containerForChildren: true },
     feature: { nativeType: 'Story', representation: 'item' },
     story: { nativeType: 'Sub-issue', representation: 'item' },
     criterion: { nativeType: 'Description', representation: 'inline' },

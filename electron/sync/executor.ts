@@ -48,6 +48,7 @@
 import type { IAdapter } from './adapter';
 import type { PushPlan, SyncDecision } from './sync-engine';
 import type { SyncLink } from '../db/repositories/sync-links.repo';
+import { resolveLevel } from './level-mapping';
 
 /**
  * Collaborators {@link executePush} needs, all injected so the module stays
@@ -133,11 +134,26 @@ export async function executePush(
   // Because parents precede children in `plan.ordered`, a parent's external id is
   // always present (when the parent succeeded) by the time its children are seen.
   const externalIdByLocalId = new Map<string, string>();
+
+  // Owning-container external id keyed by SpecForge-local id (e.g. the Linear
+  // Project an Epic maps to). A container item owns itself; any other item
+  // inherits its parent's owner, so the owner flows down the whole subtree.
+  // Children of a container join it via `projectId` at create rather than a
+  // native parent link — see the `create` branch's link-skip guard below.
+  const ownerProjectByLocalId = new Map<string, string>();
   const results: ItemPushResult[] = [];
 
   for (const diff of plan.ordered) {
     const { item, decision } = diff;
     const localId = item.localId;
+
+    // Whether children of this item join it as members of a provider container
+    // (e.g. Linear project membership) rather than being parent-linked to it, and
+    // the container the parent already belongs to (so it flows to this item).
+    const isContainer = resolveLevel(adapter.name, item.level).containerForChildren === true;
+    const parentOwner = item.parentLocalId !== undefined
+      ? ownerProjectByLocalId.get(item.parentLocalId)
+      : undefined;
 
     try {
       if (decision === 'skip') {
@@ -146,12 +162,19 @@ export async function executePush(
         if (diff.link?.externalId) {
           externalIdByLocalId.set(localId, diff.link.externalId);
         }
+        // Record the owning container so descendants still resolve their project:
+        // a skipped container owns itself (via its existing link), otherwise it
+        // carries the parent's owner forward.
+        const owner = isContainer ? diff.link?.externalId : parentOwner;
+        if (owner !== undefined) ownerProjectByLocalId.set(localId, owner);
         results.push({ localId, decision, status: 'skipped' });
         continue;
       }
 
       if (decision === 'create') {
-        const res = await adapter.createItem(item);
+        // The item joins the owner the engine resolved from its nearest container
+        // ancestor (e.g. its Epic's Linear project) at create time.
+        const res = await adapter.createItem(item, { projectExternalId: parentOwner });
         writeLink({
           specItemId: localId,
           connectionId,
@@ -161,6 +184,11 @@ export async function executePush(
           lastPushedAt: now(),
         });
         externalIdByLocalId.set(localId, res.externalId);
+
+        // A container owns itself (its just-minted external id); otherwise it
+        // inherits the parent's owner. Recorded so descendants resolve their owner.
+        const owner = isContainer ? res.externalId : parentOwner;
+        if (owner !== undefined) ownerProjectByLocalId.set(localId, owner);
 
         const result: ItemPushResult = {
           localId,
@@ -179,6 +207,12 @@ export async function executePush(
             // create already succeeded, so we leave it intact and flag the link.
             result.linked = false;
             result.linkError = 'parent external id unavailable';
+          } else if (owner !== undefined && parentExternalId === owner) {
+            // The parent IS the container this child already joined via `projectId`
+            // at create (e.g. an Epic's Linear project). A native parent link to it
+            // would be invalid, so membership stands in for the link: mark linked
+            // with no error and skip the linkItems call.
+            result.linked = true;
           } else {
             // Single-element link per child so one bad link can't fail siblings,
             // and isolate it so a link failure never marks the item `failed` nor
@@ -227,6 +261,12 @@ export async function executePush(
         lastPushedAt: now(),
       });
       externalIdByLocalId.set(localId, externalId);
+
+      // Record the owning container (no linking happens in this branch): a
+      // container owns itself via its external id, otherwise it carries the
+      // parent's owner forward so descendants still resolve their project.
+      const owner = isContainer ? externalId : parentOwner;
+      if (owner !== undefined) ownerProjectByLocalId.set(localId, owner);
 
       results.push({
         localId,

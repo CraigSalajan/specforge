@@ -18,6 +18,17 @@
  * `issueUpdate`; and `linkItems` (TER-19) sets each child issue's `parent` field
  * via `issueUpdate`.
  *
+ * ## Epic → Project mapping (TER-20)
+ * Linear maps `epic → Project` and `feature/story → Issue`. An `epic`-level
+ * create/update therefore targets a Linear *project*, not an issue: `createItem`
+ * delegates to `projectCreate` and `updateItem` to `projectUpdate`. Descendant
+ * Features/Stories are associated with that project by setting each issue's
+ * `projectId` at create time — Linear does not reliably inherit a parent's
+ * project, so the engine resolves the owning project from the nearest Epic
+ * ancestor and threads its external id into `createItem` via the
+ * {@link CreateItemContext}; that resolved id (falling back to the static
+ * `config.projectId`) becomes the issue's `projectId`.
+ *
  * ## Why the token is not in the config
  * {@link LinearConnectionConfig} carries only the *where* (team/project target),
  * never the *who* (the credential). The auth token enters exclusively through
@@ -30,6 +41,7 @@
 
 import type {
   AdapterName,
+  CreateItemContext,
   ExternalItemResult,
   IAdapter,
   LabelInfo,
@@ -105,6 +117,22 @@ interface UpdateIssueResponse {
   issueUpdate: {
     success: boolean;
     issue: { id: string; url: string } | null;
+  };
+}
+
+/** Shape of the `projectCreate` mutation's `data` payload. */
+interface CreateProjectResponse {
+  projectCreate: {
+    success: boolean;
+    project: { id: string; url: string } | null;
+  };
+}
+
+/** Shape of the `projectUpdate` mutation's `data` payload. */
+interface UpdateProjectResponse {
+  projectUpdate: {
+    success: boolean;
+    project: { id: string; url: string } | null;
   };
 }
 
@@ -222,19 +250,33 @@ export class LinearAdapter implements IAdapter {
   /**
    * @inheritdoc
    *
-   * Maps a {@link CanonicalItem} onto Linear's `issueCreate` mutation: the title
-   * and (when present) description become the issue's fields, the configured team
-   * always targets the new issue, the configured project is attached when set,
+   * Routes by level. An `epic` is a Linear *Project*, so it delegates to
+   * {@link createProjectFromEpic} (`projectCreate`). Every other level is a Linear
+   * issue, mapped onto `issueCreate`: the title and (when present) description
+   * become the issue's fields, the configured team always targets the new issue,
    * and the configured `featureLabelId` is applied only to `feature`-level items.
-   * An `auth` failure is re-thrown with team context so callers see which
-   * token/team lacks write access; all other failures propagate unchanged. A
-   * soft failure (Linear returns `success: false`, a null issue, or an issue
-   * missing its id/url) is surfaced as a non-retryable `bad_request` naming the
-   * item so the failure is diagnosable rather than persisted as a broken link.
-   * Parent linkage is handled separately by `linkItems` (TER-19).
+   * The issue's `projectId` is the project the engine resolved for the item's
+   * nearest Epic ancestor (`context.projectExternalId`), falling back to the
+   * static `config.projectId`; this is how Features/Stories join their Epic's
+   * project, since Linear does not reliably inherit a parent's project. An `auth`
+   * failure is re-thrown with team context so callers see which token/team lacks
+   * write access; all other failures propagate unchanged. A soft failure (Linear
+   * returns `success: false`, a null issue, or an issue missing its id/url) is
+   * surfaced as a non-retryable `bad_request` naming the item so the failure is
+   * diagnosable rather than persisted as a broken link. Parent linkage is handled
+   * separately by `linkItems` (TER-19).
    */
-  async createItem(item: CanonicalItem): Promise<ExternalItemResult> {
-    const { query, variables } = this.buildCreateIssueMutation(item);
+  async createItem(
+    item: CanonicalItem,
+    context?: CreateItemContext,
+  ): Promise<ExternalItemResult> {
+    // An epic maps to a Linear Project, not an issue.
+    if (item.level === 'epic') return this.createProjectFromEpic(item);
+
+    // Features/Stories join their Epic's project via the engine-resolved
+    // container id, falling back to the static config target when unset.
+    const projectId = context?.projectExternalId ?? this.config.projectId;
+    const { query, variables } = this.buildCreateIssueMutation(item, projectId);
 
     let data: CreateIssueResponse;
     try {
@@ -269,11 +311,15 @@ export class LinearAdapter implements IAdapter {
   /**
    * Builds the `issueCreate` mutation and its single `$input` variable. The
    * input object is composed in TypeScript so optional fields appear only when
-   * present: `description` only when defined, `projectId` only when the config
-   * targets a project, and `labelIds` only for `feature`-level items when a
-   * `featureLabelId` is configured. The team always targets the new issue.
+   * present: `description` only when defined, `projectId` only when the caller
+   * resolved one (the Epic's project, or the config fallback), and `labelIds`
+   * only for `feature`-level items when a `featureLabelId` is configured. The team
+   * always targets the new issue.
    */
-  private buildCreateIssueMutation(item: CanonicalItem): {
+  private buildCreateIssueMutation(
+    item: CanonicalItem,
+    projectId?: string,
+  ): {
     query: string;
     variables: Record<string, unknown>;
   } {
@@ -291,10 +337,77 @@ export class LinearAdapter implements IAdapter {
       teamId: this.config.teamId,
     };
     if (item.description !== undefined) input['description'] = item.description;
-    if (this.config.projectId !== undefined) input['projectId'] = this.config.projectId;
+    if (projectId !== undefined) input['projectId'] = projectId;
     if (item.level === 'feature' && this.config.featureLabelId !== undefined) {
       input['labelIds'] = [this.config.featureLabelId];
     }
+
+    return { query, variables: { input } };
+  }
+
+  /**
+   * Creates the Linear Project an `epic` maps to via the `projectCreate` mutation
+   * and returns its external id/url. Mirrors `createItem`'s issue path: an `auth`
+   * failure is re-thrown with team context so callers see which token/team lacks
+   * write access; all other failures propagate unchanged. A soft failure (Linear
+   * returns `success: false`, a null project, or a project missing its id/url) is
+   * surfaced as a non-retryable `bad_request` naming the epic so the failure is
+   * diagnosable rather than persisted as a broken link.
+   */
+  private async createProjectFromEpic(item: CanonicalItem): Promise<ExternalItemResult> {
+    const { query, variables } = this.buildCreateProjectMutation(item);
+
+    let data: CreateProjectResponse;
+    try {
+      data = await this.client.request<CreateProjectResponse>(query, variables);
+    } catch (err) {
+      if (err instanceof LinearRequestError && err.info.code === 'auth') {
+        throw new LinearRequestError({
+          ...err.info,
+          message: `Linear project creation failed for team ${this.config.teamId}: ${err.info.message}. Check that the configured token has write access to this team.`,
+        });
+      }
+      throw err;
+    }
+
+    // Same soft-failure guard as the issue path: an empty/undefined id or url
+    // would let the engine persist a SyncLink that can never address the project.
+    const project = data.projectCreate?.project;
+    if (!data.projectCreate?.success || !project || !project.id || !project.url) {
+      throw new LinearRequestError({
+        code: 'bad_request',
+        retryable: false,
+        message: `Linear rejected creation of ${item.level} "${item.title}" as a project for team ${this.config.teamId}.`,
+      });
+    }
+
+    return { externalId: project.id, externalUrl: project.url };
+  }
+
+  /**
+   * Builds the `projectCreate` mutation and its single `$input` variable. The
+   * project is owned by the configured team — note `teamIds` is a required
+   * *array* in `ProjectCreateInput`. `description` is composed in only when
+   * defined.
+   */
+  private buildCreateProjectMutation(item: CanonicalItem): {
+    query: string;
+    variables: Record<string, unknown>;
+  } {
+    const query = `
+      mutation LinearCreateProject($input: ProjectCreateInput!) {
+        projectCreate(input: $input) {
+          success
+          project { id url }
+        }
+      }
+    `;
+
+    const input: Record<string, unknown> = {
+      name: item.title,
+      teamIds: [this.config.teamId],
+    };
+    if (item.description !== undefined) input['description'] = item.description;
 
     return { query, variables: { input } };
   }
@@ -315,8 +428,14 @@ export class LinearAdapter implements IAdapter {
    * (see `electron/sync/executor.ts`), so when invoked this method always pushes
    * the current managed fields. It resolves to `void` — the executor refreshes the
    * SyncLink hash/timestamp on resolve and records `failed` on throw.
+   *
+   * An `epic` is a Linear *Project*, so it delegates to
+   * {@link updateProjectFromEpic} (`projectUpdate`) rather than `issueUpdate`.
    */
   async updateItem(id: string, item: CanonicalItem): Promise<void> {
+    // An epic maps to a Linear Project, not an issue.
+    if (item.level === 'epic') return this.updateProjectFromEpic(id, item);
+
     const { query, variables } = this.buildUpdateIssueMutation(id, item);
 
     let data: UpdateIssueResponse;
@@ -371,6 +490,71 @@ export class LinearAdapter implements IAdapter {
 
     const input: Record<string, unknown> = {
       title: item.title,
+    };
+    if (item.description !== undefined) input['description'] = item.description;
+
+    return { query, variables: { id, input } };
+  }
+
+  /**
+   * Updates the Linear Project an `epic` maps to via the `projectUpdate` mutation,
+   * pushing the name (and, when present, description). Mirrors `updateItem`'s issue
+   * path: an `auth` failure is re-thrown with team context so callers see which
+   * token/team lacks write access; all other failures propagate unchanged. A soft
+   * failure (Linear returns `success: false`) is surfaced as a non-retryable
+   * `bad_request` naming the project and item so the failure is diagnosable.
+   */
+  private async updateProjectFromEpic(id: string, item: CanonicalItem): Promise<void> {
+    const { query, variables } = this.buildUpdateProjectMutation(id, item);
+
+    let data: UpdateProjectResponse;
+    try {
+      data = await this.client.request<UpdateProjectResponse>(query, variables);
+    } catch (err) {
+      if (err instanceof LinearRequestError && err.info.code === 'auth') {
+        throw new LinearRequestError({
+          ...err.info,
+          message: `Linear project update failed for team ${this.config.teamId}: ${err.info.message}. Check that the configured token has write access to this team.`,
+        });
+      }
+      throw err;
+    }
+
+    if (!data.projectUpdate?.success) {
+      throw new LinearRequestError({
+        code: 'bad_request',
+        retryable: false,
+        message: `Linear rejected update of project ${id} (${item.level} "${item.title}") for team ${this.config.teamId}.`,
+      });
+    }
+
+    return;
+  }
+
+  /**
+   * Builds the `projectUpdate` mutation and its `$id` / `$input` variables. The
+   * project is targeted by the top-level `id`; the input carries the name and
+   * `description` only when defined. Name and description are the full scope here —
+   * matching `buildUpdateIssueMutation`'s title/description discipline.
+   */
+  private buildUpdateProjectMutation(
+    id: string,
+    item: CanonicalItem,
+  ): {
+    query: string;
+    variables: Record<string, unknown>;
+  } {
+    const query = `
+      mutation LinearUpdateProject($id: String!, $input: ProjectUpdateInput!) {
+        projectUpdate(id: $id, input: $input) {
+          success
+          project { id url }
+        }
+      }
+    `;
+
+    const input: Record<string, unknown> = {
+      name: item.title,
     };
     if (item.description !== undefined) input['description'] = item.description;
 
