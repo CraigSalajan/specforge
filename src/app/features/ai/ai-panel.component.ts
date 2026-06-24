@@ -21,7 +21,7 @@ import { VaultService } from '../../core/vault.service';
 import { UiStateService } from '../../core/ui-state.service';
 import { InputDialogService } from '../../core/input-dialog.service';
 import { ConfirmDialogService } from '../../core/confirm-dialog.service';
-import { ChatService } from './chat.service';
+import { ChatService, type UiChatMessage } from './chat.service';
 import { AiOrchestratorService, isEditIntent, type ComposerMode } from './ai-orchestrator.service';
 import { FileChangeService } from './file-change.service';
 import { AiProviderService } from './providers/ai-provider.service';
@@ -126,6 +126,21 @@ import {
                 }
               </div>
               @if (msg.role === 'assistant') {
+                @if (msg.reasoning) {
+                  <div class="rounded border border-border-subtle bg-surface-1">
+                    <button type="button"
+                      class="flex w-full items-center gap-1.5 px-2 py-1 text-left text-xs text-text-muted hover:text-text-secondary focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                      [attr.aria-expanded]="isThinkingOpen(i, msg)"
+                      (click)="toggleThinking(i, msg)">
+                      <span aria-hidden="true">{{ isThinkingOpen(i, msg) ? '▾' : '▸' }}</span>
+                      <span class="uppercase tracking-wider">Thinking</span>
+                      @if (msg.streaming && !msg.content) { <span class="text-accent">…</span> }
+                    </button>
+                    @if (isThinkingOpen(i, msg)) {
+                      <div class="prose-ai border-t border-border-subtle px-3 py-2 text-xs leading-relaxed text-text-muted" [innerHTML]="renderAssistant(msg.reasoning)"></div>
+                    }
+                  </div>
+                }
                 <div
                   class="prose-ai rounded border border-border-subtle bg-surface-2 px-3 py-2 text-sm leading-relaxed"
                   [innerHTML]="renderAssistant(msg.content)"></div>
@@ -498,11 +513,51 @@ export class AiPanelComponent {
   /** Last composer focus-request seq honored (command palette integration). */
   private consumedComposerFocusSeq = 0;
 
+  /**
+   * Per-message manual override of the Thinking disclosure, keyed by message
+   * index. When set, it wins over the auto rule (auto-expand only while the
+   * answer text has not yet arrived). Cleared on session change since indices
+   * restart per session.
+   */
+  private readonly thinkingOverride = signal<Map<number, boolean>>(new Map());
+
+  /** Tracks the active session id so we can reset overrides when it changes. */
+  private previousSessionId: number | null = null;
+
+  /**
+   * Whether the Thinking disclosure for message `i` is open: a manual override
+   * wins; otherwise auto-expand only while streaming before any answer text.
+   */
+  isThinkingOpen(i: number, msg: UiChatMessage): boolean {
+    const o = this.thinkingOverride().get(i);
+    if (o !== undefined) return o;
+    return msg.streaming && msg.content.length === 0;
+  }
+
+  /** Toggles message `i`'s Thinking disclosure, recording a manual override. */
+  toggleThinking(i: number, msg: UiChatMessage): void {
+    const open = this.isThinkingOpen(i, msg);
+    const next = new Map(this.thinkingOverride());
+    next.set(i, !open);
+    this.thinkingOverride.set(next);
+  }
+
   constructor() {
     effect(() => {
       this.vault.vaultPath();
       this.chat.resetForVaultChange();
       void this.chat.refreshSessions();
+    });
+
+    // Reset the Thinking overrides whenever the active session changes —
+    // override keys are message indices, which restart per session, so a stale
+    // map would mis-target a different conversation's bubbles.
+    effect(() => {
+      const id = this.chat.activeSession()?.id ?? null;
+      if (id !== this.previousSessionId) {
+        this.previousSessionId = id;
+        this.thinkingOverride.set(new Map());
+      }
     });
 
     // "Focus AI composer" palette command. focus() is a harmless no-op while

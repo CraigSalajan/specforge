@@ -1,0 +1,10 @@
+// Covers DidNotCallTool.
+(
+  name: "explains-without-writing",
+  instruction: "In two sentences, explain what belongs in a PRD. Do not create, write, or save any files.",
+  expect: [
+    DidNotCallTool(tool: "write_file"),
+    NoError,
+    FinalTextContains(text: "prd", case_insensitive: true),
+  ],
+)

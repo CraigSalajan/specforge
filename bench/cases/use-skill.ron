@@ -1,0 +1,9 @@
+// Covers use_skill. The harness seeds one fixture skill ("mermaid-diagrams").
+(
+  name: "uses-a-skill",
+  instruction: "Use the mermaid-diagrams skill to load its instructions, then briefly describe what it is for.",
+  expect: [
+    CalledTool(tool: "use_skill"),
+    NoError,
+  ],
+)

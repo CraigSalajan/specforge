@@ -1,0 +1,22 @@
+[package]
+name = "specforge-bench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Drives the eval-core benchmark framework against the SpecForge AI agentic-loop harness."
+
+# Standalone crate: the repo root has no Cargo workspace, so we must NOT be pulled
+# into one accidentally. Declaring an empty `[workspace]` makes this Cargo.toml the
+# workspace root for itself and stops Cargo walking up the tree looking for one.
+[workspace]
+
+[[bin]]
+name = "specforge-bench"
+path = "src/main.rs"
+
+[dependencies]
+eval-core = "0.3.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+dotenvy = "0.15"

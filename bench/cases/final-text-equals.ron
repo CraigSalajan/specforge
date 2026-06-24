@@ -1,0 +1,10 @@
+// Covers FinalTextEquals + NoToolCalls.
+(
+  name: "replies-with-exact-text",
+  instruction: "Reply with exactly the single word ACKNOWLEDGED and nothing else.",
+  expect: [
+    NoToolCalls,
+    FinalTextEquals(text: "ACKNOWLEDGED"),
+    NoError,
+  ],
+)

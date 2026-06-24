@@ -142,18 +142,22 @@ interface AiListModelsResponseDto {
 interface AiStreamChunkEventDto {
   streamId: string;
   delta: string;
+  reasoning?: string;
 }
 
 interface AiStreamDoneEventDto {
   streamId: string;
   finishReason?: string;
   toolCalls?: AiToolCallDto[];
+  usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number };
 }
 
 interface AiChatCompleteResultDto {
   content: string | null;
+  reasoning?: string | null;
   toolCalls?: AiToolCallDto[];
   finishReason?: string;
+  usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number };
 }
 
 interface AiErrorInfoDto {
@@ -249,8 +253,12 @@ const api = {
   }) => ipcRenderer.invoke(IpcChannels.ChatsCreateSession, input),
   chatsGetMessages: (sessionId: number) =>
     ipcRenderer.invoke(IpcChannels.ChatsGetMessages, sessionId),
-  chatsAppendMessage: (input: { sessionId: number; role: string; content: string }) =>
-    ipcRenderer.invoke(IpcChannels.ChatsAppendMessage, input),
+  chatsAppendMessage: (input: {
+    sessionId: number;
+    role: string;
+    content: string;
+    reasoning?: string | null;
+  }) => ipcRenderer.invoke(IpcChannels.ChatsAppendMessage, input),
   chatsRenameSession: (sessionId: number, title: string) =>
     ipcRenderer.invoke(IpcChannels.ChatsRenameSession, sessionId, title),
   chatsDeleteSession: (sessionId: number) =>

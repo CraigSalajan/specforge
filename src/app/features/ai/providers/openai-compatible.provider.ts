@@ -19,6 +19,7 @@ import type {
   ChatMessage,
   ChatOptions,
   ChatProvider,
+  TokenUsage,
   ToolCall,
 } from './chat.provider';
 import type { EmbeddingProvider } from './embedding.provider';
@@ -93,8 +94,8 @@ export class OpenAiCompatibleChatProvider implements ChatProvider {
     // and are surfaced through an async iterator. Resolvers below feed the
     // queue so the consumer's `for await` sleeps until the next event.
     type Pending =
-      | { kind: 'chunk'; delta: string }
-      | { kind: 'done'; finishReason?: string; toolCalls?: ToolCall[] }
+      | { kind: 'chunk'; delta: string; reasoning?: string }
+      | { kind: 'done'; finishReason?: string; toolCalls?: ToolCall[]; usage?: TokenUsage }
       | { kind: 'error'; message: string; info?: AiErrorInfo };
 
     const queue: Pending[] = [];
@@ -114,11 +115,11 @@ export class OpenAiCompatibleChatProvider implements ChatProvider {
 
     const offChunk = this.ipc.onAiStreamChunk((evt) => {
       if (evt.streamId !== streamId) return;
-      push({ kind: 'chunk', delta: evt.delta });
+      push({ kind: 'chunk', delta: evt.delta, reasoning: evt.reasoning });
     });
     const offDone = this.ipc.onAiStreamDone((evt) => {
       if (evt.streamId !== streamId) return;
-      push({ kind: 'done', finishReason: evt.finishReason, toolCalls: evt.toolCalls });
+      push({ kind: 'done', finishReason: evt.finishReason, toolCalls: evt.toolCalls, usage: evt.usage });
     });
     const offError = this.ipc.onAiStreamError((evt) => {
       if (evt.streamId !== streamId) return;
@@ -193,13 +194,18 @@ export class OpenAiCompatibleChatProvider implements ChatProvider {
         if (next === null) break;
 
         if (next.kind === 'chunk') {
-          if (next.delta) yield { delta: next.delta, done: false };
+          // Forward a chunk when EITHER channel has content this line, so a
+          // reasoning-only line is not dropped before the answer arrives.
+          if (next.delta || next.reasoning) {
+            yield { delta: next.delta, done: false, reasoning: next.reasoning };
+          }
         } else if (next.kind === 'done') {
           yield {
             delta: '',
             done: true,
             toolCalls: next.toolCalls,
             finishReason: next.finishReason,
+            usage: next.usage,
           };
           break;
         } else {
@@ -287,8 +293,10 @@ export class OpenAiCompatibleChatProvider implements ChatProvider {
       }
       return {
         content: result.data.content,
+        reasoning: result.data.reasoning,
         toolCalls: result.data.toolCalls,
         finishReason: result.data.finishReason,
+        usage: result.data.usage,
       };
     } catch (err) {
       if (err instanceof AiHarnessError || err instanceof DOMException) throw err;

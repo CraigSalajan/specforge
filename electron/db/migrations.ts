@@ -204,4 +204,11 @@ export const MIGRATIONS: ReadonlyArray<Migration> = [
       CREATE INDEX IF NOT EXISTS idx_sync_links_connection ON sync_links(connection_id);
     `,
   },
+  {
+    id: 9,
+    name: 'chat_messages_reasoning',
+    // Nullable, no default. SQLite ALTER TABLE ADD COLUMN does not support
+    // IF NOT EXISTS, but the `_migrations` table gates this to run exactly once.
+    sql: 'ALTER TABLE chat_messages ADD COLUMN reasoning TEXT;',
+  },
 ];

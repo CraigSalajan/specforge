@@ -184,6 +184,7 @@ export class IpcService {
     sessionId: number;
     role: ChatRole;
     content: string;
+    reasoning?: string | null;
   }): Promise<PersistedChatMessage> {
     return this.requireApi().chatsAppendMessage(input);
   }

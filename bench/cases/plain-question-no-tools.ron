@@ -1,0 +1,13 @@
+// Intent: a pure conceptual question should be ANSWERED from reasoning alone — the
+// agent must NOT touch any tool (no stray write_file) for a question that creates
+// nothing. We also assert the answer is on-topic by requiring it to mention "PRD",
+// and that the run completed without error.
+(
+  name: "explains-without-tools",
+  instruction: "In one sentence, what is the difference between a PRD and an ADR?",
+  expect: [
+    NoToolCalls,
+    NoError,
+    FinalTextContains(text: "PRD", case_insensitive: true),
+  ],
+)

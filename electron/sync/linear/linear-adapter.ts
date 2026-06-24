@@ -50,6 +50,7 @@ import type {
 } from '../adapter';
 import type { CanonicalItem, CanonicalLevel } from '../canonical-item';
 import type { LinearGraphQLClient } from './client';
+import { composeDescription } from './description';
 import { LinearRequestError } from './errors';
 
 /**
@@ -336,7 +337,8 @@ export class LinearAdapter implements IAdapter {
       title: item.title,
       teamId: this.config.teamId,
     };
-    if (item.description !== undefined) input['description'] = item.description;
+    const description = composeDescription(item.description, item.criteria);
+    if (description !== undefined) input['description'] = description;
     if (projectId !== undefined) input['projectId'] = projectId;
     if (item.level === 'feature' && this.config.featureLabelId !== undefined) {
       input['labelIds'] = [this.config.featureLabelId];
@@ -407,7 +409,8 @@ export class LinearAdapter implements IAdapter {
       name: item.title,
       teamIds: [this.config.teamId],
     };
-    if (item.description !== undefined) input['description'] = item.description;
+    const description = composeDescription(item.description, item.criteria);
+    if (description !== undefined) input['description'] = description;
 
     return { query, variables: { input } };
   }
@@ -491,7 +494,8 @@ export class LinearAdapter implements IAdapter {
     const input: Record<string, unknown> = {
       title: item.title,
     };
-    if (item.description !== undefined) input['description'] = item.description;
+    const description = composeDescription(item.description, item.criteria);
+    if (description !== undefined) input['description'] = description;
 
     return { query, variables: { id, input } };
   }
@@ -556,7 +560,8 @@ export class LinearAdapter implements IAdapter {
     const input: Record<string, unknown> = {
       name: item.title,
     };
-    if (item.description !== undefined) input['description'] = item.description;
+    const description = composeDescription(item.description, item.criteria);
+    if (description !== undefined) input['description'] = description;
 
     return { query, variables: { id, input } };
   }

@@ -1,0 +1,10 @@
+// Covers CalledToolWith (subset arg match). The instruction pins an exact path.
+(
+  name: "writes-to-exact-path",
+  instruction: "Create a markdown file at exactly the vault path adr/0001-auth.md recording an architecture decision about authentication.",
+  expect: [
+    CalledTool(tool: "write_file"),
+    CalledToolWith(tool: "write_file", args: { "path": "adr/0001-auth.md" }),
+    NoError,
+  ],
+)

@@ -344,6 +344,8 @@ export interface PersistedChatMessage {
   sessionId: number;
   role: ChatRole;
   content: string;
+  /** Reasoning/"thinking" text, kept separate from `content`; null when absent. */
+  reasoning?: string | null;
   createdAt: number;
 }
 
@@ -485,21 +487,36 @@ export interface AiListModelsResponse {
   models: AiModelInfo[];
 }
 
+/** Token usage for an AI call, mirrored from the provider's `usage` block. */
+export interface AiTokenUsage {
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+}
+
 export interface AiStreamChunkEvent {
   streamId: string;
   delta: string;
+  /** Incremental reasoning/"thinking" text for this line, when present. */
+  reasoning?: string;
 }
 
 export interface AiStreamDoneEvent {
   streamId: string;
   finishReason?: string;
   toolCalls?: AiToolCall[];
+  /** Token usage for the stream, when the provider reported it. */
+  usage?: AiTokenUsage;
 }
 
 export interface AiChatCompleteResult {
   content: string | null;
+  /** Reasoning/"thinking" text, kept separate from `content`; null when absent. */
+  reasoning?: string | null;
   toolCalls?: AiToolCall[];
   finishReason?: string;
+  /** Token usage for the call, when the provider reported it. */
+  usage?: AiTokenUsage;
 }
 
 /**
@@ -622,6 +639,7 @@ export interface SpecForgeApi {
     sessionId: number;
     role: ChatRole;
     content: string;
+    reasoning?: string | null;
   }) => Promise<PersistedChatMessage>;
   chatsRenameSession: (sessionId: number, title: string) => Promise<void>;
   chatsDeleteSession: (sessionId: number) => Promise<void>;
