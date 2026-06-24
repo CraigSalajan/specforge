@@ -23,30 +23,97 @@ import readline from 'node:readline';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, '..', '..');
 
+/** How long to wait for each child's startup handshake before giving up. */
+const HANDSHAKE_TIMEOUT_MS = 10_000;
+
+// Hoisted so cleanup() can reach the spawned children from any failure path,
+// including an early parse/assertion fail() that runs before `runner.on('close')`.
+let mock = null;
+let runner = null;
+
+/** Kill any spawned children. Safe to call repeatedly and after they exit. */
+function cleanup() {
+  if (mock) {
+    mock.kill();
+    mock = null;
+  }
+  if (runner) {
+    runner.kill();
+    runner = null;
+  }
+}
+
+// A forced early exit (fail()) leaves children running otherwise; reap them.
+process.on('exit', cleanup);
+
 function fail(msg) {
   console.error('VERIFY FAIL:', msg);
+  cleanup();
   process.exit(1);
 }
 
-/** Spawn the mock and resolve once it announces its port. */
+/**
+ * Reject `promise` with a labelled error if it doesn't settle within `ms`,
+ * killing `child` so a stalled handshake can't leak a process.
+ */
+function withTimeout(promise, ms, label, child) {
+  return new Promise((res, rej) => {
+    const timer = setTimeout(() => {
+      if (child) child.kill();
+      rej(new Error(`${label} timed out after ${ms}ms`));
+    }, ms);
+    promise.then(
+      (v) => {
+        clearTimeout(timer);
+        res(v);
+      },
+      (err) => {
+        clearTimeout(timer);
+        rej(err);
+      },
+    );
+  });
+}
+
+/**
+ * Spawn the mock and resolve once it announces its port. Rejects if the child
+ * errors or exits before printing a `PORT=` line so we fail fast instead of
+ * hanging on a dead mock.
+ */
 function startMock() {
-  return new Promise((resolveMock) => {
+  return new Promise((resolveMock, rejectMock) => {
     const proc = spawn('node', [join(__dirname, 'mock-endpoint.mjs'), '0'], { stdio: ['ignore', 'pipe', 'inherit'] });
+    mock = proc;
+    let announced = false;
     const rl = readline.createInterface({ input: proc.stdout });
     rl.on('line', (line) => {
       const m = /^PORT=(\d+)$/.exec(line.trim());
-      if (m) resolveMock({ proc, port: Number.parseInt(m[1], 10) });
+      if (m) {
+        announced = true;
+        resolveMock({ proc, port: Number.parseInt(m[1], 10) });
+      }
+    });
+    proc.on('error', (err) => rejectMock(new Error(`mock spawn error: ${err.message}`)));
+    proc.on('exit', (code, signal) => {
+      if (!announced) {
+        rejectMock(new Error(`mock exited before announcing a port (code=${code}, signal=${signal})`));
+      }
     });
   });
 }
 
-const { proc: mock, port } = await startMock();
+const { port } = await withTimeout(
+  startMock(),
+  HANDSHAKE_TIMEOUT_MS,
+  'mock startup',
+  mock,
+).catch((err) => fail(err.message));
 console.error(`[verify] mock listening on ${port}`);
 
 const vault = mkdtempSync(join(tmpdir(), 'specforge-bench-verify-'));
 console.error(`[verify] temp vault: ${vault}`);
 
-const runner = spawn('node', [resolve(root, 'dist/bench/harness-runner.mjs')], {
+runner = spawn('node', [resolve(root, 'dist/bench/harness-runner.mjs')], {
   stdio: ['pipe', 'pipe', 'inherit'],
   env: {
     ...process.env,
@@ -63,37 +130,53 @@ const rl = readline.createInterface({ input: runner.stdout });
 let sawReady = false;
 let resultLine = null;
 
-rl.on('line', (line) => {
-  const trimmed = line.trim();
-  if (trimmed.length === 0) return;
-  outLines.push(trimmed);
-  let obj;
-  try {
-    obj = JSON.parse(trimmed);
-  } catch {
-    fail(`non-JSON stdout line: ${trimmed}`);
-    return;
-  }
-  if (obj.ready === true && !sawReady) {
-    sawReady = true;
-    console.error('[verify] runner ready; sending instruction');
-    runner.stdin.write(JSON.stringify({ instruction: 'Create a PRD for a test feature' }) + '\n');
-    return;
-  }
-  if (obj.ready === false) {
-    fail(`runner reported not ready: ${obj.error}`);
-    return;
-  }
-  // First non-ready protocol line is the turn result.
-  if (resultLine === null) {
-    resultLine = obj;
-    console.error('[verify] result line received; closing stdin');
-    runner.stdin.end();
-  }
+// Resolves when the runner prints {"ready":true}; rejects if it errors or
+// exits before the handshake. `withTimeout` bounds the wait so a stalled
+// runner fails fast instead of hanging the script forever.
+const readyHandshake = new Promise((resolveReady, rejectReady) => {
+  rl.on('line', (line) => {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) return;
+    outLines.push(trimmed);
+    let obj;
+    try {
+      obj = JSON.parse(trimmed);
+    } catch {
+      fail(`non-JSON stdout line: ${trimmed}`);
+      return;
+    }
+    if (obj.ready === true && !sawReady) {
+      sawReady = true;
+      resolveReady();
+      console.error('[verify] runner ready; sending instruction');
+      runner.stdin.write(JSON.stringify({ instruction: 'Create a PRD for a test feature' }) + '\n');
+      return;
+    }
+    if (obj.ready === false) {
+      rejectReady(new Error(`runner reported not ready: ${obj.error}`));
+      return;
+    }
+    // First non-ready protocol line is the turn result.
+    if (resultLine === null) {
+      resultLine = obj;
+      console.error('[verify] result line received; closing stdin');
+      runner.stdin.end();
+    }
+  });
+  runner.on('error', (err) => rejectReady(new Error(`runner spawn error: ${err.message}`)));
+  runner.on('exit', (code, signal) => {
+    if (!sawReady) {
+      rejectReady(new Error(`runner exited before printing {"ready":true} (code=${code}, signal=${signal})`));
+    }
+  });
 });
 
+withTimeout(readyHandshake, HANDSHAKE_TIMEOUT_MS, 'runner protocol handshake', runner).catch((err) =>
+  fail(err.message),
+);
+
 runner.on('close', (code) => {
-  mock.kill();
+  cleanup();
 
   // --- Assertions -------------------------------------------------------
   if (!sawReady) fail('runner never printed {"ready":true}');

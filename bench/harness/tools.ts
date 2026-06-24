@@ -83,6 +83,12 @@ export interface ToolRegistry {
   schemas(): ToolDef[];
   /** Resolve a tool by name (the exact production registry semantics). */
   get(name: string): Tool | undefined;
+  /**
+   * The skills advertised to the model — the same list `use_skill` accepts.
+   * The runner feeds these into `assembleSystemMessage`'s `availableSkills` so
+   * the advertised skill name stays consistent with what `use_skill` resolves.
+   */
+  availableSkills(): SkillMeta[];
 }
 
 /**
@@ -142,6 +148,17 @@ function createIpcShim(vaultPath: string): Partial<IpcService> {
  * returns the narrow {@link ToolRegistry} surface the runner needs.
  */
 export function createToolRegistry(vaultPath: string): ToolRegistry {
+  // One fixture skill registry shim, shared as both the DI value `use_skill`
+  // resolves against AND the source the runner advertises via `availableSkills`.
+  // Typed by the narrow surface the tools + runner actually call (`enabled()` /
+  // `find()`), not the full `SkillRegistryService` whose `enabled` is a branded
+  // `Signal`. Both call sites only invoke these as plain functions.
+  const skillRegistry = {
+    enabled: (): SkillMeta[] => [FIXTURE_SKILL],
+    find: (n: string): SkillMeta | undefined =>
+      n === FIXTURE_SKILL.name ? FIXTURE_SKILL : undefined,
+  };
+
   const injector = Injector.create({
     providers: [
       // Real tool classes + the registry: resolved with full DI fidelity.
@@ -157,10 +174,7 @@ export function createToolRegistry(vaultPath: string): ToolRegistry {
       { provide: RetrievalService, useValue: { retrieve: async () => [] } },
       {
         provide: SkillRegistryService,
-        useValue: {
-          enabled: () => [FIXTURE_SKILL],
-          find: (n: string) => (n === FIXTURE_SKILL.name ? FIXTURE_SKILL : undefined),
-        },
+        useValue: skillRegistry,
       },
     ],
   });
@@ -169,5 +183,8 @@ export function createToolRegistry(vaultPath: string): ToolRegistry {
   return {
     schemas: () => registry.schemas(),
     get: (name: string) => registry.get(name),
+    // Single source of truth: the same `enabled()` list `use_skill` resolves
+    // against, so the names the model is advertised always match what it accepts.
+    availableSkills: () => skillRegistry.enabled(),
   };
 }

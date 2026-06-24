@@ -143,9 +143,21 @@ function makeExecuteToolCall(config: BenchConfig, registry: ToolRegistry) {
     }
 
     // Auto-accept the staged write: realize it on disk so subsequent turns can
-    // read it, then return the accepted-outcome message.
+    // read it, then return the accepted-outcome message. Constrain the resolved
+    // target to the vault root so a `../` in a model-produced relPath can't
+    // escape and clobber files outside the temp vault.
     const proposal = result.proposal;
-    const abs = path.join(config.vaultPath, proposal.relPath);
+    const vaultRoot = path.resolve(config.vaultPath);
+    const abs = path.resolve(vaultRoot, proposal.relPath);
+    const rel = path.relative(vaultRoot, abs);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) {
+      return {
+        role: 'tool',
+        tool_call_id: call.id,
+        name,
+        content: `Error: invalid write path "${proposal.relPath}".`,
+      };
+    }
     await fs.promises.mkdir(path.dirname(abs), { recursive: true });
     await fs.promises.writeFile(abs, proposal.content, 'utf8');
 
@@ -169,7 +181,10 @@ async function processInstruction(
     maxContextChars: config.maxContextChars,
     additionalInstructions: TOOL_USAGE_PROMPT,
     pinnedFiles: [],
-    availableSkills: [],
+    // Advertise the fixture skill(s) the registry exposes so the `use_skill`
+    // case is winnable on a live model — the advertised name must match what
+    // `use_skill` accepts, which `availableSkills()` guarantees (same source).
+    availableSkills: registry.availableSkills(),
   }).systemMessage;
 
   const convo: ChatMessage[] = [systemMessage, { role: 'user', content: instruction }];

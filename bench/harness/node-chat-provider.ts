@@ -155,9 +155,13 @@ export class NodeChatProvider implements ChatProvider {
     }
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-    let res: Response;
+    // Keep the timeout armed across BOTH the fetch AND the body read: a server
+    // that sends headers then stalls the body would otherwise hang forever once
+    // `fetch()` resolved. The single try/finally tears the timer + abort
+    // listener down on every path (success or error), only after the body is
+    // fully consumed.
     try {
-      res = await fetch(`${trimTrailingSlash(this.config.baseUrl)}/chat/completions`, {
+      const res = await fetch(`${trimTrailingSlash(this.config.baseUrl)}/chat/completions`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -166,34 +170,34 @@ export class NodeChatProvider implements ChatProvider {
         body: JSON.stringify(body),
         signal: controller.signal,
       });
+
+      if (!res.ok) {
+        const snippet = (await readBodyText(res)).slice(0, 500);
+        throw new Error(
+          `Chat completion request failed: ${res.status} ${res.statusText}${
+            snippet ? ` — ${snippet}` : ''
+          }`,
+        );
+      }
+
+      const json = (await res.json()) as ChatCompletionResponse;
+      const choice = json.choices?.[0];
+      const { cleanedText, toolCalls: gemmaCalls } = extractGemmaToolCalls(
+        choice?.message?.content ?? '',
+      );
+      const structured = normalizeRawToolCalls(choice?.message?.tool_calls ?? []);
+      const merged: ToolCall[] = [...structured, ...gemmaCalls];
+
+      return {
+        cleanedText,
+        toolCalls: merged,
+        finishReason: choice?.finish_reason ?? undefined,
+        usage: mapUsage(json.usage),
+      };
     } finally {
       clearTimeout(timer);
       if (opts.signal) opts.signal.removeEventListener('abort', onAbort);
     }
-
-    if (!res.ok) {
-      const snippet = (await readBodyText(res)).slice(0, 500);
-      throw new Error(
-        `Chat completion request failed: ${res.status} ${res.statusText}${
-          snippet ? ` — ${snippet}` : ''
-        }`,
-      );
-    }
-
-    const json = (await res.json()) as ChatCompletionResponse;
-    const choice = json.choices?.[0];
-    const { cleanedText, toolCalls: gemmaCalls } = extractGemmaToolCalls(
-      choice?.message?.content ?? '',
-    );
-    const structured = normalizeRawToolCalls(choice?.message?.tool_calls ?? []);
-    const merged: ToolCall[] = [...structured, ...gemmaCalls];
-
-    return {
-      cleanedText,
-      toolCalls: merged,
-      finishReason: choice?.finish_reason ?? undefined,
-      usage: mapUsage(json.usage),
-    };
   }
 }
 

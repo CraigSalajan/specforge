@@ -531,7 +531,9 @@ export class AiPanelComponent {
   isThinkingOpen(i: number, msg: UiChatMessage): boolean {
     const o = this.thinkingOverride().get(i);
     if (o !== undefined) return o;
-    return msg.streaming && msg.content.length === 0;
+    // Trim so leading whitespace/newlines before the first visible answer text
+    // don't collapse the disclosure prematurely.
+    return msg.streaming && msg.content.trim().length === 0;
   }
 
   /** Toggles message `i`'s Thinking disclosure, recording a manual override. */

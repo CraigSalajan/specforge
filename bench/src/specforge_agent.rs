@@ -143,13 +143,25 @@ impl SpecforgeAgent {
             ));
         }
 
-        let ready: Ready = serde_json::from_str(line.trim()).with_context(|| {
-            format!("runner readiness line was not valid JSON: {:?}", line.trim())
-        })?;
+        // On ANY startup failure below (malformed JSON or `ready == false`) we
+        // must terminate the child BEFORE waiting on it: a stray Node runner
+        // would otherwise leak (it only exits on stdin EOF, which we never reach
+        // on this error path), and `wait()` alone could block indefinitely.
+        let ready: Ready = match serde_json::from_str::<Ready>(line.trim()) {
+            Ok(ready) => ready,
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(err).with_context(|| {
+                    format!("runner readiness line was not valid JSON: {:?}", line.trim())
+                });
+            }
+        };
         if !ready.ready {
             let msg = ready
                 .error
                 .unwrap_or_else(|| "runner reported not-ready with no error message".to_owned());
+            let _ = child.kill();
             let _ = child.wait();
             return Err(anyhow!("runner failed to start: {msg}"));
         }
@@ -248,10 +260,11 @@ impl Drop for SpecforgeAgent {
         };
 
         // Close stdin FIRST (drop the write end): the runner reaches EOF and exits
-        // 0 on its own. Then reap it. If it somehow lingers, kill is a harmless
-        // no-op once it has already exited.
+        // 0 on its own. Then GUARANTEE termination by killing before we block on
+        // wait() — a wedged runner that never reaches EOF would otherwise hang
+        // shutdown here forever. kill() is a harmless no-op once it has exited.
         drop(inner.stdin.take());
-        let _ = inner.child.wait();
         let _ = inner.child.kill();
+        let _ = inner.child.wait();
     }
 }

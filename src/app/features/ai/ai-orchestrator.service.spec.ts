@@ -361,6 +361,29 @@ describe('AiOrchestratorService.runWithTools', () => {
     expect(persistCalls.filter((c) => c.role === 'assistant')).toEqual([]);
   });
 
+  it('persists a reasoning-only failed turn so streamed thinking survives reload', async () => {
+    // The model streamed reasoning but failed before producing any answer text.
+    provider.setRounds([
+      {
+        chunks: [{ delta: '', done: false, reasoning: 'Half a thought…' }],
+        thenThrow: new AiHarnessError({
+          code: 'network',
+          retryable: true,
+          message: 'Could not reach the provider.',
+        }),
+      },
+    ]);
+
+    await runTools();
+
+    expect(messagesSig()[messagesSig().length - 1].error?.code).toBe('network');
+    // Empty content but non-empty reasoning still persists the row (and its
+    // reasoning) rather than dropping the streamed thinking.
+    expect(persistCalls.filter((c) => c.role === 'assistant')).toEqual([
+      { role: 'assistant', content: '', reasoning: 'Half a thought…' },
+    ]);
+  });
+
   it('retryLastFailed re-runs without re-appending or re-persisting the user message, reusing the failed bubble', async () => {
     provider.setRounds([
       {

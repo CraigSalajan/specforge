@@ -10,7 +10,7 @@ Angular/Electron app uses in production.
 
 ## Architecture
 
-```
+```text
   bench/cases/*.ron
         │  (declarative cases: instruction + Expectations)
         ▼
@@ -44,7 +44,7 @@ schemas/validators — so the model is driven exactly as it is inside the app.
 
 ## Quick start — no API key (the demo)
 
-```
+```bash
 npm run bench:demo
 ```
 
@@ -66,11 +66,11 @@ runs end-to-end and that every case is scored.
 
 Copy the template to `bench/.env` and fill in the three required vars:
 
-```
+```bash
 cp bench/.env.example bench/.env
 ```
 
-```
+```bash
 # bench/.env
 SPECFORGE_BENCH_BASE_URL=https://api.openai.com/v1
 SPECFORGE_BENCH_API_KEY=sk-...
@@ -79,14 +79,14 @@ SPECFORGE_BENCH_MODEL=gpt-4o-mini
 
 Then run the benchmark:
 
-```
+```bash
 npm run bench
 ```
 
 `bench/.env` is **gitignored**, so your key stays local. It's loaded by both
 entry points, so this also works if you drive the Rust driver directly:
 
-```
+```bash
 cd bench && cargo run
 ```
 
@@ -94,7 +94,7 @@ cd bench && cargo run
 guidance if any are missing), builds the runner, then runs `cargo run` in
 `bench/`. Equivalently you can run the two steps yourself:
 
-```
+```bash
 npm run build:bench
 cd bench && cargo run
 ```
@@ -178,7 +178,7 @@ configure credentials.
    like a password.
 3. Put both in `bench/.env` (gitignored) — or export them in your shell:
 
-```
+```bash
 # bench/.env
 EVALFORGE_PROJECT_ID=<your-project-uuid>
 EVALFORGE_API_KEY=sk-eval-...

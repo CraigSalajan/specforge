@@ -4,7 +4,7 @@
   instruction: "Is a PRD a planning document? Answer with a single word: yes or no.",
   expect: [
     NoToolCalls,
-    FinalTextMatches(regex: "(?i)\\byes\\b"),
+    FinalTextMatches(regex: "(?i)^yes$"),
     NoError,
   ],
 )

@@ -436,7 +436,7 @@ describe('LinearAdapter — TER-18: updateItem', () => {
     expect(lastInput(request)['teamId']).toBeUndefined();
   });
 
-  it('omits description from input when the item has none', async () => {
+  it('clears the description (null) on update when the item composes to none', async () => {
     const request = vi
       .fn()
       .mockResolvedValue(updatedIssue({ id: 'iss-1', url: 'https://linear.app/x/issue/iss-1' }));
@@ -450,7 +450,9 @@ describe('LinearAdapter — TER-18: updateItem', () => {
     await adapter.updateItem('issue-ext-id', item);
 
     expect(lastInput(request)['title']).toBe('A story');
-    expect(lastInput(request)).not.toHaveProperty('description');
+    // On update an empty composition is sent as explicit null so Linear clears a
+    // previously-synced checklist rather than leaving it stale (omitting would).
+    expect(lastInput(request)).toHaveProperty('description', null);
   });
 
   it('resolves to undefined on success', async () => {
@@ -770,6 +772,22 @@ describe('LinearAdapter — TER-20: Epic → Project', () => {
     expect(lastQuery(request)).toContain('projectUpdate');
     expect(lastId(request)).toBe('proj-1');
     expect(lastInput(request)).toEqual({ name: 'Updated epic', description: 'New body.' });
+  });
+
+  it('clears the project description (null) on update when the epic composes to none', async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValue(
+        updatedProject({ id: 'proj-1', url: 'https://linear.app/x/project/proj-1' }),
+      );
+    const epic: CanonicalItem = { localId: 'local-1', level: 'epic', title: 'An epic' };
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    await adapter.updateItem('proj-1', epic);
+
+    // On update an empty composition is sent as explicit null so Linear clears a
+    // previously-synced checklist rather than leaving it stale (omitting would).
+    expect(lastInput(request)).toEqual({ name: 'An epic', description: null });
   });
 
   it('surfaces an auth failure on projectCreate with team context and a write-access hint', async () => {

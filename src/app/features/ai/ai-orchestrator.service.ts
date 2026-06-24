@@ -611,8 +611,11 @@ export class AiOrchestratorService {
    *
    * Persistence policy: `chat_messages` has no error column, so the partial
    * content is persisted as a plain assistant message — this keeps a reload
-   * from showing an orphaned user question. Empty partials are skipped rather
-   * than writing a blank row.
+   * from showing an orphaned user question. A turn is persisted when EITHER
+   * partial content OR partial reasoning streamed in, so a turn that produced
+   * only reasoning (native, or a cleaned `<think>` block) before failing keeps
+   * that thinking on reload instead of dropping the row. Turns with neither are
+   * skipped rather than writing a blank row.
    */
   private async failTurn(
     info: AiErrorInfo,
@@ -626,7 +629,7 @@ export class AiOrchestratorService {
     this.lastFailedTurn = failedTurn;
     this._retryAvailable.set(true);
 
-    if (partialContent.trim().length > 0) {
+    if (partialContent.trim().length > 0 || partialReasoning.trim().length > 0) {
       const persisted = await this.chat.persistMessage(
         sessionId,
         'assistant',

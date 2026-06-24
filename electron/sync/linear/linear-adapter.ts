@@ -472,8 +472,12 @@ export class LinearAdapter implements IAdapter {
    * Builds the `issueUpdate` mutation and its `$id` / `$input` variables. The
    * issue is targeted by the top-level `id`, so the input never carries `teamId`
    * (it is not part of `IssueUpdateInput`). The title is always set; `description`
-   * is composed in only when defined. Title and description are the full scope of
-   * TER-18 — projectId/labelIds are intentionally not touched here.
+   * is composed from the body and criteria. Unlike the create path, an empty
+   * composition (`undefined`) is sent as an explicit `null` rather than omitted —
+   * on update that clears Linear's stored description, so removing all criteria
+   * (and the body) tears down a previously-synced checklist instead of leaving it
+   * stale. Title and description are the full scope of TER-18 — projectId/labelIds
+   * are intentionally not touched here.
    */
   private buildUpdateIssueMutation(
     id: string,
@@ -491,11 +495,13 @@ export class LinearAdapter implements IAdapter {
       }
     `;
 
+    const description = composeDescription(item.description, item.criteria);
     const input: Record<string, unknown> = {
       title: item.title,
+      // On update, an empty composition clears the remote description (null)
+      // rather than leaving a stale checklist behind.
+      description: description ?? null,
     };
-    const description = composeDescription(item.description, item.criteria);
-    if (description !== undefined) input['description'] = description;
 
     return { query, variables: { id, input } };
   }
@@ -538,8 +544,11 @@ export class LinearAdapter implements IAdapter {
   /**
    * Builds the `projectUpdate` mutation and its `$id` / `$input` variables. The
    * project is targeted by the top-level `id`; the input carries the name and
-   * `description` only when defined. Name and description are the full scope here —
-   * matching `buildUpdateIssueMutation`'s title/description discipline.
+   * `description`. As in `buildUpdateIssueMutation`, an empty composition
+   * (`undefined`) is sent as an explicit `null` so removing all criteria (and the
+   * body) clears a previously-synced checklist rather than leaving it stale. Name
+   * and description are the full scope here — matching the issue update's
+   * title/description discipline.
    */
   private buildUpdateProjectMutation(
     id: string,
@@ -557,11 +566,13 @@ export class LinearAdapter implements IAdapter {
       }
     `;
 
+    const description = composeDescription(item.description, item.criteria);
     const input: Record<string, unknown> = {
       name: item.title,
+      // On update, an empty composition clears the remote description (null)
+      // rather than leaving a stale checklist behind.
+      description: description ?? null,
     };
-    const description = composeDescription(item.description, item.criteria);
-    if (description !== undefined) input['description'] = description;
 
     return { query, variables: { id, input } };
   }

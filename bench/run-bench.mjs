@@ -65,7 +65,15 @@ function run(cmd, args, options = {}) {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(command, spawnArgs, { stdio: 'inherit', shell: !!shell, ...rest });
     child.on('error', reject);
-    child.on('close', (code) => resolvePromise(code ?? 0));
+    child.on('close', (code, signal) => {
+      // A signal-killed child (code === null) is a failure, not a success —
+      // don't let an OOM/Ctrl-C masquerade as exit 0.
+      if (signal) {
+        reject(new Error(`${cmd} exited from signal ${signal}`));
+        return;
+      }
+      resolvePromise(code ?? 1);
+    });
   });
 }
 
