@@ -53,5 +53,9 @@ CLAUDE.md
 memory/
 .impeccable/
 
-# Local env files (bench config, etc.)
+# Bench harness runtime — secrets, Rust build output, generated results
+# (the harness source is tracked elsewhere; these are local-only artifacts)
 .env
+bench/.env
+bench/target/
+bench/results/
