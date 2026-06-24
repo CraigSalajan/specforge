@@ -106,15 +106,31 @@ interface LabelNode {
   parent?: { id: string } | null;
 }
 
+/**
+ * A relay-style `pageInfo` from a paginated connection (here, `team.labels`).
+ * Only forward pagination is used, so just `hasNextPage`/`endCursor` are read.
+ */
+interface LabelPageInfo {
+  hasNextPage: boolean;
+  endCursor: string | null;
+}
+
 /** Shape of the `LinearProjectMetadata` query's `data` payload. */
 interface MetadataResponse {
   team: {
     id: string;
     name: string;
     states: { nodes: StateNode[] };
-    labels: { nodes: LabelNode[] };
+    labels: { nodes: LabelNode[]; pageInfo?: LabelPageInfo };
   } | null;
   project?: { id: string; name: string; url: string } | null;
+}
+
+/** Shape of the `LinearTeamLabelsPage` follow-up query's `data` payload. */
+interface LabelsPageResponse {
+  team: {
+    labels: { nodes: LabelNode[]; pageInfo: LabelPageInfo };
+  } | null;
 }
 
 /** Shape of the `issueCreate` mutation's `data` payload. */
@@ -198,7 +214,10 @@ export class LinearAdapter implements IAdapter {
    *
    * Queries the configured team's workflow states and labels (and the optional
    * project), then normalizes the result into provider-agnostic
-   * {@link ProjectMetadata}. An `auth` failure is re-thrown with team context so
+   * {@link ProjectMetadata}. Labels are a paginated connection, so any pages
+   * beyond the first 250 are fetched via {@link buildLabelsPageQuery} and merged
+   * before mapping — a team with ≤250 labels still issues exactly one request.
+   * An `auth` failure on the first request is re-thrown with team context so
    * callers see which token/team to fix; all other failures propagate unchanged.
    */
   async getMetadata(): Promise<ProjectMetadata> {
@@ -236,7 +255,25 @@ export class LinearAdapter implements IAdapter {
       color: node.color,
     }));
 
-    const labels: LabelInfo[] = team.labels.nodes.map((node) => ({
+    // Labels are a paginated connection: accumulate every page so a team with
+    // >250 labels is fully seen (otherwise `ensureLabelIndex` would miss the
+    // tail and `createLabel` would recreate duplicates). The common case
+    // (≤250 labels, or a mock without `pageInfo`) issues no follow-up request —
+    // the loop only fires while `hasNextPage` and a cursor are both present.
+    const labelNodes: LabelNode[] = [...team.labels.nodes];
+    let pageInfo = team.labels.pageInfo;
+    while (pageInfo?.hasNextPage && pageInfo.endCursor) {
+      const { query: pageQuery, variables: pageVariables } = this.buildLabelsPageQuery(
+        pageInfo.endCursor,
+      );
+      const pageData = await this.client.request<LabelsPageResponse>(pageQuery, pageVariables);
+      const pageTeam = pageData.team;
+      if (!pageTeam) break;
+      labelNodes.push(...pageTeam.labels.nodes);
+      pageInfo = pageTeam.labels.pageInfo;
+    }
+
+    const labels: LabelInfo[] = labelNodes.map((node) => ({
       id: node.id,
       name: node.name,
       color: node.color,
@@ -273,7 +310,10 @@ export class LinearAdapter implements IAdapter {
           id
           name
           states(first: 250) { nodes { id name type position color } }
-          labels(first: 250) { nodes { id name color isGroup parent { id } } }
+          labels(first: 250) {
+            nodes { id name color isGroup parent { id } }
+            pageInfo { hasNextPage endCursor }
+          }
         }${hasProject ? '\n        project(id: $projectId) { id name url }' : ''}
       }
     `;
@@ -282,6 +322,31 @@ export class LinearAdapter implements IAdapter {
     if (hasProject) variables['projectId'] = projectId;
 
     return { query, variables };
+  }
+
+  /**
+   * Builds the labels-only follow-up document and variables for the next label
+   * page, anchored at `cursor` (the prior page's `endCursor`). Selects only
+   * `team.labels` — states/project are already resolved by the first request —
+   * so each extra round-trip stays minimal. Issued by {@link getMetadata} only
+   * while a previous page reported `hasNextPage`.
+   */
+  private buildLabelsPageQuery(cursor: string): {
+    query: string;
+    variables: Record<string, unknown>;
+  } {
+    const query = `
+      query LinearTeamLabelsPage($teamId: String!, $cursor: String!) {
+        team(id: $teamId) {
+          labels(first: 250, after: $cursor) {
+            nodes { id name color isGroup parent { id } }
+            pageInfo { hasNextPage endCursor }
+          }
+        }
+      }
+    `;
+
+    return { query, variables: { teamId: this.config.teamId, cursor } };
   }
 
   /**
@@ -438,14 +503,27 @@ export class LinearAdapter implements IAdapter {
    * push no matter how many items have tags. Label *groups* (`isGroup: true`) are
    * skipped — they are containers, not labels an issue can carry — and each
    * applicable label is indexed under its normalized name.
+   *
+   * On failure the memo is cleared before rethrowing, so a transient
+   * `getMetadata` error (network/rate-limit) does not poison the adapter: a later
+   * tagged item retries the seed instead of re-awaiting a permanently-rejected
+   * promise.
    */
   private ensureLabelIndex(): Promise<void> {
     if (this.labelIndexPromise === undefined) {
       this.labelIndexPromise = (async () => {
-        const metadata = await this.getMetadata();
-        for (const label of metadata.labels ?? []) {
-          if (label.isGroup) continue;
-          this.labelIdByName.set(normalizeLabelName(label.name), label.id);
+        try {
+          const metadata = await this.getMetadata();
+          for (const label of metadata.labels ?? []) {
+            if (label.isGroup) continue;
+            this.labelIdByName.set(normalizeLabelName(label.name), label.id);
+          }
+        } catch (err) {
+          // Clear the memo so a later tagged item can retry the seed after a
+          // transient failure instead of re-awaiting a permanently-rejected
+          // promise.
+          this.labelIndexPromise = undefined;
+          throw err;
         }
       })();
     }

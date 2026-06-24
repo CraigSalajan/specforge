@@ -207,6 +207,49 @@ describe('LinearAdapter — TER-16: getMetadata', () => {
     expect(error).toBeInstanceOf(LinearRequestError);
     expect((error as LinearRequestError).info.code).toBe('bad_request');
   });
+
+  it('paginates labels across pages and returns the merged label set', async () => {
+    // Page 1 reports a next page; the follow-up `LinearTeamLabelsPage` query
+    // (it carries a `cursor` variable) returns the tail. getMetadata must merge
+    // both pages and issue exactly two requests.
+    const request = vi.fn().mockImplementation((query: string) => {
+      if (query.includes('LinearTeamLabelsPage')) {
+        return Promise.resolve({
+          team: {
+            labels: {
+              nodes: [
+                { id: 'l3', name: 'tail-a', isGroup: false, parent: null },
+                { id: 'l4', name: 'tail-b', isGroup: false, parent: null },
+              ],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        });
+      }
+      return Promise.resolve({
+        team: {
+          id: 'team-1',
+          name: 'Eng',
+          states: { nodes: [] },
+          labels: {
+            nodes: [
+              { id: 'l1', name: 'head-a', isGroup: false, parent: null },
+              { id: 'l2', name: 'head-b', isGroup: false, parent: null },
+            ],
+            pageInfo: { hasNextPage: true, endCursor: 'cur-1' },
+          },
+        },
+      });
+    });
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    const metadata = await adapter.getMetadata();
+
+    expect(request).toHaveBeenCalledTimes(2);
+    // The follow-up request carried the prior page's endCursor.
+    expect(request.mock.calls.at(-1)?.[1]).toMatchObject({ cursor: 'cur-1' });
+    expect(metadata.labels?.map((l) => l.id)).toEqual(['l1', 'l2', 'l3', 'l4']);
+  });
 });
 
 /**
@@ -1116,5 +1159,110 @@ describe('LinearAdapter — TER-22: label syncing', () => {
     expect((error as LinearRequestError).info.message).toContain('team-1');
     expect((error as LinearRequestError).info.message).toContain('Unauthorized');
     expect((error as LinearRequestError).info.message).toMatch(/write access/i);
+  });
+
+  it('reuses a label that only exists on the second metadata page (no issueLabelCreate)', async () => {
+    // The seed must page through every label: a tag whose normalized name only
+    // matches a page-2 label is reused, not recreated, and its id lands on the
+    // issue. Page 1 reports a next page; the `LinearTeamLabelsPage` follow-up
+    // (it carries a `cursor` variable) returns the page-2 label.
+    let nextLabel = 0;
+    const request = vi.fn().mockImplementation((query: string) => {
+      if (query.includes('issueLabelCreate')) {
+        const id = `lbl-${++nextLabel}`;
+        return Promise.resolve({
+          issueLabelCreate: { success: true, issueLabel: { id, name: 'created' } },
+        });
+      }
+      if (query.includes('issueCreate')) {
+        return Promise.resolve({
+          issueCreate: {
+            success: true,
+            issue: { id: 'iss-1', url: 'https://linear.app/x/issue/iss-1' },
+          },
+        });
+      }
+      if (query.includes('LinearTeamLabelsPage')) {
+        return Promise.resolve({
+          team: {
+            labels: {
+              nodes: [{ id: 'lbl-page2', name: 'Page2', isGroup: false, parent: null }],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        });
+      }
+      // Page 1 of the metadata seed: no matching label, but more pages remain.
+      return Promise.resolve({
+        team: {
+          id: 'team-1',
+          name: 'Eng',
+          states: { nodes: [] },
+          labels: {
+            nodes: [{ id: 'lbl-page1', name: 'Page1', isGroup: false, parent: null }],
+            pageInfo: { hasNextPage: true, endCursor: 'cur-1' },
+          },
+        },
+      });
+    });
+    const item: CanonicalItem = {
+      localId: 'local-1',
+      level: 'story',
+      title: 'A story',
+      tags: ['page2'],
+    };
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    await adapter.createItem(item);
+
+    // The page-2 label was seen and reused — no label was created.
+    expect(callsFor(request, 'issueLabelCreate')).toHaveLength(0);
+    expect(inputFor(request, 'issueCreate')['labelIds']).toEqual(['lbl-page2']);
+  });
+
+  it('clears the memo so a later tagged item retries the seed after a transient failure', async () => {
+    // The first metadata/seed request rejects once (transient), so the first
+    // createItem fails. The memo must be cleared so a second createItem re-issues
+    // the seed and succeeds — proving the rejected seed promise was not cached.
+    let nextLabel = 0;
+    const request = vi.fn().mockImplementation((query: string) => {
+      if (query.includes('issueLabelCreate')) {
+        const id = `lbl-${++nextLabel}`;
+        return Promise.resolve({
+          issueLabelCreate: { success: true, issueLabel: { id, name: 'created' } },
+        });
+      }
+      if (query.includes('issueCreate')) {
+        return Promise.resolve({
+          issueCreate: {
+            success: true,
+            issue: { id: 'iss-1', url: 'https://linear.app/x/issue/iss-1' },
+          },
+        });
+      }
+      return Promise.resolve(metadataWithLabels([{ id: 'lbl-bug', name: 'bug' }]));
+    });
+    // Reject the FIRST request only (the initial seed), then behave normally.
+    request.mockRejectedValueOnce(
+      new LinearRequestError({ code: 'rate_limit', retryable: true, message: 'slow down' }),
+    );
+    const item: CanonicalItem = {
+      localId: 'local-1',
+      level: 'story',
+      title: 'A story',
+      tags: ['bug'],
+    };
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    // First attempt fails because the seed request rejected.
+    await expect(adapter.createItem(item)).rejects.toBeInstanceOf(LinearRequestError);
+
+    // Second attempt retries the seed (memo was cleared) and succeeds.
+    await adapter.createItem(item);
+
+    // The seed `labels` query was issued on BOTH attempts.
+    expect(callsFor(request, 'labels')).toHaveLength(2);
+    // The reused label id landed on the issue on the successful attempt.
+    expect(inputFor(request, 'issueCreate')['labelIds']).toEqual(['lbl-bug']);
   });
 });
