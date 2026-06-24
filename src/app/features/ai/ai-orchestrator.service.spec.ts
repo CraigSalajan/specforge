@@ -69,6 +69,15 @@ function assistantTextChunk(text: string): ChatChunk[] {
   ];
 }
 
+/** A round that streams reasoning first, then the answer text. */
+function reasoningThenTextChunk(reasoning: string, text: string): ChatChunk[] {
+  return [
+    { delta: '', done: false, reasoning },
+    { delta: text, done: false },
+    { delta: '', done: true },
+  ];
+}
+
 function toolCallChunk(): ChatChunk[] {
   return [
     {
@@ -98,7 +107,7 @@ describe('AiOrchestratorService.runWithTools', () => {
   let orchestrator: AiOrchestratorService;
   let messagesSig: ReturnType<typeof signal<UiChatMessage[]>>;
   let proposeSpy: MockInstance | undefined;
-  let persistCalls: Array<{ role: string; content: string }>;
+  let persistCalls: Array<{ role: string; content: string; reasoning: string | null }>;
   let lastTurnError: AiErrorInfo | null;
 
   function setup(): void {
@@ -129,8 +138,13 @@ describe('AiOrchestratorService.runWithTools', () => {
       setTurnError: (e: AiErrorInfo | null) => {
         lastTurnError = e;
       },
-      persistMessage: async (_id: number, role: string, content: string) => {
-        persistCalls.push({ role, content });
+      persistMessage: async (
+        _id: number,
+        role: string,
+        content: string,
+        reasoning?: string | null,
+      ) => {
+        persistCalls.push({ role, content, reasoning: reasoning ?? null });
         return null;
       },
       refreshSessions: async () => undefined,
@@ -325,7 +339,7 @@ describe('AiOrchestratorService.runWithTools', () => {
     // normal assistant message (no DB migration for failed turns).
     expect(orchestrator.retryAvailable()).toBe(true);
     expect(persistCalls.filter((c) => c.role === 'assistant')).toEqual([
-      { role: 'assistant', content: 'Partial answer' },
+      { role: 'assistant', content: 'Partial answer', reasoning: null },
     ]);
   });
 
@@ -345,6 +359,29 @@ describe('AiOrchestratorService.runWithTools', () => {
 
     expect(messagesSig()[messagesSig().length - 1].error?.code).toBe('network');
     expect(persistCalls.filter((c) => c.role === 'assistant')).toEqual([]);
+  });
+
+  it('persists a reasoning-only failed turn so streamed thinking survives reload', async () => {
+    // The model streamed reasoning but failed before producing any answer text.
+    provider.setRounds([
+      {
+        chunks: [{ delta: '', done: false, reasoning: 'Half a thought…' }],
+        thenThrow: new AiHarnessError({
+          code: 'network',
+          retryable: true,
+          message: 'Could not reach the provider.',
+        }),
+      },
+    ]);
+
+    await runTools();
+
+    expect(messagesSig()[messagesSig().length - 1].error?.code).toBe('network');
+    // Empty content but non-empty reasoning still persists the row (and its
+    // reasoning) rather than dropping the streamed thinking.
+    expect(persistCalls.filter((c) => c.role === 'assistant')).toEqual([
+      { role: 'assistant', content: '', reasoning: 'Half a thought…' },
+    ]);
   });
 
   it('retryLastFailed re-runs without re-appending or re-persisting the user message, reusing the failed bubble', async () => {
@@ -383,7 +420,7 @@ describe('AiOrchestratorService.runWithTools', () => {
     // The user message was persisted exactly once; the recovery reply once.
     expect(persistCalls.filter((c) => c.role === 'user').length).toBe(1);
     expect(persistCalls.filter((c) => c.role === 'assistant')).toEqual([
-      { role: 'assistant', content: 'Recovered.' },
+      { role: 'assistant', content: 'Recovered.', reasoning: null },
     ]);
     expect(orchestrator.retryAvailable()).toBe(false);
   });
@@ -407,5 +444,185 @@ describe('AiOrchestratorService.runWithTools', () => {
     expect(lastTurnError).toBeNull();
     expect(orchestrator.retryAvailable()).toBe(false);
     expect(persistCalls.filter((c) => c.role === 'assistant')).toEqual([]);
+  });
+
+  it('streams reasoning into the assistant bubble and persists it with the reply', async () => {
+    provider.setRounds([reasoningThenTextChunk('Thinking hard…', 'Here is your answer.')]);
+
+    await runTools();
+
+    // The reasoning reached the live assistant bubble via updateLastAssistant.
+    const last = messagesSig()[messagesSig().length - 1];
+    expect(last.role).toBe('assistant');
+    expect(last.reasoning).toBe('Thinking hard…');
+    expect(last.content).toBe('Here is your answer.');
+
+    // The persisted assistant call carries the accumulated reasoning.
+    const lastAssistant = persistCalls.filter((c) => c.role === 'assistant').pop();
+    expect(lastAssistant).toEqual({
+      role: 'assistant',
+      content: 'Here is your answer.',
+      reasoning: 'Thinking hard…',
+    });
+  });
+});
+
+describe('AiOrchestratorService.run (non-tool streaming path)', () => {
+  let provider: FakeChatProvider;
+  let orchestrator: AiOrchestratorService;
+  let messagesSig: ReturnType<typeof signal<UiChatMessage[]>>;
+  let persistCalls: Array<{ role: string; content: string; reasoning: string | null }>;
+
+  function setup(): void {
+    provider = new FakeChatProvider();
+    messagesSig = signal<UiChatMessage[]>([]);
+    persistCalls = [];
+
+    const chatStub = {
+      activeSession: () => ({ id: 7 }),
+      contextScope: () => EMPTY_CONTEXT_SCOPE,
+      messages: messagesSig.asReadonly(),
+      streaming: () => false,
+      appendLocal: (m: UiChatMessage) => messagesSig.update((cur) => [...cur, m]),
+      updateLastAssistant: (patch: Partial<UiChatMessage>) =>
+        messagesSig.update((cur) => {
+          if (cur.length === 0) return cur;
+          const last = cur[cur.length - 1];
+          if (last.role !== 'assistant') return cur;
+          return [...cur.slice(0, -1), { ...last, ...patch }];
+        }),
+      setStreaming: () => undefined,
+      setError: () => undefined,
+      setTurnError: () => undefined,
+      persistMessage: async (
+        _id: number,
+        role: string,
+        content: string,
+        reasoning?: string | null,
+      ) => {
+        persistCalls.push({ role, content, reasoning: reasoning ?? null });
+        return null;
+      },
+      refreshSessions: async () => undefined,
+    } as unknown as ChatService;
+
+    const providerStub = {
+      isConfigured: () => true,
+      chat: provider,
+    } as unknown as AiProviderService;
+
+    TestBed.configureTestingModule({
+      providers: [
+        AiOrchestratorService,
+        ToolRegistryService,
+        { provide: IpcService, useValue: {} },
+        {
+          provide: SettingsService,
+          useValue: {
+            aiMaxContextChars: () => 8000,
+            aiTopK: () => 5,
+            aiToolsEnabled: () => true,
+            disabledTools: () => [],
+          },
+        },
+        {
+          provide: VaultService,
+          useValue: {
+            vaultPath: () => '/vault',
+            activeFilePath: () => null,
+          },
+        },
+        { provide: AiProviderService, useValue: providerStub },
+        { provide: RetrievalService, useValue: { retrieve: async () => [] } },
+        { provide: ChatService, useValue: chatStub },
+        { provide: FileChangeService, useValue: {} },
+        {
+          provide: SkillRegistryService,
+          useValue: {
+            enabled: () => [],
+            find: () => undefined,
+          } as unknown as SkillRegistryService,
+        },
+      ],
+    });
+
+    orchestrator = TestBed.inject(AiOrchestratorService);
+  }
+
+  /** Invokes the private streaming `run()` for an Ask-mode turn (no proposal). */
+  function runStream(): Promise<void> {
+    return (
+      orchestrator as unknown as {
+        run(opts: {
+          userContent: string;
+          scope: typeof EMPTY_CONTEXT_SCOPE;
+          selection: null;
+          additionalInstructions: null;
+          expectsFileProposal: boolean;
+          forcedEditRelPath: null;
+          defaultFolder: null;
+          defaultTitle: string;
+        }): Promise<void>;
+      }
+    ).run({
+      userContent: 'Explain the plan',
+      scope: EMPTY_CONTEXT_SCOPE,
+      selection: null,
+      additionalInstructions: null,
+      expectsFileProposal: false,
+      forcedEditRelPath: null,
+      defaultFolder: null,
+      defaultTitle: 'Draft',
+    });
+  }
+
+  beforeEach(() => {
+    setup();
+  });
+
+  it('peels inline </think> reasoning out of streamed content: persists the clean answer and the pre-</think> reasoning', async () => {
+    // Closing-tag-only (the real-model format): reasoning, then a CLOSING
+    // </think> with no opening tag, then the answer.
+    provider.setRounds([
+      [
+        { delta: 'Let me think about this. ', done: false },
+        { delta: 'More thought.', done: false },
+        { delta: '</think>', done: false },
+        { delta: 'The actual answer.', done: false },
+        { delta: '', done: true },
+      ],
+    ]);
+
+    await runStream();
+
+    // The live bubble shows the CLEAN answer (no tag, no reasoning text).
+    const last = messagesSig()[messagesSig().length - 1];
+    expect(last.role).toBe('assistant');
+    expect(last.content).toBe('The actual answer.');
+    expect(last.content).not.toContain('</think>');
+    expect(last.reasoning).toContain('Let me think about this.');
+
+    // Persistence stores the clean content and the merged (pre-</think>) reasoning.
+    const persisted = persistCalls.filter((c) => c.role === 'assistant').pop();
+    expect(persisted?.content).toBe('The actual answer.');
+    expect(persisted?.content).not.toContain('</think>');
+    expect(persisted?.reasoning).toContain('Let me think about this.');
+  });
+
+  it('streams a tag-less answer unchanged (no reasoning split)', async () => {
+    provider.setRounds([
+      [
+        { delta: 'Plain ', done: false },
+        { delta: 'answer.', done: false },
+        { delta: '', done: true },
+      ],
+    ]);
+
+    await runStream();
+
+    const last = messagesSig()[messagesSig().length - 1];
+    expect(last.content).toBe('Plain answer.');
+    const persisted = persistCalls.filter((c) => c.role === 'assistant').pop();
+    expect(persisted).toEqual({ role: 'assistant', content: 'Plain answer.', reasoning: null });
   });
 });

@@ -1,0 +1,15 @@
+// Intent: exercise the MULTI-ROUND agentic loop. Asking for two distinct documents
+// (a PRD and an ADR) for one tiny feature should produce at least two write_file
+// calls, typically across multiple tool rounds. We assert write_file was called
+// and that it happened at least twice, with no run error. Exact paths/titles are
+// intentionally not asserted (subset match is value-equality, not prefix), keeping
+// the case robust to model variation while still requiring two file writes.
+(
+  name: "creates-two-docs",
+  instruction: "For a feature that lets users export their notes to Markdown, create TWO separate documents and save each as its own file: first a PRD under prd/, then an ADR under adr/ recording the decision to export as Markdown.",
+  expect: [
+    CalledTool(tool: "write_file"),
+    ToolCallCount(tool: Some("write_file"), min: Some(2)),
+    NoError,
+  ],
+)

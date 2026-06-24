@@ -1,0 +1,10 @@
+// Covers FinalTextMatches (regex).
+(
+  name: "answers-yes-or-no",
+  instruction: "Is a PRD a planning document? Answer with a single word: yes or no.",
+  expect: [
+    NoToolCalls,
+    FinalTextMatches(regex: "(?i)^yes$"),
+    NoError,
+  ],
+)

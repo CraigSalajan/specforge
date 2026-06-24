@@ -17,6 +17,11 @@ export interface UiChatMessage {
   id: number | null;
   role: ChatRole;
   content: string;
+  /**
+   * Reasoning/"thinking" text accumulated for an assistant turn, rendered in a
+   * collapsed disclosure. Undefined when the model emitted none.
+   */
+  reasoning?: string;
   /** True while the assistant is mid-stream. */
   streaming: boolean;
   /** Structured error attached to a failed assistant turn. */
@@ -193,9 +198,10 @@ export class ChatService {
     sessionId: number,
     role: ChatRole,
     content: string,
+    reasoning?: string | null,
   ): Promise<PersistedChatMessage | null> {
     try {
-      return await this.ipc.chatsAppendMessage({ sessionId, role, content });
+      return await this.ipc.chatsAppendMessage({ sessionId, role, content, reasoning });
     } catch (err) {
       this._error.set(this.toMessage(err));
       return null;
@@ -234,6 +240,7 @@ function toUiMessage(p: PersistedChatMessage): UiChatMessage {
     id: p.id,
     role: p.role,
     content: p.content,
+    reasoning: p.reasoning ?? undefined,
     streaming: false,
     error: null,
     createdAt: p.createdAt,

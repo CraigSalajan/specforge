@@ -123,6 +123,7 @@ interface MessageDto {
   sessionId: number;
   role: string;
   content: string;
+  reasoning: string | null;
   createdAt: number;
 }
 
@@ -144,6 +145,7 @@ function toMessageDto(r: ChatMessageRow): MessageDto {
     sessionId: r.session_id,
     role: r.role,
     content: r.content,
+    reasoning: r.reasoning ?? null,
     createdAt: r.created_at,
   };
 }
@@ -184,17 +186,22 @@ export function registerChatHandlers(): void {
     Channels.AppendMessage,
     async (
       _e,
-      input: { sessionId: number; role: string; content: string },
+      input: { sessionId: number; role: string; content: string; reasoning?: string | null },
     ): Promise<MessageDto> => {
       if (!input || typeof input !== 'object') throw new Error('Invalid payload');
       const sessionId = assertNumber(input.sessionId, 'sessionId');
       const role = assertString(input.role, 'role', 32);
       if (!ALLOWED_ROLES.has(role)) throw new Error('Invalid role');
       if (typeof input.content !== 'string') throw new Error('Invalid content');
+      if (input.reasoning != null && typeof input.reasoning !== 'string') {
+        throw new Error('Invalid reasoning');
+      }
       // Verify session exists to give a useful error instead of a FK violation.
       const session = getSession(sessionId);
       if (!session) throw new Error('Session not found');
-      return toMessageDto(appendMessage({ sessionId, role, content: input.content }));
+      return toMessageDto(
+        appendMessage({ sessionId, role, content: input.content, reasoning: input.reasoning }),
+      );
     },
   );
 

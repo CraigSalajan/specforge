@@ -1,0 +1,10 @@
+// Covers list_files + ToolCallCount with both bounds.
+(
+  name: "lists-vault-files",
+  instruction: "List the markdown files that currently exist in the vault.",
+  expect: [
+    CalledTool(tool: "list_files"),
+    ToolCallCount(tool: Some("list_files"), min: Some(1), max: Some(1)),
+    NoError,
+  ],
+)

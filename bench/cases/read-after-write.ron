@@ -1,0 +1,12 @@
+// Covers read_file + CalledToolsInOrder. Self-contained: the file is created
+// first (auto-accepted to the vault) so the read-back succeeds.
+(
+  name: "reads-back-created-file",
+  instruction: "Create a markdown file at the vault path prd/spec.md containing a one-line summary of a user login feature, then read it back to confirm it was saved.",
+  expect: [
+    CalledTool(tool: "write_file"),
+    CalledTool(tool: "read_file"),
+    CalledToolsInOrder(tools: ["write_file", "read_file"]),
+    NoError,
+  ],
+)

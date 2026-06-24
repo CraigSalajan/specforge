@@ -121,22 +121,35 @@ interface ListModelsRequest {
 
 interface ChatCompletionStreamPayload {
   choices?: Array<{
-    delta?: { content?: string; tool_calls?: StreamToolCallDelta[] };
+    // Some models stream their chain-of-thought as a sibling of `content`,
+    // under either `reasoning_content` (vLLM/DeepSeek-style) or `reasoning`
+    // (OpenRouter-style). We capture both and keep them separate from the answer.
+    delta?: { content?: string; reasoning_content?: string; reasoning?: string; tool_calls?: StreamToolCallDelta[] };
     finish_reason?: string | null;
   }>;
+  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | null;
 }
 
 interface ChatCompletionResponse {
   choices?: Array<{
-    message?: { content?: string | null; tool_calls?: ToolCall[] };
+    message?: {
+      content?: string | null;
+      reasoning_content?: string | null;
+      reasoning?: string | null;
+      tool_calls?: ToolCall[];
+    };
     finish_reason?: string | null;
   }>;
+  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | null;
 }
 
 interface ChatCompleteResult {
   content: string | null;
+  /** Reasoning/thinking text, kept separate from `content` (may be absent). */
+  reasoning?: string | null;
   toolCalls?: ToolCall[];
   finishReason?: string;
+  usage?: TokenUsage;
 }
 
 /**
@@ -296,6 +309,23 @@ function assertTexts(value: unknown): string[] {
   return value as string[];
 }
 
+interface TokenUsage {
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+}
+
+function mapUsage(
+  u: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | undefined | null,
+): TokenUsage | undefined {
+  if (!u) return undefined;
+  const out: TokenUsage = {};
+  if (typeof u.prompt_tokens === 'number') out.promptTokens = u.prompt_tokens;
+  if (typeof u.completion_tokens === 'number') out.completionTokens = u.completion_tokens;
+  if (typeof u.total_tokens === 'number') out.totalTokens = u.total_tokens;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 function buildChatBody(
   model: string,
   messages: ChatMessage[],
@@ -310,6 +340,10 @@ function buildChatBody(
     body['tools'] = options.tools;
     body['tool_choice'] = options.tool_choice ?? 'auto';
   }
+  // Ask the provider to emit a trailing `usage` chunk on streamed responses
+  // (OpenAI/vLLM). Harmless on servers that ignore unknown options; only valid
+  // when streaming. Non-streaming completions already return `usage` by default.
+  if (stream) body['stream_options'] = { include_usage: true };
   return body;
 }
 
@@ -360,6 +394,7 @@ async function handleChatStream(
   // events; everything from here is event-driven.
   void (async (): Promise<void> => {
     let finishReason: string | undefined;
+    let usage: TokenUsage | undefined;
     // Accumulates streamed tool_call fragments by their `index`. OpenAI emits
     // the `id`/`function.name` once and then streams `function.arguments` in
     // pieces, all keyed by the same index.
@@ -439,20 +474,41 @@ async function handleChatStream(
               const json = JSON.parse(payload) as ChatCompletionStreamPayload;
               const choice = json.choices?.[0];
               const delta = choice?.delta?.content ?? '';
+              // Reasoning is a sibling channel, not answer content. It bypasses
+              // the Gemma contentFilter entirely (it carries no tool-call markup
+              // and must never be scrubbed) and is forwarded on its own field.
+              const reasoning = choice?.delta?.reasoning_content ?? choice?.delta?.reasoning ?? '';
               const fr = choice?.finish_reason ?? null;
               const toolDeltas = choice?.delta?.tool_calls;
               if (fr) finishReason = fr;
+              // The trailing include_usage chunk has `choices: []` and a populated
+              // `usage`; never clobber a real value with null.
+              const parsedUsage = mapUsage(json.usage);
+              if (parsedUsage) usage = parsedUsage;
               accumulateToolCallDeltas(toolAccumulator, toolDeltas);
-              if (!streamStarted && (delta || fr || (toolDeltas?.length ?? 0) > 0)) {
+              if (!streamStarted && (delta || reasoning || fr || (toolDeltas?.length ?? 0) > 0)) {
                 // Generation has started: hand off from the first-token
                 // watchdog to the idle bound. When timeouts are disabled
                 // (idleTimeoutMs 0) nothing was armed and nothing arms now.
+                // Reasoning counts as "started" so a model that thinks before it
+                // answers does not trip the first-token watchdog.
                 streamStarted = true;
                 if (idleTimeoutMs > 0) watchdog.arm('idle', idleTimeoutMs);
               }
-              if (delta) {
-                const { emit } = contentFilter.push(delta);
-                if (emit) safeSend(sender, Channels.StreamChunk, { streamId, delta: emit });
+              // Emit a single chunk per line carrying whichever of content /
+              // reasoning is present this line. Content runs through the Gemma
+              // contentFilter (which strips text-format tool-call markup); the
+              // NATIVE sibling reasoning channel is forwarded untouched. Inline
+              // `<think>` parsing is NOT done here — it is handled once, in the
+              // shared agentic loop / orchestrator, by `splitThinkTags`.
+              let emitText = '';
+              if (delta) emitText = contentFilter.push(delta).emit;
+              if (emitText || reasoning) {
+                safeSend(sender, Channels.StreamChunk, {
+                  streamId,
+                  delta: emitText,
+                  reasoning: reasoning || undefined,
+                });
               }
             } catch {
               // Skip malformed SSE payloads rather than crashing the stream.
@@ -467,12 +523,18 @@ async function handleChatStream(
         }
       }
 
-      const { emit: tailEmit, toolCalls: gemmaCalls } = contentFilter.flush();
-      if (tailEmit) safeSend(sender, Channels.StreamChunk, { streamId, delta: tailEmit });
+      // Tail flush: drain the Gemma content filter to recover any held tail
+      // text plus tool calls it parsed out of the content stream.
+      const cf = contentFilter.flush();
+      const tailContent = cf.emit;
+      const gemmaCalls = cf.toolCalls;
+      if (tailContent) {
+        safeSend(sender, Channels.StreamChunk, { streamId, delta: tailContent });
+      }
       const merged = [...(assembleToolCalls(toolAccumulator) ?? []), ...gemmaCalls];
       const toolCalls = merged.length > 0 ? merged : undefined;
 
-      safeSend(sender, Channels.StreamDone, { streamId, finishReason, toolCalls });
+      safeSend(sender, Channels.StreamDone, { streamId, finishReason, toolCalls, usage });
     } catch (err) {
       const fired = watchdog.fired();
       if (err instanceof AiRequestError) {
@@ -566,6 +628,11 @@ async function handleChatComplete(
 
     const json = (await res.json()) as ChatCompletionResponse;
     const choice = json.choices?.[0];
+    // Reasoning is read ONLY from the native sibling channel here
+    // (`reasoning_content` / `reasoning`). Inline `<think>…</think>` parsing is
+    // intentionally NOT done in the IPC layer — it is applied once, downstream,
+    // by the shared loop / orchestrator via `splitThinkTags`.
+    const reasoning = (choice?.message?.reasoning_content ?? choice?.message?.reasoning) || undefined;
     const { cleanedText, toolCalls: gemmaCalls } = extractGemmaToolCalls(
       choice?.message?.content ?? '',
     );
@@ -574,8 +641,10 @@ async function handleChatComplete(
       ok: true,
       data: {
         content: cleanedText,
+        reasoning,
         toolCalls: merged.length > 0 ? merged : undefined,
         finishReason: choice?.finish_reason ?? undefined,
+        usage: mapUsage(json.usage),
       },
     };
   } catch (err) {

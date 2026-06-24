@@ -18,6 +18,9 @@ import {
 } from './prompts/system-context';
 import { findCommand, type PlanningCommandId } from './prompts';
 import type { ChatMessage, ToolCall } from './providers/chat.provider';
+import { runAgenticLoop } from './agentic-loop';
+// THE single inline-`<think>` parser, shared with the loop and the IPC layer.
+import { splitThinkTags } from '../../../../electron/ipc/think-tag-parser';
 import { absToRel, canonicalRelPath, relToAbs, sanitizeFilename } from './providers/path-utils';
 import { FileChangeService } from './file-change.service';
 import { ToolRegistryService } from './tools/tool-registry.service';
@@ -378,6 +381,9 @@ export class AiOrchestratorService {
     // Mirrors the visible assistant content so the catch block can persist
     // whatever partial text exists when the turn fails mid-stream.
     let liveText = '';
+    // Mirrors the accumulated reasoning so a failed turn can persist whatever
+    // thinking text streamed in before the failure.
+    let liveReasoning = '';
 
     try {
       // Base conversation: system prompt (with tool guidance) + persisted turns.
@@ -396,77 +402,32 @@ export class AiOrchestratorService {
       const toolSchemas = this.tools
         .schemas()
         .filter((schema) => !disabledTools.has(schema.function.name));
-      let finalText = '';
-      // Flips false the first time a round ends without tool calls; if it is
-      // still true after the loop, the round cap cut the turn short.
-      let exhaustedToolRounds = true;
 
-      for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-        let roundText = '';
-        let toolCalls: ToolCall[] | undefined;
-
-        for await (const chunk of this.providers.chat.chat(convo, {
-          signal: controller.signal,
-          tools: toolSchemas,
-          toolChoice: 'auto',
-        })) {
-          if (chunk.delta) {
-            roundText += chunk.delta;
-            // Show streamed text live; on rounds after a tool call the bubble
-            // continues to accumulate into the same assistant message.
-            liveText = finalText + roundText;
-            this.chat.updateLastAssistant({ content: liveText });
-          }
-          if (chunk.done) {
-            toolCalls = chunk.toolCalls;
-            break;
-          }
-        }
-
-        finalText += roundText;
-        liveText = finalText;
-
-        // No tool calls: this is the final natural-language reply.
-        if (!toolCalls || toolCalls.length === 0) {
-          exhaustedToolRounds = false;
-          break;
-        }
-
-        // Record the assistant's tool-call message (content may be null).
-        convo.push({
-          role: 'assistant',
-          content: roundText.length > 0 ? roundText : null,
-          tool_calls: toolCalls,
-        });
-
-        // Execute each call in order and append exactly one tool message per id.
-        for (const call of toolCalls) {
-          // Defensive: OpenAI always sends a non-empty `id`, but a stray delta
-          // (or a non-conformant proxy) could yield a tool call without one.
-          // Synthesize a stable id so the follow-up request never emits a
-          // `tool_call_id:''` that the model/endpoint would reject, and so the
-          // assistant(tool_calls) → tool ordering contract still holds.
-          if (!call.id) {
-            const synthId = `call_${round}_${toolCalls.indexOf(call)}`;
-            const repaired: ToolCall = { ...call, id: synthId };
-            // Point the assistant message's matching tool_call at the synth id
-            // too, so both sides reference the same identifier.
-            call.id = synthId;
-            const toolMsg = await this.executeToolCall(repaired, {
-              sessionId: session.id,
-              vaultPath,
-            });
-            convo.push(toolMsg);
-            continue;
-          }
-          const toolMsg = await this.executeToolCall(call, {
-            sessionId: session.id,
-            vaultPath,
-          });
-          convo.push(toolMsg);
-        }
-        // Loop continues: re-invoke the model with the tool results appended.
-      }
+      // The loop algorithm itself lives in the framework-free runAgenticLoop so
+      // the headless benchmark harness runs the exact same code path. The app
+      // owns the streaming-text mirror (liveText, for the catch block + bubble)
+      // and the modal-gated tool execution via executeToolCall.
+      const loopResult = await runAgenticLoop(convo, {
+        chat: (messages, callOpts) => this.providers.chat.chat(messages, callOpts),
+        toolSchemas,
+        signal: controller.signal,
+        executeToolCall: (call) =>
+          this.executeToolCall(call, { sessionId: session.id, vaultPath }),
+        onText: (text) => {
+          liveText = text;
+          this.chat.updateLastAssistant({ content: text });
+        },
+        onReasoning: (text) => {
+          liveReasoning = text;
+          this.chat.updateLastAssistant({ reasoning: text });
+        },
+        maxRounds: MAX_TOOL_ROUNDS,
+      });
+      const finalText = loopResult.finalText;
+      const finalReasoning = loopResult.finalReasoning;
+      const exhaustedToolRounds = loopResult.exhaustedToolRounds;
+      liveText = finalText;
+      liveReasoning = finalReasoning;
 
       if (exhaustedToolRounds) {
         // The model was still requesting tools when the cap hit. Surface an
@@ -477,7 +438,7 @@ export class AiOrchestratorService {
           message: `Stopped after ${MAX_TOOL_ROUNDS} tool rounds without a final answer.`,
         };
         this.chat.updateLastAssistant({ content: finalText, streaming: false });
-        await this.failTurn(notice, session.id, finalText, {
+        await this.failTurn(notice, session.id, finalText, finalReasoning, {
           kind: 'tools',
           sessionId: session.id,
           userContent: opts.userContent,
@@ -496,6 +457,7 @@ export class AiOrchestratorService {
           session.id,
           'assistant',
           displayContent,
+          finalReasoning || null,
         );
         if (persisted) {
           this.chat.updateLastAssistant({ id: persisted.id });
@@ -507,7 +469,7 @@ export class AiOrchestratorService {
         // User Stop: keep the partial text, no error surface.
         this.chat.updateLastAssistant({ error: null, streaming: false });
       } else {
-        await this.failTurn(toAiErrorInfo(err), session.id, liveText, {
+        await this.failTurn(toAiErrorInfo(err), session.id, liveText, liveReasoning, {
           kind: 'tools',
           sessionId: session.id,
           userContent: opts.userContent,
@@ -598,6 +560,7 @@ export class AiOrchestratorService {
       id: null,
       role: 'assistant',
       content: '',
+      reasoning: undefined,
       streaming: true,
       error: null,
       citations: [],
@@ -614,6 +577,7 @@ export class AiOrchestratorService {
         this.chat.updateLastAssistant({
           id: null,
           content: '',
+          reasoning: undefined,
           streaming: true,
           error: null,
           citations: [],
@@ -647,13 +611,17 @@ export class AiOrchestratorService {
    *
    * Persistence policy: `chat_messages` has no error column, so the partial
    * content is persisted as a plain assistant message — this keeps a reload
-   * from showing an orphaned user question. Empty partials are skipped rather
-   * than writing a blank row.
+   * from showing an orphaned user question. A turn is persisted when EITHER
+   * partial content OR partial reasoning streamed in, so a turn that produced
+   * only reasoning (native, or a cleaned `<think>` block) before failing keeps
+   * that thinking on reload instead of dropping the row. Turns with neither are
+   * skipped rather than writing a blank row.
    */
   private async failTurn(
     info: AiErrorInfo,
     sessionId: number,
     partialContent: string,
+    partialReasoning: string,
     failedTurn: FailedTurn,
   ): Promise<void> {
     this.chat.updateLastAssistant({ error: info, streaming: false });
@@ -661,8 +629,13 @@ export class AiOrchestratorService {
     this.lastFailedTurn = failedTurn;
     this._retryAvailable.set(true);
 
-    if (partialContent.trim().length > 0) {
-      const persisted = await this.chat.persistMessage(sessionId, 'assistant', partialContent);
+    if (partialContent.trim().length > 0 || partialReasoning.trim().length > 0) {
+      const persisted = await this.chat.persistMessage(
+        sessionId,
+        'assistant',
+        partialContent,
+        partialReasoning || null,
+      );
       if (persisted) {
         this.chat.updateLastAssistant({ id: persisted.id });
       }
@@ -689,8 +662,14 @@ export class AiOrchestratorService {
     this.abortController = controller;
 
     // Declared outside the try so the catch block can persist whatever
-    // partial text streamed in before the failure.
+    // partial text / reasoning streamed in before the failure. `accumulated`
+    // is the CLEAN content (inline `<think>` already stripped); `rawContent`
+    // is the unsplit buffer the split runs over; `accumulatedReasoning` is the
+    // MERGED reasoning (native sibling channel + inline `<think>`).
     let accumulated = '';
+    let rawContent = '';
+    let nativeReasoning = '';
+    let accumulatedReasoning = '';
 
     try {
       const messages = await this.composeMessages({
@@ -706,14 +685,44 @@ export class AiOrchestratorService {
           jsonObject: true,
           signal: controller.signal,
         });
-        accumulated = result.content ?? '';
+        rawContent = result.content ?? '';
+        nativeReasoning = result.reasoning ?? '';
+        // Split inline `<think>` out so parseProposal sees CLEAN JSON: a leading
+        // reasoning block would otherwise break the proposal's JSON parsing.
+        const split = mightContainThink(rawContent)
+          ? splitThinkTags(rawContent)
+          : { reasoning: '', content: rawContent };
+        accumulated = split.content;
+        accumulatedReasoning = mergeReasoning('', nativeReasoning, split.reasoning);
+        if (accumulatedReasoning) {
+          this.chat.updateLastAssistant({ reasoning: accumulatedReasoning });
+        }
       } else {
         for await (const chunk of this.providers.chat.chat(messages, {
           signal: controller.signal,
         })) {
           if (chunk.delta) {
-            accumulated += chunk.delta;
-            this.chat.updateLastAssistant({ content: accumulated });
+            rawContent += chunk.delta;
+            // ONE parser: peel inline `<think>` reasoning out of the content so
+            // the live bubble shows clean text and the think block lands on the
+            // reasoning channel. Guarded so the common no-tags case is untouched.
+            const split = mightContainThink(rawContent)
+              ? splitThinkTags(rawContent)
+              : { reasoning: '', content: rawContent };
+            accumulated = split.content;
+            accumulatedReasoning = mergeReasoning('', nativeReasoning, split.reasoning);
+            this.chat.updateLastAssistant({
+              content: accumulated,
+              reasoning: accumulatedReasoning || undefined,
+            });
+          }
+          if (chunk.reasoning) {
+            nativeReasoning += chunk.reasoning;
+            const split = mightContainThink(rawContent)
+              ? splitThinkTags(rawContent)
+              : { reasoning: '', content: rawContent };
+            accumulatedReasoning = mergeReasoning('', nativeReasoning, split.reasoning);
+            this.chat.updateLastAssistant({ reasoning: accumulatedReasoning });
           }
           if (chunk.done) break;
         }
@@ -750,6 +759,7 @@ export class AiOrchestratorService {
         session.id,
         'assistant',
         displayContent,
+        accumulatedReasoning || null,
       );
       if (persisted) {
         this.chat.updateLastAssistant({ id: persisted.id });
@@ -763,7 +773,7 @@ export class AiOrchestratorService {
       } else {
         // Proposal turns are all-or-nothing (no streamed partial), so the
         // partial passed here is empty and nothing gets persisted for them.
-        await this.failTurn(toAiErrorInfo(err), session.id, accumulated, {
+        await this.failTurn(toAiErrorInfo(err), session.id, accumulated, accumulatedReasoning, {
           kind: 'run',
           sessionId: session.id,
           opts: {
@@ -994,4 +1004,25 @@ function slugify(input: string): string {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 80) || 'untitled';
+}
+
+/**
+ * Joins the NATIVE sibling reasoning with any INLINE `<think>` reasoning peeled
+ * out by `splitThinkTags`. Native is concatenated onto `base` without a
+ * separator; inline, when present, is appended on a new line. Mirrors the
+ * helper in the shared agentic loop so both paths fold reasoning identically.
+ */
+function mergeReasoning(base: string, native: string, inline: string): string {
+  let out = base + native;
+  if (inline) out = out.length > 0 ? `${out}\n${inline}` : inline;
+  return out;
+}
+
+/**
+ * Cheap guard so `splitThinkTags` only scans the accumulated text when it could
+ * actually carry an inline think block — keyed off a closing `</think>` or an
+ * explicit leading `<think>`, matching the loop's guard.
+ */
+function mightContainThink(raw: string): boolean {
+  return raw.includes('</think>') || raw.replace(/^\s+/, '').startsWith('<think>');
 }
