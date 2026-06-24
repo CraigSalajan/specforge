@@ -250,6 +250,74 @@ describe('LinearAdapter — TER-16: getMetadata', () => {
     expect(request.mock.calls.at(-1)?.[1]).toMatchObject({ cursor: 'cur-1' });
     expect(metadata.labels?.map((l) => l.id)).toEqual(['l1', 'l2', 'l3', 'l4']);
   });
+
+  it('rejects when a labels page reports another page without a cursor', async () => {
+    // A page that advertises `hasNextPage: true` but omits an `endCursor` is a
+    // hard error: silently stopping would return a partial seed that
+    // `ensureLabelIndex` treats as complete. The throw happens before any
+    // follow-up labels-page request is issued.
+    const request = vi.fn().mockResolvedValue({
+      team: {
+        id: 'team-1',
+        name: 'Eng',
+        states: { nodes: [] },
+        labels: {
+          nodes: [{ id: 'l1', name: 'head-a', isGroup: false, parent: null }],
+          pageInfo: { hasNextPage: true, endCursor: null },
+        },
+      },
+    });
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    const error = await adapter.getMetadata().then(
+      () => {
+        throw new Error('expected getMetadata to reject');
+      },
+      (err: unknown) => err,
+    );
+
+    expect(error).toBeInstanceOf(LinearRequestError);
+    expect((error as LinearRequestError).info.code).toBe('bad_request');
+    expect((error as LinearRequestError).info.retryable).toBe(false);
+    // The throw fires before any follow-up labels-page request is issued.
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(lastQuery(request)).not.toContain('LinearTeamLabelsPage');
+  });
+
+  it('rejects when a follow-up labels page returns a null team', async () => {
+    // Page 1 advertises another page with a proper cursor, but the follow-up
+    // `LinearTeamLabelsPage` resolves a null team: returning the partial seed
+    // would let `createLabel` recreate labels from the unseen page, so this is
+    // a non-retryable hard error.
+    const request = vi.fn().mockImplementation((query: string) => {
+      if (query.includes('LinearTeamLabelsPage')) {
+        return Promise.resolve({ team: null });
+      }
+      return Promise.resolve({
+        team: {
+          id: 'team-1',
+          name: 'Eng',
+          states: { nodes: [] },
+          labels: {
+            nodes: [{ id: 'l1', name: 'head-a', isGroup: false, parent: null }],
+            pageInfo: { hasNextPage: true, endCursor: 'cur-1' },
+          },
+        },
+      });
+    });
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    const error = await adapter.getMetadata().then(
+      () => {
+        throw new Error('expected getMetadata to reject');
+      },
+      (err: unknown) => err,
+    );
+
+    expect(error).toBeInstanceOf(LinearRequestError);
+    expect((error as LinearRequestError).info.code).toBe('bad_request');
+    expect((error as LinearRequestError).info.retryable).toBe(false);
+  });
 });
 
 /**

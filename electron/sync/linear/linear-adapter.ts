@@ -260,16 +260,33 @@ export class LinearAdapter implements IAdapter {
     // >250 labels is fully seen (otherwise `ensureLabelIndex` would miss the
     // tail and `createLabel` would recreate duplicates). The common case
     // (≤250 labels, or a mock without `pageInfo`) issues no follow-up request —
-    // the loop only fires while `hasNextPage` and a cursor are both present.
+    // the loop only fires while `hasNextPage`. A page that reports another page
+    // without a cursor, or a follow-up that returns a null team, is a hard error
+    // (fail-fast): returning a partial seed would let `ensureLabelIndex` treat it
+    // as complete and `createLabel` would recreate labels from the skipped pages.
+    // Throwing composes with `ensureLabelIndex`'s memo-reset so the seed retries.
     const labelNodes: LabelNode[] = [...team.labels.nodes];
     let pageInfo = team.labels.pageInfo;
-    while (pageInfo?.hasNextPage && pageInfo.endCursor) {
+    while (pageInfo?.hasNextPage) {
+      if (!pageInfo.endCursor) {
+        throw new LinearRequestError({
+          code: 'bad_request',
+          retryable: false,
+          message: `Linear labels pagination for team ${this.config.teamId} reported another page without a cursor.`,
+        });
+      }
       const { query: pageQuery, variables: pageVariables } = this.buildLabelsPageQuery(
         pageInfo.endCursor,
       );
       const pageData = await this.client.request<LabelsPageResponse>(pageQuery, pageVariables);
       const pageTeam = pageData.team;
-      if (!pageTeam) break;
+      if (!pageTeam) {
+        throw new LinearRequestError({
+          code: 'bad_request',
+          retryable: false,
+          message: `Linear team ${this.config.teamId} was not found while fetching additional label pages.`,
+        });
+      }
       labelNodes.push(...pageTeam.labels.nodes);
       pageInfo = pageTeam.labels.pageInfo;
     }
