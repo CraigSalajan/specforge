@@ -56,21 +56,39 @@ export interface ChatOptions {
   signal?: AbortSignal;
 }
 
+/** Token usage for a model turn, as reported by the provider (camelCase). */
+export interface TokenUsage {
+  /** Prompt/input tokens, when the provider reports them. */
+  promptTokens?: number;
+  /** Completion/output tokens, when the provider reports them. */
+  completionTokens?: number;
+  /** Total tokens, when the provider reports them (some send only this). */
+  totalTokens?: number;
+}
+
 export interface ChatChunk {
   /** Incremental delta text. */
   delta: string;
+  /** Incremental reasoning/"thinking" delta, kept separate from `delta`. */
+  reasoning?: string;
   /** True on the final chunk after the stream completes. */
   done: boolean;
   /** Assembled tool calls; only set on the final `done` chunk. */
   toolCalls?: ToolCall[];
   /** Provider finish reason; only set on the final `done` chunk. */
   finishReason?: string;
+  /** Token usage for the turn; only set on the final `done` chunk, when the provider reports it. */
+  usage?: TokenUsage;
 }
 
 export interface ChatCompleteResult {
   content: string | null;
+  /** Reasoning/"thinking" text, kept separate from `content`; null when absent. */
+  reasoning?: string | null;
   toolCalls?: ToolCall[];
   finishReason?: string;
+  /** Token usage for the call, when the provider reports it. */
+  usage?: TokenUsage;
 }
 
 export interface ChatProvider {

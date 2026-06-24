@@ -15,6 +15,7 @@ export interface ChatMessageRow {
   session_id: number;
   role: string;
   content: string;
+  reasoning: string | null;
   created_at: number;
 }
 
@@ -82,7 +83,7 @@ export function deleteSession(id: number): void {
 export function getMessages(sessionId: number): ChatMessageRow[] {
   return getDb()
     .prepare(
-      `SELECT id, session_id, role, content, created_at
+      `SELECT id, session_id, role, content, reasoning, created_at
          FROM chat_messages
         WHERE session_id = ?
         ORDER BY id ASC`,
@@ -94,15 +95,17 @@ export function appendMessage(input: {
   sessionId: number;
   role: string;
   content: string;
+  reasoning?: string | null;
 }): ChatMessageRow {
   const db = getDb();
   const now = Date.now();
+  const reasoning = input.reasoning ?? null;
   const res = db
     .prepare(
-      `INSERT INTO chat_messages (session_id, role, content, created_at)
-         VALUES (?, ?, ?, ?)`,
+      `INSERT INTO chat_messages (session_id, role, content, reasoning, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
     )
-    .run(input.sessionId, input.role, input.content, now);
+    .run(input.sessionId, input.role, input.content, reasoning, now);
   db.prepare('UPDATE chat_sessions SET updated_at = ? WHERE id = ?').run(
     now,
     input.sessionId,
@@ -112,6 +115,7 @@ export function appendMessage(input: {
     session_id: input.sessionId,
     role: input.role,
     content: input.content,
+    reasoning,
     created_at: now,
   };
 }

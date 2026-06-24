@@ -1,0 +1,23 @@
+{
+  // Editor/type-check config for the headless benchmark harness. esbuild does
+  // the actual transpile (see bench/harness/build.mjs); this only keeps the
+  // bench `.ts` files type-checkable against the imported production types.
+  // It does NOT participate in the Angular app build (tsconfig.app.json only
+  // includes src/**), so it cannot affect production output.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "outDir": "../out-tsc/bench",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "types": ["node"],
+    "noEmit": true,
+    // The harness consumes Angular @Injectable() classes via the JIT compiler;
+    // emit decorator metadata to mirror the esbuild build.
+    "emitDecoratorMetadata": true,
+    // Bench code reads process.env via bracket access already; keep the app's
+    // strictness but relax the index-signature rule that the runner config
+    // mapping would otherwise trip on dynamic env keys.
+    "noPropertyAccessFromIndexSignature": false
+  },
+  "include": ["harness/**/*.ts"]
+}

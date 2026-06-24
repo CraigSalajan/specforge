@@ -1,0 +1,17 @@
+// Intent: a concrete "author a doc" instruction must drive the agent to actually
+// CALL the write_file tool (not just describe a PRD), finish cleanly, and mention
+// the PRD in its final reply. We deliberately do NOT assert an exact path/title:
+// `CalledToolWith` is a JSON subset match on VALUE equality, so a `path` like
+// "prd/" would never match the model's real exact path string. Asserting "called
+// write_file at least once + no error + talks about a PRD" keeps this robust to
+// reasonable model variation while still exercising the tool-using loop.
+(
+  name: "create-prd-calls-write-file",
+  instruction: "Create a PRD for a dark-mode toggle setting and save it under prd/. The PRD should cover the problem, the proposed toggle behavior, and a short success metric.",
+  expect: [
+    CalledTool(tool: "write_file"),
+    ToolCallCount(tool: Some("write_file"), min: Some(1)),
+    NoError,
+    FinalTextContains(text: "prd", case_insensitive: true),
+  ],
+)

@@ -436,7 +436,7 @@ describe('LinearAdapter — TER-18: updateItem', () => {
     expect(lastInput(request)['teamId']).toBeUndefined();
   });
 
-  it('omits description from input when the item has none', async () => {
+  it('clears the description (null) on update when the item composes to none', async () => {
     const request = vi
       .fn()
       .mockResolvedValue(updatedIssue({ id: 'iss-1', url: 'https://linear.app/x/issue/iss-1' }));
@@ -450,7 +450,9 @@ describe('LinearAdapter — TER-18: updateItem', () => {
     await adapter.updateItem('issue-ext-id', item);
 
     expect(lastInput(request)['title']).toBe('A story');
-    expect(lastInput(request)).not.toHaveProperty('description');
+    // On update an empty composition is sent as explicit null so Linear clears a
+    // previously-synced checklist rather than leaving it stale (omitting would).
+    expect(lastInput(request)).toHaveProperty('description', null);
   });
 
   it('resolves to undefined on success', async () => {
@@ -772,6 +774,22 @@ describe('LinearAdapter — TER-20: Epic → Project', () => {
     expect(lastInput(request)).toEqual({ name: 'Updated epic', description: 'New body.' });
   });
 
+  it('clears the project description (null) on update when the epic composes to none', async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValue(
+        updatedProject({ id: 'proj-1', url: 'https://linear.app/x/project/proj-1' }),
+      );
+    const epic: CanonicalItem = { localId: 'local-1', level: 'epic', title: 'An epic' };
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    await adapter.updateItem('proj-1', epic);
+
+    // On update an empty composition is sent as explicit null so Linear clears a
+    // previously-synced checklist rather than leaving it stale (omitting would).
+    expect(lastInput(request)).toEqual({ name: 'An epic', description: null });
+  });
+
   it('surfaces an auth failure on projectCreate with team context and a write-access hint', async () => {
     const request = vi
       .fn()
@@ -831,5 +849,173 @@ describe('LinearAdapter — TER-20: Epic → Project', () => {
     expect(error).toBeInstanceOf(LinearRequestError);
     expect((error as LinearRequestError).info.code).toBe('bad_request');
     expect((error as LinearRequestError).info.retryable).toBe(false);
+  });
+});
+
+/**
+ * TER-21: a {@link CanonicalItem}'s acceptance `criteria` are folded into the
+ * Linear `description` as an unchecked Markdown checklist, bounded by stable
+ * `<!-- specforge:criteria:start/end -->` markers so a re-sync rebuilds the
+ * region in place rather than appending duplicates. This is a pure adapter-layer
+ * change (see `electron/sync/linear/description.ts`); the injected transport is
+ * faked with a `vi.fn()` `request`, so the suite touches no network. The
+ * `input.description` variable passed to `request` is inspected to prove the
+ * checklist is composed in, the body is preserved, and re-syncing the same
+ * criteria is byte-stable.
+ */
+describe('LinearAdapter — TER-21: criteria checklist', () => {
+  const MARKER_START = '<!-- specforge:criteria:start -->';
+  const MARKER_END = '<!-- specforge:criteria:end -->';
+
+  /** Fakes the GraphQL transport with a single recordable `request` method. */
+  function fakeClientWith(request: ReturnType<typeof vi.fn>): LinearGraphQLClient {
+    return { request } as unknown as LinearGraphQLClient;
+  }
+
+  /** Reads the `input` variable from the most recent `request` call. */
+  function lastInput(request: ReturnType<typeof vi.fn>): Record<string, unknown> {
+    return (request.mock.calls.at(-1)?.[1] as { input: Record<string, unknown> }).input;
+  }
+
+  /** A resolved `issueCreate` payload for the given issue fields. */
+  function createdIssue(issue: { id: string; url: string }) {
+    return { issueCreate: { success: true, issue } };
+  }
+
+  /** A resolved `issueUpdate` payload for the given issue fields. */
+  function updatedIssue(issue: { id: string; url: string }) {
+    return { issueUpdate: { success: true, issue } };
+  }
+
+  /** Counts non-overlapping occurrences of a literal substring. */
+  function occurrences(haystack: string, needle: string): number {
+    return haystack.split(needle).length - 1;
+  }
+
+  it('folds the criteria checklist into the issue description, preserving the body', async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValue(createdIssue({ id: 'iss-1', url: 'https://linear.app/x/issue/iss-1' }));
+    const item: CanonicalItem = {
+      localId: 'local-1',
+      level: 'story',
+      title: 'A story',
+      description: 'Story body.',
+      criteria: ['Renders the list', 'Updates in place'],
+    };
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    await adapter.createItem(item);
+
+    const description = lastInput(request)['description'] as string;
+    expect(description).toContain('Story body.');
+    expect(description).toContain(MARKER_START);
+    expect(description).toContain(MARKER_END);
+    expect(description).toContain('- [ ] Renders the list');
+    expect(description).toContain('- [ ] Updates in place');
+    expect(description).not.toContain('- [x]');
+    // The body precedes the marked region.
+    expect(description.indexOf('Story body.')).toBeLessThan(description.indexOf(MARKER_START));
+  });
+
+  it('sets a checklist-only description when the story has criteria but no body', async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValue(createdIssue({ id: 'iss-1', url: 'https://linear.app/x/issue/iss-1' }));
+    const item: CanonicalItem = {
+      localId: 'local-1',
+      level: 'story',
+      title: 'A story',
+      criteria: ['Only criterion'],
+    };
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    await adapter.createItem(item);
+
+    expect(lastInput(request)['description']).toBe(
+      `${MARKER_START}\n- [ ] Only criterion\n${MARKER_END}`,
+    );
+  });
+
+  it('omits description on create when neither body nor criteria are present', async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValue(createdIssue({ id: 'iss-1', url: 'https://linear.app/x/issue/iss-1' }));
+    const item: CanonicalItem = { localId: 'local-1', level: 'story', title: 'A story' };
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    await adapter.createItem(item);
+
+    expect(lastInput(request)).not.toHaveProperty('description');
+  });
+
+  it('passes a body through unchanged on update when there are no criteria', async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValue(updatedIssue({ id: 'iss-1', url: 'https://linear.app/x/issue/iss-1' }));
+    const item: CanonicalItem = {
+      localId: 'local-1',
+      level: 'story',
+      title: 'A story',
+      description: 'Plain body, no criteria.',
+    };
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    await adapter.updateItem('iss-1', item);
+
+    expect(lastInput(request)['description']).toBe('Plain body, no criteria.');
+  });
+
+  it('updating twice with the same criteria yields an identical description (no duplicate block)', async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValue(updatedIssue({ id: 'iss-1', url: 'https://linear.app/x/issue/iss-1' }));
+    const item: CanonicalItem = {
+      localId: 'local-1',
+      level: 'story',
+      title: 'A story',
+      description: 'Body.',
+      criteria: ['One', 'Two'],
+    };
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    await adapter.updateItem('iss-1', item);
+    const first = lastInput(request)['description'] as string;
+    await adapter.updateItem('iss-1', item);
+    const second = lastInput(request)['description'] as string;
+
+    expect(second).toBe(first);
+    expect(occurrences(second, MARKER_START)).toBe(1);
+    expect(occurrences(second, MARKER_END)).toBe(1);
+  });
+
+  it('updating with changed criteria replaces the block in place (old gone, new present, one region)', async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValue(updatedIssue({ id: 'iss-1', url: 'https://linear.app/x/issue/iss-1' }));
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    const original: CanonicalItem = {
+      localId: 'local-1',
+      level: 'story',
+      title: 'A story',
+      description: 'Body.',
+      criteria: ['Old one', 'Old two'],
+    };
+    await adapter.updateItem('iss-1', original);
+    const firstDescription = lastInput(request)['description'] as string;
+
+    // A real re-sync re-derives the body from the previously composed
+    // description, so the second pass receives the marked region as its body.
+    const changed: CanonicalItem = { ...original, criteria: ['New one'] };
+    await adapter.updateItem('iss-1', { ...changed, description: firstDescription });
+    const secondDescription = lastInput(request)['description'] as string;
+
+    expect(secondDescription).toContain('- [ ] New one');
+    expect(secondDescription).not.toContain('Old one');
+    expect(secondDescription).not.toContain('Old two');
+    expect(secondDescription).toContain('Body.');
+    expect(occurrences(secondDescription, MARKER_START)).toBe(1);
+    expect(occurrences(secondDescription, MARKER_END)).toBe(1);
   });
 });

@@ -1,0 +1,10 @@
+// Covers multi-write + ToolCallCount lower bound (>= 3).
+(
+  name: "creates-three-docs",
+  instruction: "Create three separate markdown files for a notifications feature: a PRD, an ADR, and an implementation plan, each as its own file.",
+  expect: [
+    CalledTool(tool: "write_file"),
+    ToolCallCount(tool: Some("write_file"), min: Some(3)),
+    NoError,
+  ],
+)

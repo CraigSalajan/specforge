@@ -1,0 +1,10 @@
+// Covers search_vault. Retrieval is stubbed off in the harness, so the search
+// returns no matches; the assertion is that the model chose to search.
+(
+  name: "searches-the-vault",
+  instruction: "Search the vault for any existing documents about authentication and summarize what you find.",
+  expect: [
+    CalledTool(tool: "search_vault"),
+    NoError,
+  ],
+)

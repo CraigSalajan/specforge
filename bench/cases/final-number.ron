@@ -1,0 +1,10 @@
+// Covers FinalNumberEquals.
+(
+  name: "answers-a-number",
+  instruction: "What is 2 + 2? Reply with just the number.",
+  expect: [
+    NoToolCalls,
+    FinalNumberEquals(value: 4.0, tolerance: 0.0),
+    NoError,
+  ],
+)
