@@ -833,3 +833,288 @@ describe('LinearAdapter — TER-20: Epic → Project', () => {
     expect((error as LinearRequestError).info.retryable).toBe(false);
   });
 });
+
+/**
+ * TER-22: label syncing (create-if-missing). A non-epic item's free-form `tags`
+ * are resolved to Linear label ids at create time: existing labels are reused,
+ * missing ones are created via `issueLabelCreate`, and the resolved ids land in
+ * the `issueCreate` input's `labelIds`. The index is seeded once per adapter
+ * instance from `getMetadata().labels`, so a new label is created at most once
+ * across a push. Because the path now touches three operations (`team(...)` for
+ * metadata, `issueLabelCreate`, `issueCreate`), the faked `request` branches on
+ * the query string rather than returning a single envelope. The injected
+ * transport is faked with a `vi.fn()` `request`, so the suite touches no network.
+ */
+describe('LinearAdapter — TER-22: label syncing', () => {
+  /** Fakes the GraphQL transport with a single recordable `request` method. */
+  function fakeClientWith(request: ReturnType<typeof vi.fn>): LinearGraphQLClient {
+    return { request } as unknown as LinearGraphQLClient;
+  }
+
+  /** All `request` calls whose query contains `op`, newest last. */
+  function callsFor(request: ReturnType<typeof vi.fn>, op: string) {
+    return request.mock.calls.filter((call) => (call[0] as string).includes(op));
+  }
+
+  /** The single (or last) `input` variable from the calls matching `op`. */
+  function inputFor(
+    request: ReturnType<typeof vi.fn>,
+    op: string,
+  ): Record<string, unknown> {
+    const call = callsFor(request, op).at(-1);
+    return (call?.[1] as { input: Record<string, unknown> }).input;
+  }
+
+  /** A `team(...)` metadata envelope carrying the given label nodes. */
+  function metadataWithLabels(
+    labels: Array<{ id: string; name: string; isGroup?: boolean }>,
+  ) {
+    return {
+      team: {
+        id: 'team-1',
+        name: 'Eng',
+        states: { nodes: [] },
+        labels: {
+          nodes: labels.map((l) => ({
+            id: l.id,
+            name: l.name,
+            isGroup: l.isGroup ?? false,
+            parent: null,
+          })),
+        },
+      },
+    };
+  }
+
+  /**
+   * Builds a branching `request` fake: metadata for the `labels` query, a created
+   * label for `issueLabelCreate` (id = `lbl-<n>`, incrementing), and a created
+   * issue for `issueCreate`. The created-label id is recorded so a test can also
+   * assert which generated id landed on the issue.
+   */
+  function branchingRequest(
+    existingLabels: Array<{ id: string; name: string; isGroup?: boolean }>,
+  ) {
+    let nextLabel = 0;
+    const createdLabelIds: string[] = [];
+    const request = vi.fn().mockImplementation((query: string) => {
+      if (query.includes('issueLabelCreate')) {
+        const id = `lbl-${++nextLabel}`;
+        createdLabelIds.push(id);
+        return Promise.resolve({
+          issueLabelCreate: { success: true, issueLabel: { id, name: 'created' } },
+        });
+      }
+      if (query.includes('issueCreate')) {
+        return Promise.resolve({
+          issueCreate: {
+            success: true,
+            issue: { id: 'iss-1', url: 'https://linear.app/x/issue/iss-1' },
+          },
+        });
+      }
+      // Default: the metadata `team(...) { ... labels ... }` query.
+      return Promise.resolve(metadataWithLabels(existingLabels));
+    });
+    return { request, createdLabelIds };
+  }
+
+  it('reuses an existing label without creating it (no issueLabelCreate)', async () => {
+    const { request } = branchingRequest([{ id: 'lbl-bug', name: 'bug' }]);
+    const item: CanonicalItem = {
+      localId: 'local-1',
+      level: 'story',
+      title: 'A story',
+      tags: ['bug'],
+    };
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    await adapter.createItem(item);
+
+    expect(callsFor(request, 'issueLabelCreate')).toHaveLength(0);
+    expect(inputFor(request, 'issueCreate')['labelIds']).toEqual(['lbl-bug']);
+  });
+
+  it('creates a missing label and applies the returned id to the issue', async () => {
+    const { request, createdLabelIds } = branchingRequest([]);
+    const item: CanonicalItem = {
+      localId: 'local-1',
+      level: 'story',
+      title: 'A story',
+      tags: ['spike'],
+    };
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    await adapter.createItem(item);
+
+    const createCalls = callsFor(request, 'issueLabelCreate');
+    expect(createCalls).toHaveLength(1);
+    // The label is created with the tag's name and the configured team.
+    expect(inputFor(request, 'issueLabelCreate')).toEqual({
+      name: 'spike',
+      teamId: 'team-1',
+    });
+    // The newly minted id lands on the issue.
+    expect(inputFor(request, 'issueCreate')['labelIds']).toEqual([createdLabelIds[0]]);
+  });
+
+  it('creates a shared new tag exactly once across two createItem calls (AC4 de-dup)', async () => {
+    const { request, createdLabelIds } = branchingRequest([]);
+    const itemA: CanonicalItem = {
+      localId: 'local-1',
+      level: 'story',
+      title: 'Story A',
+      tags: ['shared'],
+    };
+    const itemB: CanonicalItem = {
+      localId: 'local-2',
+      level: 'story',
+      title: 'Story B',
+      tags: ['shared'],
+    };
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    await adapter.createItem(itemA);
+    await adapter.createItem(itemB);
+
+    // The new label is created exactly once for the whole push...
+    expect(callsFor(request, 'issueLabelCreate')).toHaveLength(1);
+    // ...and getMetadata (the `labels` query) is seeded exactly once too.
+    expect(callsFor(request, 'labels')).toHaveLength(1);
+    // Both issues carry the same id.
+    const issueCalls = callsFor(request, 'issueCreate');
+    expect(issueCalls).toHaveLength(2);
+    for (const call of issueCalls) {
+      expect((call[1] as { input: Record<string, unknown> }).input['labelIds']).toEqual([
+        createdLabelIds[0],
+      ]);
+    }
+  });
+
+  it('merges the configured featureLabelId with the resolved tag ids (de-duped)', async () => {
+    const { request, createdLabelIds } = branchingRequest([]);
+    const feature: CanonicalItem = {
+      localId: 'local-1',
+      level: 'feature',
+      title: 'A feature',
+      tags: ['spike'],
+    };
+    const adapter = new LinearAdapter(
+      { teamId: 'team-1', featureLabelId: 'lbl-feat' },
+      fakeClientWith(request),
+    );
+
+    await adapter.createItem(feature);
+
+    const labelIds = inputFor(request, 'issueCreate')['labelIds'] as string[];
+    expect(labelIds).toContain('lbl-feat');
+    expect(labelIds).toContain(createdLabelIds[0]);
+    // No duplicates in the union.
+    expect(new Set(labelIds).size).toBe(labelIds.length);
+  });
+
+  it('excludes isGroup labels when seeding and matches case-insensitively', async () => {
+    // `Priority` is a label *group* (must NOT match — gets created instead);
+    // `Bug` differs from the tag only by case (must be reused).
+    const { request, createdLabelIds } = branchingRequest([
+      { id: 'lbl-grp', name: 'Priority', isGroup: true },
+      { id: 'lbl-bug', name: 'Bug' },
+    ]);
+    const item: CanonicalItem = {
+      localId: 'local-1',
+      level: 'story',
+      title: 'A story',
+      tags: ['priority', 'BUG'],
+    };
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    await adapter.createItem(item);
+
+    // The group name was not treated as a match: exactly one label is created.
+    const createCalls = callsFor(request, 'issueLabelCreate');
+    expect(createCalls).toHaveLength(1);
+    expect((createCalls[0]?.[1] as { input: Record<string, unknown> }).input['name']).toBe(
+      'priority',
+    );
+    // The case-insensitive match reused the existing `Bug` label.
+    expect(inputFor(request, 'issueCreate')['labelIds']).toEqual([
+      createdLabelIds[0],
+      'lbl-bug',
+    ]);
+  });
+
+  it('does not call getMetadata and leaves labelIds unset for a tag-less item', async () => {
+    const { request } = branchingRequest([{ id: 'lbl-bug', name: 'bug' }]);
+    const item: CanonicalItem = { localId: 'local-1', level: 'story', title: 'A story' };
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    await adapter.createItem(item);
+
+    // No tags → no metadata seed and no label creation.
+    expect(callsFor(request, 'labels')).toHaveLength(0);
+    expect(callsFor(request, 'issueLabelCreate')).toHaveLength(0);
+    // The issue carries no labelIds (preserves the team-only behavior).
+    expect(inputFor(request, 'issueCreate')).not.toHaveProperty('labelIds');
+  });
+
+  it('rejects with a non-retryable bad_request when label creation reports a soft failure', async () => {
+    const request = vi.fn().mockImplementation((query: string) => {
+      if (query.includes('issueLabelCreate')) {
+        return Promise.resolve({ issueLabelCreate: { success: false, issueLabel: null } });
+      }
+      return Promise.resolve(metadataWithLabels([]));
+    });
+    const item: CanonicalItem = {
+      localId: 'local-1',
+      level: 'story',
+      title: 'A story',
+      tags: ['spike'],
+    };
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    const error = await adapter.createItem(item).then(
+      () => {
+        throw new Error('expected createItem to reject');
+      },
+      (err: unknown) => err,
+    );
+
+    expect(error).toBeInstanceOf(LinearRequestError);
+    expect((error as LinearRequestError).info.code).toBe('bad_request');
+    expect((error as LinearRequestError).info.retryable).toBe(false);
+    // The label name is named in the message so the failure is diagnosable.
+    expect((error as LinearRequestError).info.message).toContain('spike');
+  });
+
+  it('surfaces an auth failure on label creation with team context and a write-access hint', async () => {
+    const request = vi.fn().mockImplementation((query: string) => {
+      if (query.includes('issueLabelCreate')) {
+        return Promise.reject(
+          new LinearRequestError({ code: 'auth', retryable: false, message: 'Unauthorized' }),
+        );
+      }
+      return Promise.resolve(metadataWithLabels([]));
+    });
+    const item: CanonicalItem = {
+      localId: 'local-1',
+      level: 'story',
+      title: 'A story',
+      tags: ['spike'],
+    };
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    const error = await adapter.createItem(item).then(
+      () => {
+        throw new Error('expected createItem to reject');
+      },
+      (err: unknown) => err,
+    );
+
+    expect(error).toBeInstanceOf(LinearRequestError);
+    expect((error as LinearRequestError).info.code).toBe('auth');
+    expect((error as LinearRequestError).info.retryable).toBe(false);
+    expect((error as LinearRequestError).info.message).toContain('team-1');
+    expect((error as LinearRequestError).info.message).toContain('Unauthorized');
+    expect((error as LinearRequestError).info.message).toMatch(/write access/i);
+  });
+});

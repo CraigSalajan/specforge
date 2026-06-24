@@ -29,6 +29,18 @@
  * {@link CreateItemContext}; that resolved id (falling back to the static
  * `config.projectId`) becomes the issue's `projectId`.
  *
+ * ## Label syncing (TER-22)
+ * An item's free-form `tags` (label *names*) are synced to Linear labels at
+ * *create time only* (deliberately not on update, which would clobber labels a
+ * user added by hand): existing labels are reused and any that don't exist are
+ * created (create-if-missing), then the resolved ids are applied to the new
+ * issue. Matching is case-insensitive/trimmed (see `./labels`). To avoid
+ * creating the same label twice across one push, the adapter holds a
+ * `labelIdByName` index for its lifetime — seeded once (lazily, only when an
+ * item actually has tags) from `getMetadata().labels` and extended on each
+ * successful create. Epics are untouched (they map to Projects); label syncing
+ * applies only to the issue path.
+ *
  * ## Why the token is not in the config
  * {@link LinearConnectionConfig} carries only the *where* (team/project target),
  * never the *who* (the credential). The auth token enters exclusively through
@@ -51,6 +63,7 @@ import type {
 import type { CanonicalItem, CanonicalLevel } from '../canonical-item';
 import type { LinearGraphQLClient } from './client';
 import { LinearRequestError } from './errors';
+import { dedupeTags, normalizeLabelName } from './labels';
 
 /**
  * The Linear workspace target an adapter writes into. Identifies *where* items
@@ -136,6 +149,14 @@ interface UpdateProjectResponse {
   };
 }
 
+/** Shape of the `issueLabelCreate` mutation's `data` payload. */
+interface CreateLabelResponse {
+  issueLabelCreate: {
+    success: boolean;
+    issueLabel: { id: string; name: string } | null;
+  };
+}
+
 /**
  * Linear {@link IAdapter}. Holds the connection target and the injected
  * transport. All four operations — `getMetadata`, `createItem`, `updateItem`,
@@ -144,6 +165,22 @@ interface UpdateProjectResponse {
 export class LinearAdapter implements IAdapter {
   /** Which provider this adapter targets. */
   readonly name: AdapterName = 'linear';
+
+  /**
+   * Normalized-label-name → Linear label id index for label syncing (TER-22).
+   * Scoped to this adapter instance — the single push — so the same new label
+   * is created at most once even across multiple `createItem` calls. Seeded once
+   * from `getMetadata().labels` (see {@link ensureLabelIndex}) and extended on
+   * each successful {@link createLabel}.
+   */
+  private readonly labelIdByName = new Map<string, string>();
+
+  /**
+   * Memoizes the one-time label-index seed so `getMetadata` runs at most once per
+   * push. Unset until the first item with tags triggers {@link ensureLabelIndex};
+   * thereafter every caller awaits the same in-flight/settled promise.
+   */
+  private labelIndexPromise?: Promise<void>;
 
   /**
    * @param config the team/project target this adapter writes into; readable by
@@ -276,7 +313,10 @@ export class LinearAdapter implements IAdapter {
     // Features/Stories join their Epic's project via the engine-resolved
     // container id, falling back to the static config target when unset.
     const projectId = context?.projectExternalId ?? this.config.projectId;
-    const { query, variables } = this.buildCreateIssueMutation(item, projectId);
+    // Resolve the item's tags to Linear label ids (create-if-missing). Lazy:
+    // a tag-less item resolves to `[]` without ever calling getMetadata.
+    const tagLabelIds = await this.resolveLabelIds(item.tags ?? []);
+    const { query, variables } = this.buildCreateIssueMutation(item, projectId, tagLabelIds);
 
     let data: CreateIssueResponse;
     try {
@@ -313,12 +353,20 @@ export class LinearAdapter implements IAdapter {
    * input object is composed in TypeScript so optional fields appear only when
    * present: `description` only when defined, `projectId` only when the caller
    * resolved one (the Epic's project, or the config fallback), and `labelIds`
-   * only for `feature`-level items when a `featureLabelId` is configured. The team
-   * always targets the new issue.
+   * only when the resolved label set is non-empty. The team always targets the
+   * new issue.
+   *
+   * `labelIds` is the de-duped union of the tag-resolved ids (`tagLabelIds`,
+   * TER-22) and the configured `featureLabelId` for `feature`-level items —
+   * merged rather than overwritten so a feature's configured label survives
+   * alongside its synced tag labels. The union preserves first-seen order
+   * (tag ids first) and drops duplicates so a tag that resolves to the feature
+   * label isn't applied twice.
    */
   private buildCreateIssueMutation(
     item: CanonicalItem,
     projectId?: string,
+    tagLabelIds: string[] = [],
   ): {
     query: string;
     variables: Record<string, unknown>;
@@ -338,11 +386,135 @@ export class LinearAdapter implements IAdapter {
     };
     if (item.description !== undefined) input['description'] = item.description;
     if (projectId !== undefined) input['projectId'] = projectId;
-    if (item.level === 'feature' && this.config.featureLabelId !== undefined) {
-      input['labelIds'] = [this.config.featureLabelId];
-    }
+
+    // Union the synced tag labels with the configured feature label (feature
+    // level only), de-duped and order-preserving; set `labelIds` only when it
+    // would carry at least one id so the team-only/tag-less path stays clean.
+    const featureLabelIds =
+      item.level === 'feature' && this.config.featureLabelId !== undefined
+        ? [this.config.featureLabelId]
+        : [];
+    const labelIds = [...new Set([...tagLabelIds, ...featureLabelIds])];
+    if (labelIds.length > 0) input['labelIds'] = labelIds;
 
     return { query, variables: { input } };
+  }
+
+  /**
+   * Resolves a list of free-form tag names to Linear label ids, creating any
+   * that don't already exist (create-if-missing — TER-22). The input is de-duped
+   * by normalized key first; an empty (or fully empty/whitespace) list resolves
+   * to `[]` *without* seeding the index, so a tag-less item never triggers a
+   * `getMetadata` round-trip. Otherwise the index is seeded once, then each tag
+   * is looked up by its normalized key; a miss creates the label (original
+   * casing) and caches the new id. The returned ids preserve the de-duped tag
+   * order.
+   *
+   * @param tags the item's free-form tag names (label names, not ids).
+   * @returns the resolved Linear label ids, in de-duped tag order.
+   */
+  private async resolveLabelIds(tags: string[]): Promise<string[]> {
+    const unique = dedupeTags(tags);
+    if (unique.length === 0) return [];
+
+    await this.ensureLabelIndex();
+
+    const ids: string[] = [];
+    for (const tag of unique) {
+      // `createLabel` caches the new id under the normalized key, so the lookup
+      // hits on a later tag/item with the same key — no second create needed.
+      const id =
+        this.labelIdByName.get(normalizeLabelName(tag)) ?? (await this.createLabel(tag));
+      ids.push(id);
+    }
+    return ids;
+  }
+
+  /**
+   * Seeds the {@link labelIdByName} index from the team's existing labels, at
+   * most once per adapter instance. The first caller assigns
+   * {@link labelIndexPromise} to a `getMetadata`-backed seed routine; every later
+   * caller awaits that same promise, so the team metadata is fetched once per
+   * push no matter how many items have tags. Label *groups* (`isGroup: true`) are
+   * skipped — they are containers, not labels an issue can carry — and each
+   * applicable label is indexed under its normalized name.
+   */
+  private ensureLabelIndex(): Promise<void> {
+    if (this.labelIndexPromise === undefined) {
+      this.labelIndexPromise = (async () => {
+        const metadata = await this.getMetadata();
+        for (const label of metadata.labels ?? []) {
+          if (label.isGroup) continue;
+          this.labelIdByName.set(normalizeLabelName(label.name), label.id);
+        }
+      })();
+    }
+    return this.labelIndexPromise;
+  }
+
+  /**
+   * Creates a single Linear label with the given (original-casing) name via the
+   * `issueLabelCreate` mutation and returns its id, also caching it under the
+   * normalized key so a later tag with the same key reuses it. Mirrors
+   * `createItem`'s error discipline: an `auth` failure is re-thrown with team
+   * context and a write-access hint, all other failures propagate unchanged, and
+   * a soft failure (Linear returns `success: false`, a null label, or a label
+   * missing its id) is surfaced as a non-retryable `bad_request` naming the
+   * label so the failure is diagnosable rather than silently dropped.
+   *
+   * @param name the label name to create (original casing is preserved).
+   * @returns the created label's Linear id.
+   */
+  private async createLabel(name: string): Promise<string> {
+    const { query, variables } = this.buildCreateLabelMutation(name);
+
+    let data: CreateLabelResponse;
+    try {
+      data = await this.client.request<CreateLabelResponse>(query, variables);
+    } catch (err) {
+      if (err instanceof LinearRequestError && err.info.code === 'auth') {
+        throw new LinearRequestError({
+          ...err.info,
+          message: `Linear label creation failed for team ${this.config.teamId}: ${err.info.message}. Check that the configured token has write access to this team.`,
+        });
+      }
+      throw err;
+    }
+
+    // Same soft-failure guard as the issue path: a missing id would let us
+    // attach an empty label id to the issue, silently breaking label syncing.
+    const issueLabel = data.issueLabelCreate?.issueLabel;
+    if (!data.issueLabelCreate?.success || !issueLabel || !issueLabel.id) {
+      throw new LinearRequestError({
+        code: 'bad_request',
+        retryable: false,
+        message: `Linear rejected creation of label "${name}" for team ${this.config.teamId}.`,
+      });
+    }
+
+    this.labelIdByName.set(normalizeLabelName(name), issueLabel.id);
+    return issueLabel.id;
+  }
+
+  /**
+   * Builds the `issueLabelCreate` mutation and its single `$input` variable. The
+   * label is owned by the configured team; its `name` keeps the tag's original
+   * casing (only lookups are normalized).
+   */
+  private buildCreateLabelMutation(name: string): {
+    query: string;
+    variables: Record<string, unknown>;
+  } {
+    const query = `
+      mutation LinearCreateLabel($input: IssueLabelCreateInput!) {
+        issueLabelCreate(input: $input) {
+          success
+          issueLabel { id name }
+        }
+      }
+    `;
+
+    return { query, variables: { input: { name, teamId: this.config.teamId } } };
   }
 
   /**
