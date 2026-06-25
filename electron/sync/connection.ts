@@ -108,6 +108,11 @@ export interface ConnectionIdInput {
   projectId?: string;
 }
 
+/** FNV-1a 32-bit offset basis (2166136261). */
+const FNV_OFFSET_BASIS = 0x811c9dc5;
+/** FNV-1a 32-bit prime (16777619). */
+const FNV_PRIME = 0x01000193;
+
 /**
  * 32-bit FNV-1a hash of a string, returned as the unsigned integer hash value.
  * Pure and deterministic with no platform dependency — the reason this module
@@ -116,12 +121,11 @@ export interface ConnectionIdInput {
  * over a tiny per-vault namespace where collision risk is negligible.
  */
 function fnv1a32(input: string): number {
-  // FNV-1a: offset basis 2166136261, prime 16777619; `>>> 0` keeps each step
-  // in unsigned 32-bit space (Math.imul gives the 32-bit multiply).
-  let hash = 0x811c9dc5;
+  // >>> 0 keeps each step in unsigned 32-bit space; Math.imul does the 32-bit multiply.
+  let hash = FNV_OFFSET_BASIS;
   for (let i = 0; i < input.length; i++) {
     hash ^= input.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193);
+    hash = Math.imul(hash, FNV_PRIME);
   }
   return hash >>> 0;
 }
