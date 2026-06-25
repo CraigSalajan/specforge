@@ -33,6 +33,10 @@ function assertValue(value: unknown): asserts value is string {
 export function registerSettingsHandlers(): void {
   ipcMain.handle(Channels.Get, async (_e, key: string): Promise<string | null> => {
     assertKey(key);
+    if (isConnectionSecretKey(key)) {
+      // Per-connection secrets are main-side only — never readable over IPC.
+      throw new Error('Connection secrets are not readable over IPC');
+    }
     const stored = getSetting(key);
     return stored === null ? null : decryptSettingValue(key, stored);
   });

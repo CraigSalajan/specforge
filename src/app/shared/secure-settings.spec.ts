@@ -11,9 +11,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  * test runner).
  */
 
-// The Angular unit-test builder forbids relative `vi.mock`, so the settings repo
-// is exercised for real against a fake `node:sqlite` (a bare specifier, allowed)
-// whose `DatabaseSync` is backed by `store`. Everything the hoisted factories
+// The Angular unit-test builder rejects relative `vi.mock` specifiers (its
+// `vitest-mock-patch` throws for any path starting with `.`/`/`), so the settings
+// repo is exercised for real against a faked `node:sqlite` — a bare specifier the
+// patch allows. The DB module loads `node:sqlite` lazily (see `electron/db/index.ts`),
+// so it never enters the Vite test bundle; this mock supplies a `DatabaseSync`
+// backed by `store` (the `settings` table). Everything the hoisted factories
 // reference must live in `vi.hoisted` (it runs before the module's imports).
 const { store, safeStorageMock, FakeDatabaseSync } = vi.hoisted(() => {
   const backing = new Map<string, string>();
@@ -71,6 +74,7 @@ vi.mock('node:sqlite', () => ({
   default: { DatabaseSync: FakeDatabaseSync },
 }));
 
+import { initDb } from '../../../electron/db/index';
 import {
   decryptSettingValue,
   encryptSettingValue,
@@ -83,11 +87,14 @@ const ENC_PREFIX = 'enc:v1:';
 const CONN_PAT_KEY = 'linear.pat::linear-abc';
 const CONN_REFRESH_KEY = 'linear.refreshToken::linear-abc';
 
-beforeEach(() => {
+beforeEach(async () => {
   store.clear();
   safeStorageMock.isEncryptionAvailable.mockReturnValue(true);
   safeStorageMock.encryptString.mockClear();
   safeStorageMock.decryptString.mockClear();
+  // Resolves the (faked) `node:sqlite` constructor so synchronous `getDb()`
+  // calls in the repo work; idempotent across tests.
+  await initDb();
 });
 
 afterEach(() => {

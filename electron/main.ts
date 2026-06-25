@@ -18,7 +18,7 @@ import { registerAiHistoryHandlers } from './ipc/ai-history';
 import { registerAiHandlers, disposeAiHandlers } from './ipc/ai';
 import { registerSkillsHandlers } from './ipc/skills';
 import { registerExportHandlers } from './ipc/export';
-import { getDb, closeDb } from './db/index';
+import { initDb, closeDb } from './db/index';
 
 const isDev = process.env['SPECFORGE_DEV'] === '1';
 
@@ -126,8 +126,10 @@ app.whenReady().then(async () => {
   }
 
   // Initialize DB eagerly so PRAGMAs/migrations run before the first IPC call.
+  // `initDb` also lazily loads the `node:sqlite` built-in (kept out of static
+  // bundle graphs); it must resolve before any synchronous `getDb()` caller.
   try {
-    getDb();
+    await initDb();
   } catch (err) {
     console.error('[main] Failed to initialize SQLite database:', err);
   }
