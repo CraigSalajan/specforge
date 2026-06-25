@@ -271,16 +271,16 @@ tags: solo
 
 describe('specToCanonicalItems — ordering across multiple docs', () => {
   it('emits items grouped per doc, with docs processed in input order', () => {
-    // Input given out of relPath order; the PURE core preserves input order, and
-    // the reader (collectSpecDocs) is what sorts by relPath upstream. We assert
-    // that supplying sorted docs yields sorted, grouped output.
+    // Input is given out of relPath order (b before a). The PURE core preserves
+    // input order — sorting by relPath is the reader's job (collectSpecDocs), not
+    // the core's — so the emitted epics follow input order, not alphabetical.
     const docs: SpecDoc[] = [
-      doc('prd/a.md', `# Alpha\n\n## F\n- As a user, I want a, so that x.\n`),
       doc('prd/b.md', `# Beta\n\n## G\n- As a user, I want b, so that y.\n`),
+      doc('prd/a.md', `# Alpha\n\n## F\n- As a user, I want a, so that x.\n`),
     ];
     const items = specToCanonicalItems(docs);
     const epics = items.filter((i) => i.level === 'epic').map((i) => i.title);
-    expect(epics).toEqual(['Alpha', 'Beta']);
+    expect(epics).toEqual(['Beta', 'Alpha']);
 
     // Within a doc: epic, then feature, then story — in that source order.
     expect(items.map((i) => i.level)).toEqual([
@@ -306,6 +306,23 @@ describe('specToCanonicalItems — robustness', () => {
   it('skips a doc with no H1 without throwing', () => {
     const md = `## Orphan feature\n- As a user, I want a thing, so that I benefit.\n`;
     expect(specToCanonicalItems([doc('prd/no-h1.md', md)])).toEqual([]);
+  });
+
+  it('stops collecting criteria at a blank line, not folding a later bullet in', () => {
+    const md = `# Epic
+
+## Feature
+
+- As a user, I want a thing, so that I benefit.
+  - Acceptance criteria:
+    - First criterion.
+
+  - A separate bullet after a paragraph break, not a criterion.
+`;
+    const story = specToCanonicalItems([doc('prd/blank.md', md)]).find(
+      (i) => i.level === 'story',
+    )!;
+    expect(story.criteria).toEqual(['First criterion.']);
   });
 
   it('emits an epic (and features) even when a feature has no stories at all', () => {

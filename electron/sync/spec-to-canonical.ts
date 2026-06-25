@@ -311,8 +311,8 @@ function parseStoriesInScope(
 /**
  * Collects the bullets of an "Acceptance criteria:" list that begins somewhere
  * in `[start, end)`. Scans for the criteria label, then gathers the following
- * bullet lines (more-indented or sibling bullets) until a non-bullet,
- * non-blank line or the scope end. Marks every consumed line in `consumed`.
+ * bullet lines until a blank line (paragraph break), a non-bullet line, or the
+ * scope end. Marks every consumed line in `consumed`.
  * Returns `undefined` when no criteria list is found.
  */
 function collectCriteriaAfter(
@@ -340,11 +340,7 @@ function collectCriteriaAfter(
   for (let i = labelLine + 1; i < end; i++) {
     if (fenced.has(i)) break; // a fence closes the list
     const line = lines[i];
-    if (line.trim().length === 0) {
-      // A single blank line inside the list is tolerated; mark and continue.
-      consumed.add(i);
-      continue;
-    }
+    if (line.trim().length === 0) break; // a blank line (paragraph break) ends the list
     if (STORY_LINE.test(line)) break; // next story starts
     const bullet = BULLET_LINE.exec(line);
     if (!bullet) break; // non-bullet content closes the list
