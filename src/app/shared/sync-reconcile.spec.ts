@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import {
   applyReconcile,
   buildReconcilePlan,
@@ -194,6 +194,26 @@ describe('buildReconcilePlan — classification matrix', () => {
     // The local-change signal is still surfaced for the user.
     expect(entries[0].localChanged).toBe(true);
   });
+
+  it('throws when the remote identity does not match the link', () => {
+    const input: ReconcileInput = {
+      link: link({ specItemId: 'a' }), // externalId EXT-a
+      remote: remote({ externalId: 'EXT-other' }),
+      localHash: 'pushed-a',
+    };
+
+    expect(() => buildReconcilePlan([input])).toThrow(/does not match/i);
+  });
+
+  it('throws when the remote updatedAt is not a valid date', () => {
+    const input: ReconcileInput = {
+      link: link({ specItemId: 'a' }),
+      remote: remote({ updatedAt: 'not-a-date' }),
+      localHash: 'pushed-a',
+    };
+
+    expect(() => buildReconcilePlan([input])).toThrow(/invalid remote\.updatedAt/i);
+  });
 });
 
 describe('buildReconcilePlan — lastPulledHash suppression', () => {
@@ -287,13 +307,13 @@ describe('buildReconcilePlan — counts & ordering', () => {
   it('tallies counts across a mixed batch and preserves input order', () => {
     const inputs: ReconcileInput[] = [
       // unchanged
-      { link: link({ specItemId: 'u' }), remote: remote({ updatedAt: OLDER }), localHash: 'pushed-u' },
+      { link: link({ specItemId: 'u' }), remote: remote({ updatedAt: OLDER, externalId: 'EXT-u' }), localHash: 'pushed-u' },
       // remote-only
-      { link: link({ specItemId: 'r' }), remote: remote({ updatedAt: NEWER }), localHash: 'pushed-r' },
+      { link: link({ specItemId: 'r' }), remote: remote({ updatedAt: NEWER, externalId: 'EXT-r' }), localHash: 'pushed-r' },
       // local-only
-      { link: link({ specItemId: 'l' }), remote: remote({ updatedAt: OLDER }), localHash: 'edited' },
+      { link: link({ specItemId: 'l' }), remote: remote({ updatedAt: OLDER, externalId: 'EXT-l' }), localHash: 'edited' },
       // conflict (both changed)
-      { link: link({ specItemId: 'c' }), remote: remote({ updatedAt: NEWER }), localHash: 'edited' },
+      { link: link({ specItemId: 'c' }), remote: remote({ updatedAt: NEWER, externalId: 'EXT-c' }), localHash: 'edited' },
       // remote-missing
       { link: link({ specItemId: 'm' }), remote: null, localHash: 'pushed-m' },
     ];
@@ -358,7 +378,7 @@ describe('applyReconcile', () => {
         localChanged: false,
         localKnown: true,
       },
-      remote: remoteState,
+      remote: remoteState ? { ...remoteState, externalId: l.externalId } : null,
       resolution,
     };
   }
@@ -373,6 +393,7 @@ describe('applyReconcile', () => {
     expect(writes[0]).toEqual({
       specItemId: 'a',
       connectionId: CONNECTION_ID,
+      externalId: 'EXT-a',
       externalUpdatedAt: NEWER,
       lastPulledAt: FIXED_NOW,
       lastPulledHash: computeRemoteHash(r),
@@ -461,5 +482,33 @@ describe('applyReconcile', () => {
     const { deps } = fakeDeps();
     const result = applyReconcile([], deps);
     expect(result).toEqual({ results: [], adopted: 0, keptLocal: 0, skipped: 0, failed: 0 });
+  });
+
+  it('adopt-remote whose remote identity does not match the entry fails and writes nothing', () => {
+    const { deps, writes } = fakeDeps();
+    const r = remote({ updatedAt: NEWER, externalId: 'EXT-other' });
+    const mismatched: ResolvedReconcileEntry = {
+      entry: {
+        specItemId: 'a',
+        connectionId: CONNECTION_ID,
+        externalId: 'EXT-a',
+        externalUrl: 'https://example.test/a',
+        classification: 'remote-only',
+        proposedResolution: 'adopt-remote',
+        baselineAt: BASELINE,
+        remoteChanged: true,
+        localChanged: false,
+        localKnown: true,
+      },
+      remote: r,
+      resolution: 'adopt-remote',
+    };
+
+    const result = applyReconcile([mismatched], deps);
+
+    expect(writes).toHaveLength(0);
+    expect(result.results[0].status).toBe('failed');
+    expect(result.results[0].error).toMatch(/does not match/i);
+    expect(result.failed).toBe(1);
   });
 });

@@ -111,8 +111,11 @@ export function upsertSyncLink(input: SyncLink): SyncLink {
  * never clobber the last-pushed hash/timestamp — each direction owns its own
  * columns.
  *
- * This is a pure UPDATE keyed by (specItemId, connectionId): pull only ever runs
- * for an already-pushed item, so there is nothing to insert. A missing row is a
+ * This is a pure UPDATE keyed by (specItemId, connectionId, externalId): pull only ever runs
+ * for an already-pushed item, so there is nothing to insert. Including `external_id` in the
+ * key means a link that was re-pointed to a different remote between planning and applying is
+ * left untouched (the UPDATE matches zero rows) rather than stamped with a stale remote's
+ * baseline. A missing row is a
  * silent no-op (the UPDATE matches zero rows) rather than an error — e.g. the
  * link was deleted between planning and applying. `externalUpdatedAt` and
  * `lastPulledAt` are accepted as ISO strings and stored as epoch ms; each is
@@ -122,6 +125,7 @@ export function upsertSyncLink(input: SyncLink): SyncLink {
 export function updateSyncLinkPullState(input: {
   specItemId: string;
   connectionId: string;
+  externalId: string;
   externalUpdatedAt: string;
   lastPulledAt: string;
   lastPulledHash: string;
@@ -144,7 +148,7 @@ export function updateSyncLinkPullState(input: {
          external_updated_at = ?,
          last_pulled_at      = ?,
          last_pulled_hash    = ?
-       WHERE spec_item_id = ? AND connection_id = ?`,
+       WHERE spec_item_id = ? AND connection_id = ? AND external_id = ?`,
     )
     .run(
       externalUpdatedAt,
@@ -152,6 +156,7 @@ export function updateSyncLinkPullState(input: {
       input.lastPulledHash,
       input.specItemId,
       input.connectionId,
+      input.externalId,
     );
 }
 

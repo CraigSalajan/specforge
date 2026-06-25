@@ -269,11 +269,33 @@ function classify(input: ReconcileInput): ReconcileEntry {
     };
   }
 
+  // Identity guard: the remote we read must be the one this link points at. A
+  // mismatch means the caller paired the wrong remote with this link; adopting
+  // its timestamp/hash would corrupt the link's baseline, so refuse loudly.
+  if (remote.externalId !== link.externalId) {
+    throw new Error(
+      `buildReconcilePlan: remote.externalId (${remote.externalId}) does not match link.externalId (${link.externalId})`,
+    );
+  }
+
   // Did the remote change since our baseline? Strict `>`: an identical timestamp
-  // is "no change". Then demote a content-identical bump using the stored pull
-  // hash (a metadata-only `updatedAt` move we must not treat as a real change).
-  let remoteChanged =
-    new Date(remote.updatedAt).getTime() > new Date(baselineAt).getTime();
+  // is "no change". Reject malformed timestamps rather than letting a NaN compare
+  // fall through as `false`, which would silently hide a real remote change.
+  const remoteMs = new Date(remote.updatedAt).getTime();
+  if (Number.isNaN(remoteMs)) {
+    throw new Error(
+      `buildReconcilePlan: invalid remote.updatedAt (expected an ISO-8601 date): ${remote.updatedAt}`,
+    );
+  }
+  const baselineMs = new Date(baselineAt).getTime();
+  if (Number.isNaN(baselineMs)) {
+    throw new Error(
+      `buildReconcilePlan: invalid baseline timestamp (expected an ISO-8601 date): ${baselineAt}`,
+    );
+  }
+  // Then demote a content-identical bump using the stored pull hash (a
+  // metadata-only `updatedAt` move we must not treat as a real change).
+  let remoteChanged = remoteMs > baselineMs;
   if (remoteChanged && link.lastPulledHash !== undefined) {
     if (computeRemoteHash(remote) === link.lastPulledHash) {
       remoteChanged = false;
@@ -351,6 +373,7 @@ export interface ReconcileApplyDeps {
   writePullState: (update: {
     specItemId: string;
     connectionId: string;
+    externalId: string;
     externalUpdatedAt: string;
     lastPulledAt: string;
     lastPulledHash: string;
@@ -435,9 +458,21 @@ export function applyReconcile(
           });
           continue;
         }
+        if (remote.externalId !== entry.externalId) {
+          // The remote handed to apply isn't the one this entry points at;
+          // adopting it would advance the wrong link's baseline. Fail the entry.
+          results.push({
+            specItemId,
+            resolution,
+            status: 'failed',
+            error: `remote.externalId (${remote.externalId}) does not match entry.externalId (${entry.externalId})`,
+          });
+          continue;
+        }
         writePullState({
           specItemId,
           connectionId: entry.connectionId,
+          externalId: entry.externalId,
           externalUpdatedAt: remote.updatedAt,
           lastPulledAt: now(),
           lastPulledHash: computeRemoteHash(remote),
