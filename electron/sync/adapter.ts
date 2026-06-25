@@ -83,6 +83,31 @@ export interface ExternalItemResult {
 }
 
 /**
+ * A snapshot of a previously-synced item's current state in the provider, read
+ * back during a pull/reconcile (TER-23) so the engine can detect changes made
+ * outside SpecForge. Fields are normalized across providers: an epic's Linear
+ * *Project* and a story's Linear *Issue* both project onto this shape (a Project
+ * has no `description`-style `title`, so the adapter maps its `name` here).
+ */
+export interface RemoteItemState {
+  /** Provider-native id of the remote item (Linear node id). */
+  externalId: string;
+  /** Deep link back to the remote item. */
+  externalUrl: string;
+  /**
+   * The remote item's last-modified timestamp as ISO 8601, from the provider's
+   * `updatedAt` (Linear `DateTime`, e.g. `2025-01-24T19:00:15.885Z`). The
+   * reconcile engine compares this against the link's pull baseline to decide
+   * whether the remote changed since SpecForge last touched it.
+   */
+  updatedAt: string;
+  /** The remote item's title (a Linear Issue's `title`, or a Project's `name`). */
+  title: string;
+  /** The remote item's description/body; omitted when the remote has none. */
+  description?: string;
+}
+
+/**
  * Optional per-call context the Sync Engine threads into createItem so an item
  * can be attached to a provider "container" resolved at runtime — e.g. the
  * Linear Project created for an ancestor Epic. Adapters whose provider doesn't
@@ -150,4 +175,27 @@ export interface IAdapter {
    * missing.
    */
   linkItems(parentId: string, childIds: string[]): Promise<void>;
+
+  /**
+   * Read back the current remote state of a previously-synced item so the engine
+   * can detect changes made outside SpecForge (the pull half of bi-directional
+   * sync, TER-23).
+   *
+   * The `level` drives which provider object is read: per `./level-mapping`, an
+   * `epic` maps to the provider's container (a Linear *Project*) and every other
+   * level to an *Issue*; the adapter routes the read accordingly.
+   *
+   * This is the first **read-direction** method on what is otherwise a write-only
+   * contract (`createItem`/`updateItem`/`linkItems`). Only the Linear adapter
+   * implements it today; other providers may leave it unimplemented until their
+   * pull path lands.
+   *
+   * @param externalId the provider-native id previously returned by `createItem`.
+   * @param level the canonical level of the item, selecting container-vs-item.
+   * @returns the normalized {@link RemoteItemState}, or `null` when the remote
+   * item no longer exists (the provider returned a null node for that id).
+   * @throws Rejects on auth/transport/GraphQL failure (the same way the write
+   * methods propagate transport errors); a missing item is `null`, not a throw.
+   */
+  getRemoteState(externalId: string, level: CanonicalLevel): Promise<RemoteItemState | null>;
 }

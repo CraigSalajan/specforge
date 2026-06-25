@@ -1520,3 +1520,126 @@ describe('LinearAdapter — TER-21: criteria checklist', () => {
     expect(occurrences(secondDescription, MARKER_END)).toBe(1);
   });
 });
+
+/**
+ * TER-23: getRemoteState reads back the current Linear state of a
+ * previously-synced item for the pull/reconcile path. Routing follows the same
+ * epic→Project / other→Issue mapping as the write path: an `epic` issues the
+ * `project(id)` query (mapping `name` → `title`), every other level issues the
+ * `issue(id)` query (mapping `title`/`description`/`updatedAt`/`url`). A `null`
+ * node ⇒ the method resolves `null` ("remote missing"). The injected transport is
+ * faked with a `vi.fn()` `request`, so the suite touches no network.
+ */
+describe('LinearAdapter — TER-23: getRemoteState', () => {
+  /** Fakes the GraphQL transport with a single recordable `request` method. */
+  function fakeClientWith(request: ReturnType<typeof vi.fn>): LinearGraphQLClient {
+    return { request } as unknown as LinearGraphQLClient;
+  }
+
+  /** Reads the query string from the most recent `request` call. */
+  function lastQuery(request: ReturnType<typeof vi.fn>): string {
+    return request.mock.calls.at(-1)?.[0] as string;
+  }
+
+  /** Reads the variables object from the most recent `request` call. */
+  function lastVars(request: ReturnType<typeof vi.fn>): Record<string, unknown> {
+    return request.mock.calls.at(-1)?.[1] as Record<string, unknown>;
+  }
+
+  it('reads a story via the issue(id) query and maps all fields', async () => {
+    const request = vi.fn().mockResolvedValue({
+      issue: {
+        id: 'iss-1',
+        title: 'Remote story title',
+        description: 'Remote body',
+        updatedAt: '2025-01-24T19:00:15.885Z',
+        url: 'https://linear.app/x/issue/iss-1',
+      },
+    });
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    const state = await adapter.getRemoteState('iss-1', 'story');
+
+    expect(lastQuery(request)).toContain('issue(id:');
+    expect(lastQuery(request)).not.toContain('project(id:');
+    expect(lastVars(request)).toEqual({ id: 'iss-1' });
+    expect(state).toEqual({
+      externalId: 'iss-1',
+      externalUrl: 'https://linear.app/x/issue/iss-1',
+      updatedAt: '2025-01-24T19:00:15.885Z',
+      title: 'Remote story title',
+      description: 'Remote body',
+    });
+  });
+
+  it('normalizes a null issue description to an absent field', async () => {
+    const request = vi.fn().mockResolvedValue({
+      issue: {
+        id: 'iss-1',
+        title: 'No body',
+        description: null,
+        updatedAt: '2025-01-24T19:00:15.885Z',
+        url: 'https://linear.app/x/issue/iss-1',
+      },
+    });
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    const state = await adapter.getRemoteState('iss-1', 'story');
+
+    expect(state).not.toBeNull();
+    expect(state).not.toHaveProperty('description');
+  });
+
+  it('reads an epic via the project(id) query and maps name → title', async () => {
+    const request = vi.fn().mockResolvedValue({
+      project: {
+        id: 'proj-1',
+        name: 'Remote project name',
+        description: 'Project body',
+        updatedAt: '2025-02-01T08:30:00.000Z',
+        url: 'https://linear.app/x/project/proj-1',
+      },
+    });
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    const state = await adapter.getRemoteState('proj-1', 'epic');
+
+    expect(lastQuery(request)).toContain('project(id:');
+    expect(lastQuery(request)).not.toContain('issue(id:');
+    expect(lastVars(request)).toEqual({ id: 'proj-1' });
+    expect(state).toEqual({
+      externalId: 'proj-1',
+      externalUrl: 'https://linear.app/x/project/proj-1',
+      updatedAt: '2025-02-01T08:30:00.000Z',
+      title: 'Remote project name',
+      description: 'Project body',
+    });
+  });
+
+  it('resolves null when the issue node no longer exists', async () => {
+    const request = vi.fn().mockResolvedValue({ issue: null });
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    expect(await adapter.getRemoteState('gone', 'story')).toBeNull();
+  });
+
+  it('resolves null when the project node no longer exists', async () => {
+    const request = vi.fn().mockResolvedValue({ project: null });
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    expect(await adapter.getRemoteState('gone', 'epic')).toBeNull();
+  });
+
+  it('propagates transport/GraphQL errors rather than swallowing them', async () => {
+    const request = vi
+      .fn()
+      .mockRejectedValue(
+        new LinearRequestError({ code: 'server', retryable: true, message: 'boom' }),
+      );
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    await expect(adapter.getRemoteState('iss-1', 'story')).rejects.toBeInstanceOf(
+      LinearRequestError,
+    );
+  });
+});
