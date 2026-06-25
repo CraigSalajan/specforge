@@ -5,7 +5,11 @@ import {
   setSetting,
   setManySettings,
 } from '../db/repositories/settings.repo';
-import { decryptSettingValue, encryptSettingValue } from './secure-settings';
+import {
+  decryptSettingValue,
+  encryptSettingValue,
+  isConnectionSecretKey,
+} from './secure-settings';
 
 const Channels = {
   Get: 'specforge:settings-get',
@@ -29,6 +33,10 @@ function assertValue(value: unknown): asserts value is string {
 export function registerSettingsHandlers(): void {
   ipcMain.handle(Channels.Get, async (_e, key: string): Promise<string | null> => {
     assertKey(key);
+    if (isConnectionSecretKey(key)) {
+      // Per-connection secrets are main-side only — never readable over IPC.
+      throw new Error('Connection secrets are not readable over IPC');
+    }
     const stored = getSetting(key);
     return stored === null ? null : decryptSettingValue(key, stored);
   });
@@ -36,6 +44,7 @@ export function registerSettingsHandlers(): void {
   ipcMain.handle(Channels.GetAll, async (): Promise<Record<string, string>> => {
     const out: Record<string, string> = {};
     for (const [k, v] of Object.entries(getAllSettings())) {
+      if (isConnectionSecretKey(k)) continue; // per-connection secrets are read main-side only (TER-28)
       out[k] = decryptSettingValue(k, v);
     }
     return out;

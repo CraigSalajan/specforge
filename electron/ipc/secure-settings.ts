@@ -1,5 +1,17 @@
 import { safeStorage } from 'electron';
-import { getSetting, setSetting } from '../db/repositories/settings.repo';
+
+/**
+ * A minimal key/value port over the persisted settings, injected into the
+ * repo-dependent helpers here so this module never imports the SQLite-backed
+ * repository directly. Keeping it dependency-free lets the encryption seam be
+ * unit-tested in the renderer's jsdom runner (which cannot load `node:sqlite`);
+ * production binds this to the real repo in `./settings-secret-store`.
+ */
+export interface SecretSettingsStore {
+  get(key: string): string | null;
+  set(key: string, value: string): void;
+  getAll(): Record<string, string>;
+}
 
 /**
  * Transparent at-rest encryption for secret settings values.
@@ -16,11 +28,31 @@ import { getSetting, setSetting } from '../db/repositories/settings.repo';
 
 const ENC_PREFIX = 'enc:v1:';
 
-/** Settings keys whose values are encrypted at rest via `safeStorage`. */
+/** Bare (non-per-connection) settings keys whose values are encrypted at rest via `safeStorage`. */
 const SECRET_SETTING_KEYS: ReadonlySet<string> = new Set(['ai.apiKey', 'linear.pat']);
 
-function isSecretSettingKey(key: string): boolean {
-  return SECRET_SETTING_KEYS.has(key);
+/**
+ * Prefixes for per-connection PM credential keys (TER-28). A full key is
+ * `linear.pat::<connectionId>` or `linear.refreshToken::<connectionId>`, where
+ * `<connectionId>` already encodes the vault path + provider + team/project (see
+ * `electron/sync/connection.ts`), so a per-connection secret is inherently
+ * per-vault. The id portion is unknowable at build time, hence a prefix match
+ * rather than an exact-match Set.
+ */
+const CONNECTION_SECRET_PREFIXES = ['linear.pat::', 'linear.refreshToken::'] as const;
+
+/**
+ * True for per-connection PM secret keys (`linear.pat::<id>`,
+ * `linear.refreshToken::<id>`) — the subset that must NEVER be hydrated into the
+ * renderer.
+ */
+export function isConnectionSecretKey(key: string): boolean {
+  return CONNECTION_SECRET_PREFIXES.some((p) => key.startsWith(p));
+}
+
+/** True for any key whose value is encrypted at rest. */
+export function isSecretSettingKey(key: string): boolean {
+  return SECRET_SETTING_KEYS.has(key) || isConnectionSecretKey(key);
 }
 
 /**
@@ -60,15 +92,22 @@ export function decryptSettingValue(key: string, stored: string): string {
  * encrypted values. Must run after the app `ready` event (a `safeStorage`
  * requirement) and after the DB has been opened. No-op when encryption is
  * unavailable or the stored values are already encrypted or empty.
+ *
+ * Scans **all** stored rows rather than a static key set: per-connection
+ * secret keys (`linear.pat::<id>`, `linear.refreshToken::<id>`) are unknowable
+ * at build time, so the legacy global `linear.pat` (an exact-match secret key)
+ * and any plaintext per-connection row written under the no-encryption fallback
+ * are both encrypted in place here. The `store` is injected (see
+ * {@link SecretSettingsStore}) so this stays repo-free and unit-testable.
  */
-export function migratePlaintextSecrets(): void {
+export function migratePlaintextSecrets(store: SecretSettingsStore): void {
   if (!safeStorage.isEncryptionAvailable()) return;
-  for (const key of SECRET_SETTING_KEYS) {
-    const stored = getSetting(key);
+  for (const [key, stored] of Object.entries(store.getAll())) {
+    if (!isSecretSettingKey(key)) continue;
     if (!stored || stored.startsWith(ENC_PREFIX)) continue;
     const encrypted = encryptSettingValue(key, stored);
     if (encrypted !== stored) {
-      setSetting(key, encrypted);
+      store.set(key, encrypted);
       console.log(`[settings] Migrated "${key}" to encrypted at-rest storage.`);
     }
   }

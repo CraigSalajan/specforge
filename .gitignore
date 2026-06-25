@@ -45,6 +45,12 @@ __screenshots__/
 .DS_Store
 Thumbs.db
 
+# Local SQLite database (created at runtime in userData; a repo-root copy is a
+# stray dev/test artifact and must never be committed)
+specforge.db
+specforge.db-wal
+specforge.db-shm
+
 # Claude Code
 CLAUDE.md
 .claude/

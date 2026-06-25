@@ -388,6 +388,15 @@ export class SettingsService {
     } else {
       delete next[vaultPath];
     }
+    // Clear the connection's stored credentials BEFORE dropping it from the map:
+    // connectionId is deterministic, so a removed-connection-with-lingering-secret
+    // could let a later re-add silently reuse a stale credential. Clearing first
+    // means a partial failure leaves the connection present but credential-less
+    // (forcing a clean re-auth) rather than the reverse. Guarded for non-Electron
+    // mode, where update() still works but IPC is unavailable.
+    if (this.ipc.isAvailable) {
+      await this.ipc.connectionSecretClear(connectionId);
+    }
     await this.update({ 'pm.connections': next });
   }
 }

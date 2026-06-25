@@ -27,6 +27,9 @@ const IpcChannels = {
   SettingsGetAll: 'specforge:settings-get-all',
   SettingsSet: 'specforge:settings-set',
   SettingsSetMany: 'specforge:settings-set-many',
+  ConnectionSecretSet: 'specforge:connection-secret-set',
+  ConnectionSecretClear: 'specforge:connection-secret-clear',
+  ConnectionSecretStatus: 'specforge:connection-secret-status',
   ChatsListSessions: 'specforge:chats-list-sessions',
   ChatsCreateSession: 'specforge:chats-create-session',
   ChatsGetMessages: 'specforge:chats-get-messages',
@@ -241,6 +244,21 @@ const api = {
     ipcRenderer.invoke(IpcChannels.SettingsSet, key, value),
   settingsSetMany: (values: Record<string, string>): Promise<void> =>
     ipcRenderer.invoke(IpcChannels.SettingsSetMany, values),
+
+  // TER-28: per-connection PM credentials (write/clear/status only — never read back)
+  connectionSecretSet: (
+    connectionId: string,
+    kind: 'pat' | 'refreshToken',
+    token: string,
+  ): Promise<void> =>
+    ipcRenderer.invoke(IpcChannels.ConnectionSecretSet, connectionId, kind, token),
+  connectionSecretClear: (connectionId: string): Promise<void> =>
+    ipcRenderer.invoke(IpcChannels.ConnectionSecretClear, connectionId),
+  connectionSecretStatus: (
+    connectionId: string,
+    kind: 'pat' | 'refreshToken',
+  ): Promise<boolean> =>
+    ipcRenderer.invoke(IpcChannels.ConnectionSecretStatus, connectionId, kind),
 
   // Phase 3: chats
   chatsListSessions: (vaultPath: string) =>
