@@ -1,10 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
-
-// `electron/ipc/sync` imports `ipcMain` at module top. These tests exercise only
-// the exported pure `handle*` functions (never `registerSyncHandlers`), so a bare
-// `ipcMain.handle` stub is enough to let the module load under jsdom — mirroring
-// the `vi.mock('electron', …)` seam in connection-secrets.spec.ts.
-vi.mock('electron', () => ({ ipcMain: { handle: vi.fn() } }));
+import { describe, expect, it } from 'vitest';
 
 import {
   handleBuildPreview,
@@ -12,7 +6,7 @@ import {
   handleExecutePush,
   handleTestConnection,
   type SyncIpcContext,
-} from '../../../electron/ipc/sync';
+} from '../../../electron/ipc/sync-handlers';
 import type { SyncOrchestratorDeps } from '../../../electron/sync/orchestrator';
 import { LinearRequestError } from '../../../electron/sync/linear/errors';
 import type { Connection } from '../../../electron/sync/connection';
