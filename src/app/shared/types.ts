@@ -1,4 +1,7 @@
+import type { AdapterName, ProjectMetadata } from '../../../electron/sync/adapter';
 import type { Connection } from '../../../electron/sync/connection';
+import type { PushPreviewTree } from '../../../electron/sync/preview';
+import type { PushResult } from '../../../electron/sync/executor';
 
 export const IpcChannels = {
   SelectVault: 'specforge:select-vault',
@@ -26,6 +29,12 @@ export const IpcChannels = {
   SettingsGetAll: 'specforge:settings-get-all',
   SettingsSet: 'specforge:settings-set',
   SettingsSetMany: 'specforge:settings-set-many',
+
+  // TER-30: sync engine surface (reads/actions; connection writes stay in SettingsService)
+  SyncTestConnection: 'specforge:sync-test-connection',
+  SyncBuildPreview: 'specforge:sync-build-preview',
+  SyncExecutePush: 'specforge:sync-execute-push',
+  SyncConnectionList: 'specforge:sync-connection-list',
 
   // Phase 3
   ChatsListSessions: 'specforge:chats-list-sessions',
@@ -581,6 +590,30 @@ export type AiListModelsIpcResult =
   | { ok: true; data: AiListModelsResponse }
   | { ok: false; error: AiErrorInfo };
 
+/**
+ * TER-30 sync result envelopes. The three sync *action* channels travel their
+ * failures as data (same reason as the AI handlers above) reusing the shared
+ * {@link AiErrorInfo} vocabulary; the read-only connection list returns a bare
+ * `Connection[]` and so has no envelope.
+ */
+export type SyncTestConnectionResult =
+  | { ok: true; data: ProjectMetadata }
+  | { ok: false; error: AiErrorInfo };
+
+/** Serializable subset of the planned push the build-preview channel returns. */
+export interface SyncPreviewData {
+  provider: AdapterName;
+  preview: PushPreviewTree;
+}
+
+export type SyncBuildPreviewResult =
+  | { ok: true; data: SyncPreviewData }
+  | { ok: false; error: AiErrorInfo };
+
+export type SyncExecutePushResult =
+  | { ok: true; data: PushResult | null }
+  | { ok: false; error: AiErrorInfo };
+
 // PDF export. The renderer sends sanitized HTML; the main process shows the
 // save dialog, prints it in a hidden window and writes the file.
 export interface ExportPdfPayload {
@@ -648,6 +681,12 @@ export interface SpecForgeApi {
     connectionId: string,
     kind: 'pat' | 'refreshToken',
   ) => Promise<boolean>;
+
+  // TER-30: sync engine surface (only connectionId/vaultPath cross the boundary)
+  syncTestConnection: (connectionId: string) => Promise<SyncTestConnectionResult>;
+  syncBuildPreview: (connectionId: string) => Promise<SyncBuildPreviewResult>;
+  syncExecutePush: (connectionId: string) => Promise<SyncExecutePushResult>;
+  syncConnectionList: (vaultPath: string) => Promise<Connection[]>;
 
   // Phase 3: chat persistence
   chatsListSessions: (vaultPath: string) => Promise<ChatSessionSummary[]>;

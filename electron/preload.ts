@@ -30,6 +30,10 @@ const IpcChannels = {
   ConnectionSecretSet: 'specforge:connection-secret-set',
   ConnectionSecretClear: 'specforge:connection-secret-clear',
   ConnectionSecretStatus: 'specforge:connection-secret-status',
+  SyncTestConnection: 'specforge:sync-test-connection',
+  SyncBuildPreview: 'specforge:sync-build-preview',
+  SyncExecutePush: 'specforge:sync-execute-push',
+  SyncConnectionList: 'specforge:sync-connection-list',
   ChatsListSessions: 'specforge:chats-list-sessions',
   ChatsCreateSession: 'specforge:chats-create-session',
   ChatsGetMessages: 'specforge:chats-get-messages',
@@ -259,6 +263,17 @@ const api = {
     kind: 'pat' | 'refreshToken',
   ): Promise<boolean> =>
     ipcRenderer.invoke(IpcChannels.ConnectionSecretStatus, connectionId, kind),
+
+  // TER-30: sync engine surface (only connectionId/vaultPath cross the boundary —
+  // never a credential). test/preview/push return result envelopes; list is bare.
+  syncTestConnection: (connectionId: string) =>
+    ipcRenderer.invoke(IpcChannels.SyncTestConnection, connectionId),
+  syncBuildPreview: (connectionId: string) =>
+    ipcRenderer.invoke(IpcChannels.SyncBuildPreview, connectionId),
+  syncExecutePush: (connectionId: string) =>
+    ipcRenderer.invoke(IpcChannels.SyncExecutePush, connectionId),
+  syncConnectionList: (vaultPath: string) =>
+    ipcRenderer.invoke(IpcChannels.SyncConnectionList, vaultPath),
 
   // Phase 3: chats
   chatsListSessions: (vaultPath: string) =>

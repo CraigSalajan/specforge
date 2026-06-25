@@ -32,7 +32,11 @@ import type {
   SkillMeta,
   SkillOrigin,
   SpecForgeApi,
+  SyncBuildPreviewResult,
+  SyncExecutePushResult,
+  SyncTestConnectionResult,
 } from '../shared/types';
+import type { Connection } from '../../../electron/sync/connection';
 
 @Injectable({ providedIn: 'root' })
 export class IpcService {
@@ -177,6 +181,23 @@ export class IpcService {
 
   connectionSecretStatus(connectionId: string, kind: 'pat' | 'refreshToken'): Promise<boolean> {
     return this.requireApi().connectionSecretStatus(connectionId, kind);
+  }
+
+  // TER-30: sync engine surface (only connectionId/vaultPath cross the boundary)
+  syncTestConnection(connectionId: string): Promise<SyncTestConnectionResult> {
+    return this.requireApi().syncTestConnection(connectionId);
+  }
+
+  syncBuildPreview(connectionId: string): Promise<SyncBuildPreviewResult> {
+    return this.requireApi().syncBuildPreview(connectionId);
+  }
+
+  syncExecutePush(connectionId: string): Promise<SyncExecutePushResult> {
+    return this.requireApi().syncExecutePush(connectionId);
+  }
+
+  syncConnectionList(vaultPath: string): Promise<Connection[]> {
+    return this.requireApi().syncConnectionList(vaultPath);
   }
 
   // Phase 3: chats
