@@ -162,6 +162,23 @@ export class IpcService {
     return this.requireApi().settingsSetMany(values);
   }
 
+  // TER-28: per-connection PM credentials (write/clear/status only — never read back)
+  connectionSecretSet(
+    connectionId: string,
+    kind: 'pat' | 'refreshToken',
+    token: string,
+  ): Promise<void> {
+    return this.requireApi().connectionSecretSet(connectionId, kind, token);
+  }
+
+  connectionSecretClear(connectionId: string): Promise<void> {
+    return this.requireApi().connectionSecretClear(connectionId);
+  }
+
+  connectionSecretStatus(connectionId: string, kind: 'pat' | 'refreshToken'): Promise<boolean> {
+    return this.requireApi().connectionSecretStatus(connectionId, kind);
+  }
+
   // Phase 3: chats
   chatsListSessions(vaultPath: string): Promise<ChatSessionSummary[]> {
     return this.requireApi().chatsListSessions(vaultPath);

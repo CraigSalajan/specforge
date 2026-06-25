@@ -389,5 +389,7 @@ export class SettingsService {
       delete next[vaultPath];
     }
     await this.update({ 'pm.connections': next });
+    // Clear the connection's stored credentials so removing it never leaves orphaned secrets.
+    await this.ipc.connectionSecretClear(connectionId);
   }
 }

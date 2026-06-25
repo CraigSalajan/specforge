@@ -637,6 +637,18 @@ export interface SpecForgeApi {
   settingsSet: (key: string, value: string) => Promise<void>;
   settingsSetMany: (values: Record<string, string>) => Promise<void>;
 
+  // TER-28: per-connection PM credentials (write/clear/status only — never read back)
+  connectionSecretSet: (
+    connectionId: string,
+    kind: 'pat' | 'refreshToken',
+    token: string,
+  ) => Promise<void>;
+  connectionSecretClear: (connectionId: string) => Promise<void>;
+  connectionSecretStatus: (
+    connectionId: string,
+    kind: 'pat' | 'refreshToken',
+  ) => Promise<boolean>;
+
   // Phase 3: chat persistence
   chatsListSessions: (vaultPath: string) => Promise<ChatSessionSummary[]>;
   chatsCreateSession: (input: {
