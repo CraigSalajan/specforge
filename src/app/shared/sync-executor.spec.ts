@@ -125,6 +125,11 @@ function fakeAdapter(
       }
       return Promise.resolve();
     },
+    // The push executor never reads remote state; this stub only satisfies the
+    // read-direction half of IAdapter (TER-23) so the fake still typechecks.
+    getRemoteState(): Promise<null> {
+      return Promise.resolve(null);
+    },
   };
 }
 

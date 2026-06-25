@@ -211,4 +211,21 @@ export const MIGRATIONS: ReadonlyArray<Migration> = [
     // IF NOT EXISTS, but the `_migrations` table gates this to run exactly once.
     sql: 'ALTER TABLE chat_messages ADD COLUMN reasoning TEXT;',
   },
+  {
+    id: 10,
+    name: 'sync_links_pull_state',
+    // Pull/reconcile state for bi-directional sync (TER-23): the remote
+    // `updatedAt` we last observed, when we last pulled, and the hash of the
+    // remote content at that pull. All nullable with no default — existing
+    // push-only rows simply have no pull state yet, and the pull path fills these
+    // in via `updateSyncLinkPullState` without touching the push columns. As in
+    // migration 9, SQLite ALTER TABLE ADD COLUMN does not support IF NOT EXISTS,
+    // but the `_migrations` table gates this multi-statement migration to run
+    // exactly once.
+    sql: `
+      ALTER TABLE sync_links ADD COLUMN external_updated_at INTEGER;
+      ALTER TABLE sync_links ADD COLUMN last_pulled_at       INTEGER;
+      ALTER TABLE sync_links ADD COLUMN last_pulled_hash     TEXT;
+    `,
+  },
 ];
