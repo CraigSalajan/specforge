@@ -89,7 +89,7 @@ export type Connection = LinearConnection;
 
 /**
  * The minimal inputs that determine a connection's identity. Two connections
- * with the same `vaultPath` + `provider` + `projectId` are considered the same
+ * with the same `vaultPath` + `provider` + `teamId` + `projectId` are considered the same
  * target and so share an id; differing on any of these yields a distinct id.
  */
 export interface ConnectionIdInput {
@@ -97,6 +97,13 @@ export interface ConnectionIdInput {
   vaultPath: string;
   /** The PM provider this connection targets. */
   provider: AdapterName;
+  /**
+   * Provider-native target identity (for Linear, the required team id). Part of
+   * the identity so two connections in the same vault that target different
+   * teams don't collide onto the same id. Optional at this generic layer because
+   * not every future provider has a team concept; Linear callers always pass it.
+   */
+  teamId?: string;
   /** Optional provider project id; part of the identity so two projects differ. */
   projectId?: string;
 }
@@ -126,7 +133,7 @@ function fnv1a32(input: string): number {
  * the same normalization the `ui.collapsedFolders` setting documents ("Normalized
  * (lowercase, forward-slash) vault-relative paths") — so `C:\Vault` and
  * `c:/vault` resolve to the same connection. The composite key is
- * `${normalizedVault}|${provider}|${projectId ?? ''}`, and the result is
+ * `${normalizedVault}|${provider}|${teamId ?? ''}|${projectId ?? ''}`, and the result is
  * `${provider}-${hashHex}`, where `hashHex` is 16 lowercase hex chars: two
  * FNV-1a passes (the second salted) concatenated to widen the space from 32 to
  * 64 bits and further shrink collision odds.
@@ -136,13 +143,15 @@ function fnv1a32(input: string): number {
  * connection_id)`, so a changed `connectionId` would orphan every existing
  * SyncLink that referenced the old id (the item would re-create remotely instead
  * of updating). Recomputing on read is therefore a correctness hazard, not just
- * an inefficiency. Collision risk across the small per-vault connection namespace
- * is negligible.
+ * an inefficiency. Including `teamId` prevents two same-vault connections to
+ * different teams (each with no project) from colliding; `teamId` is fixed for
+ * the life of a connection, so the id stays stable across re-pushes. Collision
+ * risk across the small per-vault connection namespace is negligible.
  */
 export function makeConnectionId(input: ConnectionIdInput): string {
   // Same "normalized lowercase, forward-slash" precedent as ui.collapsedFolders.
   const normalizedVault = input.vaultPath.replace(/\\/g, '/').toLowerCase();
-  const key = `${normalizedVault}|${input.provider}|${input.projectId ?? ''}`;
+  const key = `${normalizedVault}|${input.provider}|${input.teamId ?? ''}|${input.projectId ?? ''}`;
 
   const lo = fnv1a32(key);
   // A salted second pass widens the digest to 64 bits (16 hex) so the id space

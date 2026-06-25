@@ -42,6 +42,12 @@ describe('makeConnectionId', () => {
     expect(withProject).not.toBe(withoutProject);
   });
 
+  it('differs when the teamId differs (same vault, provider, no project)', () => {
+    const a = makeConnectionId({ vaultPath: 'C:/Vault', provider: 'linear', teamId: 'team-1' });
+    const b = makeConnectionId({ vaultPath: 'C:/Vault', provider: 'linear', teamId: 'team-2' });
+    expect(a).not.toBe(b);
+  });
+
   it('normalizes vault-path case and separators to the same id', () => {
     // `C:\Vault` and `c:/vault` are the same vault (normalized lowercase,
     // forward-slash — the ui.collapsedFolders precedent), so the ids must match.
