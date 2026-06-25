@@ -58,6 +58,7 @@ import type {
   IAdapter,
   LabelInfo,
   ProjectMetadata,
+  RemoteItemState,
   WorkflowStateInfo,
 } from '../adapter';
 import type { CanonicalItem, CanonicalLevel } from '../canonical-item';
@@ -172,6 +173,35 @@ interface CreateLabelResponse {
     success: boolean;
     issueLabel: { id: string; name: string } | null;
   };
+}
+
+/**
+ * Shape of the `issue(id)` read query's `data` payload (pull/reconcile, TER-23).
+ * Linear returns a `null` node when the id no longer resolves to an issue.
+ */
+interface ReadIssueResponse {
+  issue: {
+    id: string;
+    title: string;
+    description: string | null;
+    updatedAt: string;
+    url: string;
+  } | null;
+}
+
+/**
+ * Shape of the `project(id)` read query's `data` payload (pull/reconcile,
+ * TER-23). A Project has a `name` rather than a `title`; Linear returns a `null`
+ * node when the id no longer resolves to a project.
+ */
+interface ReadProjectResponse {
+  project: {
+    id: string;
+    name: string;
+    description: string | null;
+    updatedAt: string;
+    url: string;
+  } | null;
 }
 
 /**
@@ -918,5 +948,98 @@ export class LinearAdapter implements IAdapter {
     `;
 
     return { query, variables: { id: childId, input: { parentId } } };
+  }
+
+  /**
+   * @inheritdoc
+   *
+   * Reads back the current Linear state of a previously-synced item for the
+   * pull/reconcile path (TER-23). Routes by level via the same epic→Project /
+   * other→Issue mapping the write path uses: an `epic` reads `project(id)` (whose
+   * `name` maps onto {@link RemoteItemState.title}), every other level reads
+   * `issue(id)`. Linear returns a `null` node when the id no longer resolves, which
+   * this maps to `null` ("remote missing") rather than an error. A missing
+   * `description` (Linear's `null`) is normalized to `undefined` so the field is
+   * simply absent. Transport/GraphQL/auth errors are NOT caught here — they
+   * propagate from the injected client exactly as in the write methods, leaving the
+   * reconcile engine to decide retry/skip.
+   */
+  async getRemoteState(
+    externalId: string,
+    level: CanonicalLevel,
+  ): Promise<RemoteItemState | null> {
+    // An epic is a Linear Project; everything else is a Linear Issue.
+    if (level === 'epic') return this.readProjectState(externalId);
+    return this.readIssueState(externalId);
+  }
+
+  /**
+   * Reads a Linear Issue's state by id and projects it onto a
+   * {@link RemoteItemState}. Resolves `null` when the issue no longer exists
+   * (Linear returns a null `issue` node).
+   */
+  private async readIssueState(id: string): Promise<RemoteItemState | null> {
+    const query = `
+      query LinearReadIssue($id: String!) {
+        issue(id: $id) {
+          id
+          title
+          description
+          updatedAt
+          url
+        }
+      }
+    `;
+
+    const data = await this.client.request<ReadIssueResponse>(query, { id });
+    const issue = data.issue;
+    if (!issue) return null;
+
+    const state: RemoteItemState = {
+      externalId: issue.id,
+      externalUrl: issue.url,
+      updatedAt: issue.updatedAt,
+      title: issue.title,
+    };
+    // Omit `description` entirely when Linear has none (`null`) so the field is
+    // absent rather than an explicit `undefined` — matching RemoteItemState's
+    // "omit when the remote has none" contract and computeRemoteHash's projection.
+    if (issue.description !== null) state.description = issue.description;
+    return state;
+  }
+
+  /**
+   * Reads a Linear Project's state by id and projects it onto a
+   * {@link RemoteItemState}, mapping the project's `name` onto `title`. Resolves
+   * `null` when the project no longer exists (Linear returns a null `project`
+   * node).
+   */
+  private async readProjectState(id: string): Promise<RemoteItemState | null> {
+    const query = `
+      query LinearReadProject($id: String!) {
+        project(id: $id) {
+          id
+          name
+          description
+          updatedAt
+          url
+        }
+      }
+    `;
+
+    const data = await this.client.request<ReadProjectResponse>(query, { id });
+    const project = data.project;
+    if (!project) return null;
+
+    const state: RemoteItemState = {
+      externalId: project.id,
+      externalUrl: project.url,
+      updatedAt: project.updatedAt,
+      // A Project has no `title`; its `name` is the equivalent display field.
+      title: project.name,
+    };
+    // Omit `description` when absent (`null`) — see readIssueState.
+    if (project.description !== null) state.description = project.description;
+    return state;
   }
 }

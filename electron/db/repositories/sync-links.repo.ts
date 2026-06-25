@@ -12,6 +12,10 @@ export interface SyncLink {
   externalUrl: string; // deep link
   lastPushedHash: string; // content hash at last push (see util/hash.sha256)
   lastPushedAt: string; // ISO 8601 timestamp
+  // ---- Pull/reconcile state (TER-23) — all optional; absent on push-only rows ----
+  externalUpdatedAt?: string; // ISO 8601; remote `updatedAt` observed at last reconcile
+  lastPulledAt?: string; // ISO 8601; when we last pulled this item's remote state
+  lastPulledHash?: string; // hash of the remote content at the last pull (see reconcile.computeRemoteHash)
 }
 
 interface SyncLinkRow {
@@ -22,10 +26,14 @@ interface SyncLinkRow {
   external_url: string;
   last_pushed_hash: string;
   last_pushed_at: number; // epoch ms
+  // Pull/reconcile state (TER-23); nullable — absent on push-only rows.
+  external_updated_at: number | null; // epoch ms
+  last_pulled_at: number | null; // epoch ms
+  last_pulled_hash: string | null;
 }
 
 function rowToSyncLink(row: SyncLinkRow): SyncLink {
-  return {
+  const link: SyncLink = {
     specItemId: row.spec_item_id,
     connectionId: row.connection_id,
     externalId: row.external_id,
@@ -33,6 +41,18 @@ function rowToSyncLink(row: SyncLinkRow): SyncLink {
     lastPushedHash: row.last_pushed_hash,
     lastPushedAt: new Date(row.last_pushed_at).toISOString(),
   };
+  // Pull state is optional: only surface a field when its column is populated,
+  // converting epoch-ms back to ISO. A push-only row leaves these keys absent.
+  if (row.external_updated_at !== null) {
+    link.externalUpdatedAt = new Date(row.external_updated_at).toISOString();
+  }
+  if (row.last_pulled_at !== null) {
+    link.lastPulledAt = new Date(row.last_pulled_at).toISOString();
+  }
+  if (row.last_pulled_hash !== null) {
+    link.lastPulledHash = row.last_pulled_hash;
+  }
+  return link;
 }
 
 export function findSyncLink(specItemId: string, connectionId: string): SyncLink | null {
@@ -78,6 +98,61 @@ export function upsertSyncLink(input: SyncLink): SyncLink {
   const saved = findSyncLink(input.specItemId, input.connectionId);
   if (!saved) throw new Error('upsertSyncLink: row not found immediately after upsert');
   return saved;
+}
+
+/**
+ * Record the pull/reconcile state for an existing link after a successful pull
+ * (TER-23) — the pull-side counterpart to {@link upsertSyncLink}.
+ *
+ * It writes ONLY the three pull columns (`external_updated_at`, `last_pulled_at`,
+ * `last_pulled_hash`) and leaves the push columns untouched; `upsertSyncLink`
+ * likewise never writes the pull columns. Keeping the two writers deliberately
+ * separate means a push can never clobber pull baseline state and a pull can
+ * never clobber the last-pushed hash/timestamp — each direction owns its own
+ * columns.
+ *
+ * This is a pure UPDATE keyed by (specItemId, connectionId): pull only ever runs
+ * for an already-pushed item, so there is nothing to insert. A missing row is a
+ * silent no-op (the UPDATE matches zero rows) rather than an error — e.g. the
+ * link was deleted between planning and applying. `externalUpdatedAt` and
+ * `lastPulledAt` are accepted as ISO strings and stored as epoch ms; each is
+ * validated with the same `Number.isNaN` guard as `upsertSyncLink` so a bad input
+ * fails with a clear message rather than a confusing downstream error.
+ */
+export function updateSyncLinkPullState(input: {
+  specItemId: string;
+  connectionId: string;
+  externalUpdatedAt: string;
+  lastPulledAt: string;
+  lastPulledHash: string;
+}): void {
+  const externalUpdatedAt = new Date(input.externalUpdatedAt).getTime();
+  if (Number.isNaN(externalUpdatedAt)) {
+    throw new Error(
+      `updateSyncLinkPullState: invalid externalUpdatedAt (expected an ISO-8601 date): ${input.externalUpdatedAt}`,
+    );
+  }
+  const lastPulledAt = new Date(input.lastPulledAt).getTime();
+  if (Number.isNaN(lastPulledAt)) {
+    throw new Error(
+      `updateSyncLinkPullState: invalid lastPulledAt (expected an ISO-8601 date): ${input.lastPulledAt}`,
+    );
+  }
+  getDb()
+    .prepare(
+      `UPDATE sync_links SET
+         external_updated_at = ?,
+         last_pulled_at      = ?,
+         last_pulled_hash    = ?
+       WHERE spec_item_id = ? AND connection_id = ?`,
+    )
+    .run(
+      externalUpdatedAt,
+      lastPulledAt,
+      input.lastPulledHash,
+      input.specItemId,
+      input.connectionId,
+    );
 }
 
 export function listSyncLinksForItem(specItemId: string): SyncLink[] {
