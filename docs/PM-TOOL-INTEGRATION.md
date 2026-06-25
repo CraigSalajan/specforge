@@ -104,6 +104,42 @@ Provider specifics that change often and should be verified (via `researcher-web
 - **GitHub Projects v2** GraphQL — sub-issue support maturity and how best to represent the epic/feature levels (tracking issues vs milestones vs custom fields).
 - Current state of **official vendor MCP servers** (Atlassian / Linear / GitHub) — only relevant if we later let an adapter delegate to one.
 
+## Spec format → CanonicalItem (the converter)
+
+SpecForge has no structured spec data model — the vault is portable markdown. The epic → feature → story → acceptance-criteria hierarchy is a **convention** expressed in the markdown the app's own AI prompts produce (`create-stories.prompt.ts` / `create-prd.prompt.ts`). `electron/sync/spec-to-canonical.ts` parses that convention into `CanonicalItem[]` to feed `planPush`.
+
+### Convention parsed
+
+Docs live under the vault's `/prd/` folder (walked recursively, `.md` only, ignored dirs skipped). Per document:
+
+| Markdown | CanonicalItem |
+|---|---|
+| `# H1` (the doc title) | **epic** — `title` = H1 text; `description` = body between H1 and the first `##`; carries the doc's `tags` |
+| `## H2` ("Theme") | **feature** — `title` = H2 text; `description` = the H2 body minus lifted story/criteria content; `parentLocalId` = the epic |
+| `As a … I want … so that …` line (case-insensitive; leading `-`/`*`/`+` bullets tolerated) | **story** — `title` = the line; `parentLocalId` = the feature |
+| `### H3` (fallback, only when a feature has **no** "As a …" lines) | **story** — `title` = H3 text |
+| nested `- Acceptance criteria:` bullet list under a story | the story's `criteria: string[]` (one entry per bullet, in source order) |
+
+Acceptance criteria are **not** emitted as standalone `criterion`-level items — Linear V1 folds them inline (see the `level-mapping.ts` strategy). The `criterion` level value remains valid in the type for future providers. Parsing is fence-aware throughout: a `##` heading, an "As a …" story line, or an "Acceptance criteria:" label inside a code fence is inert (not a feature/story/criterion) and stays in the surrounding description. A doc with no `# H1` is skipped. Non-conforming docs never throw — the converter emits what it can.
+
+### `tags`
+
+Read from frontmatter `tags:` (a `string[]`; a single string is coerced to a one-element array; absent/non-string values are ignored) and attached to that file's **epic** item only. No prompt writes a `tags:` key today — the converter defines that contract.
+
+### `localId` derivation (stable, unique, deterministic)
+
+`localId` maps 1:1 to `SyncLink.specItemId`. It is **not** content-derived (a body edit would orphan the link) and **not** line-number-derived (lines shift on edits). Instead:
+
+- **epic** = the frontmatter `id:` (when present, a non-empty string) **else** the document `relPath`;
+- **feature** = `${epicId}#${slug(H2 text)}` — duplicate sibling slugs get a numeric suffix (`-2`, `-3`, …);
+- **story** = `${featureId}/${anchor}` — "As a …" stories use a 1-based ordinal (`s1`, `s2`, …) since story lines can be long or duplicated; `### H3`-fallback stories use `slug(H3 text)` with the same sibling disambiguation.
+
+**Rename caveat:** without an explicit frontmatter `id:`, the derived id embeds the `relPath` and heading text, so **renaming a file or editing a heading changes the id** — the next push re-creates the item rather than updating it. Set `id:` in frontmatter to pin an epic's identity across renames.
+
+### Determinism & purity
+
+`collectSpecDocs(root)` sorts docs by `relPath`; within a doc, items emit in source order (epic, then features in heading order, then each feature's stories in source order). The pure core `specToCanonicalItems(docs)` has zero `fs`/DB/network imports (mirrors the deliberately-pure sync engine); the thin reader (`collectSpecDocs` / `buildCanonicalItemsForVault`) takes an explicit `root` — it never resolves the active vault itself (the downstream orchestrator injects it).
+
 ## Status / next steps
 
 - **Status:** design captured, not scheduled. Add to `docs/ROADMAP.md` Tier 4 when prioritized.
