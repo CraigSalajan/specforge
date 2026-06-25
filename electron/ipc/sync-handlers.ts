@@ -141,7 +141,9 @@ export async function handleTestConnection(
  * Build the read-only push preview for a connection (no network, writes nothing).
  * Returns ONLY the serializable subset — `provider` + `preview` — dropping the
  * non-serializable `adapter` and the bulky `items`/`plan` the renderer does not
- * need to render the confirmation tree.
+ * need to render the confirmation tree. The preview is advisory: {@link
+ * handleExecutePush} re-plans at execute time (see its note on the TOCTOU
+ * window), so treat this as the set to confirm rather than a binding plan.
  */
 export async function handleBuildPreview(
   connectionId: string,
@@ -161,6 +163,20 @@ export async function handleBuildPreview(
  * approval gate, so the orchestrator's default `approve` (always true) is used
  * here. Returns the serializable {@link PushResult} (or `null` if a future gate
  * declines).
+ *
+ * Re-plans from live vault state rather than replaying the exact plan shown by
+ * {@link handleBuildPreview}: a `PlannedPush` holds a non-serializable adapter
+ * instance and so cannot cross the IPC boundary to be handed back here. The
+ * preview is therefore advisory — if the vault changes between preview and
+ * execute, the applied set can differ. This is a deliberate, bounded TOCTOU
+ * window; a future tightening could thread an approved-plan hash through to
+ * reject a diverged plan.
+ *
+ * Known limitation inherited from the executor (not introduced by this IPC
+ * seam): item creates are idempotent only via persisted SyncLinks, so a partial
+ * retry where the remote create succeeded but its SyncLink write did not can
+ * re-create the item. Durable create-before-link reconciliation belongs to the
+ * sync engine and is out of scope here.
  */
 export async function handleExecutePush(
   connectionId: string,
