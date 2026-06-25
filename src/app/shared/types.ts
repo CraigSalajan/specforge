@@ -1,3 +1,5 @@
+import type { Connection } from '../../../electron/sync/connection';
+
 export const IpcChannels = {
   SelectVault: 'specforge:select-vault',
   ListFiles: 'specforge:list-files',
@@ -268,6 +270,13 @@ export interface Settings {
    * no longer exist are pruned on restore.
    */
   'ui.openTabs': string[];
+  /**
+   * Per-vault PM connection configs (non-secret target/config), keyed by vault
+   * path, stored as a JSON object. Mirrors `skills.disabledLocal`'s
+   * vaultPath -> values[] shape. Credentials are stored separately (TER-28);
+   * only the `where`/config and `authMode` discriminator live here.
+   */
+  'pm.connections': Record<string, Connection[]>;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -294,6 +303,7 @@ export const DEFAULT_SETTINGS: Settings = {
   'ui.lastOpenFile': null,
   'ui.collapsedFolders': [],
   'ui.openTabs': [],
+  'pm.connections': {},
 };
 
 export const SETTINGS_KEYS = [
@@ -320,6 +330,7 @@ export const SETTINGS_KEYS = [
   'ui.lastOpenFile',
   'ui.collapsedFolders',
   'ui.openTabs',
+  'pm.connections',
 ] as const;
 
 export type SettingsKey = (typeof SETTINGS_KEYS)[number];

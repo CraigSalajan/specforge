@@ -6,6 +6,7 @@ import {
   type SettingsKey,
 } from '../shared/types';
 import { IpcService } from './ipc.service';
+import { parseConnectionsMap, type Connection } from '../../../electron/sync/connection';
 
 const LEGACY_VAULT_KEY = 'specforge.vaultPath';
 
@@ -55,6 +56,7 @@ export class SettingsService {
   readonly lastOpenFile = computed(() => this._settings()['ui.lastOpenFile']);
   readonly collapsedFolders = computed(() => this._settings()['ui.collapsedFolders']);
   readonly openTabs = computed(() => this._settings()['ui.openTabs']);
+  readonly pmConnections = computed(() => this._settings()['pm.connections']);
 
   constructor() {
     // SpecForge is dark-only (see DESIGN.md). The Tailwind `dark` variant in
@@ -295,6 +297,18 @@ export class SettingsService {
         }
         return;
       }
+      case 'pm.connections': {
+        // Stored as a JSON object mapping vault path -> Connection[]. Parse
+        // defensively (parseConnectionsMap drops malformed entries): any
+        // malformed value falls back to an empty map.
+        try {
+          const parsed: unknown = JSON.parse(raw);
+          target['pm.connections'] = parseConnectionsMap(parsed);
+        } catch {
+          target['pm.connections'] = {};
+        }
+        return;
+      }
       case 'ai.baseUrl':
       case 'ai.apiKey':
       case 'ai.chatModel':
@@ -329,6 +343,51 @@ export class SettingsService {
       'ui.lastOpenFile': s['ui.lastOpenFile'] ?? '',
       'ui.collapsedFolders': JSON.stringify(s['ui.collapsedFolders'] ?? []),
       'ui.openTabs': JSON.stringify(s['ui.openTabs'] ?? []),
+      'pm.connections': JSON.stringify(s['pm.connections'] ?? {}),
     };
+  }
+
+  /**
+   * Returns the persisted PM connections for `vaultPath`, or an empty list when
+   * none are configured. Reads the current `pm.connections` map keyed by vault.
+   */
+  connectionsForVault(vaultPath: string): Connection[] {
+    return this._settings()['pm.connections'][vaultPath] ?? [];
+  }
+
+  /**
+   * Upserts a connection under `vaultPath`, keyed by `connectionId`: an existing
+   * entry with the same id is replaced in place, otherwise the connection is
+   * appended. Persists the full settings via the existing `settings:*` channels
+   * (the read-modify-write mirrors the `skills.disabledLocal` pattern, but
+   * centralized here rather than in the settings modal).
+   */
+  async saveConnection(vaultPath: string, conn: Connection): Promise<void> {
+    const map = this._settings()['pm.connections'];
+    const current = map[vaultPath] ?? [];
+    const exists = current.some((c) => c.connectionId === conn.connectionId);
+    const nextList = exists
+      ? current.map((c) => (c.connectionId === conn.connectionId ? conn : c))
+      : [...current, conn];
+    await this.update({ 'pm.connections': { ...map, [vaultPath]: nextList } });
+  }
+
+  /**
+   * Removes the connection identified by `connectionId` from `vaultPath`. When
+   * no connections remain for the vault the key is dropped from the map entirely
+   * (rather than left as an empty array), keeping the stored map minimal — same
+   * shape `parseConnectionsMap` would produce. Persists via `update`.
+   */
+  async removeConnection(vaultPath: string, connectionId: string): Promise<void> {
+    const map = this._settings()['pm.connections'];
+    const current = map[vaultPath] ?? [];
+    const nextList = current.filter((c) => c.connectionId !== connectionId);
+    const next = { ...map };
+    if (nextList.length > 0) {
+      next[vaultPath] = nextList;
+    } else {
+      delete next[vaultPath];
+    }
+    await this.update({ 'pm.connections': next });
   }
 }
