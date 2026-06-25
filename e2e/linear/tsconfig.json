@@ -1,0 +1,19 @@
+{
+  // Editor/type-check config for the live Linear E2E harness. esbuild does the
+  // actual transpile (see e2e/linear/build.mjs); this only keeps the harness
+  // `.ts` files type-checkable against the imported production types.
+  // It does NOT participate in the Angular app build (tsconfig.app.json only
+  // includes src/**), so it cannot affect production output.
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "outDir": "../../out-tsc/e2e-linear",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "types": ["node"],
+    "noEmit": true,
+    // The harness reads process.env via bracket access already; keep the app's
+    // strictness but relax the index-signature rule so dynamic env keys are fine.
+    "noPropertyAccessFromIndexSignature": false
+  },
+  "include": ["**/*.ts"]
+}

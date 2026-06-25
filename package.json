@@ -19,6 +19,8 @@
     "build:bench": "node bench/harness/build.mjs",
     "bench:demo": "node bench/run-demo.mjs",
     "bench": "node bench/run-bench.mjs",
+    "build:e2e:linear": "node e2e/linear/build.mjs",
+    "e2e:linear": "node e2e/linear/run-e2e.mjs",
     "build": "npm run build:angular && npm run build:electron",
     "watch": "ng build --watch --configuration development",
     "test": "ng test",
