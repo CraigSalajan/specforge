@@ -1,51 +1,21 @@
-import type { DatabaseSync as DatabaseSyncType } from 'node:sqlite';
+import { DatabaseSync } from 'node:sqlite';
 import { app } from 'electron';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { MIGRATIONS } from './migrations';
 
-let dbInstance: DatabaseSyncType | null = null;
+let dbInstance: DatabaseSync | null = null;
 let ftsAvailable = false;
 
 /**
- * `node:sqlite` is loaded lazily through a dynamic `import()` (see {@link initDb})
- * rather than a static top-level import. A static import would force every
- * bundler that walks this module's graph to bundle the built-in — including the
- * Vite-based Angular unit-test builder, which refuses to bundle Node built-ins —
- * even though only the Electron main process ever opens the DB. Caching the
- * resolved `DatabaseSync` constructor here lets {@link getDb} stay synchronous
- * for its many callers; {@link initDb} must run once at startup before the first
- * `getDb()`.
- */
-let DatabaseSyncCtor: typeof DatabaseSyncType | null = null;
-
-/**
- * Loads the `node:sqlite` built-in (dynamically, to keep it out of the static
- * bundle graph) and eagerly opens the DB so PRAGMAs/migrations run before the
- * first IPC call. Call once at app startup, after `app.whenReady()`. Idempotent.
- */
-export async function initDb(): Promise<void> {
-  if (!DatabaseSyncCtor) {
-    ({ DatabaseSync: DatabaseSyncCtor } = await import('node:sqlite'));
-  }
-  getDb();
-}
-
-/**
- * Returns the open DB, opening it (PRAGMAs + migrations) on first call. Requires
- * {@link initDb} to have resolved the `node:sqlite` constructor first; throws a
- * clear error otherwise rather than silently failing.
+ * Opens (or returns existing) DB at userData/specforge.db.
+ * Applies PRAGMAs and migrations on first open.
  *
  * The DB lives outside the vault deliberately — the vault stays portable
  * markdown only.
  */
-export function getDb(): DatabaseSyncType {
+export function getDb(): DatabaseSync {
   if (dbInstance) return dbInstance;
-
-  const DatabaseSync = DatabaseSyncCtor;
-  if (!DatabaseSync) {
-    throw new Error('Database not initialized: call initDb() before getDb()');
-  }
 
   const userData = app.getPath('userData');
   if (!fs.existsSync(userData)) {
@@ -64,7 +34,7 @@ export function getDb(): DatabaseSyncType {
   return db;
 }
 
-function runMigrations(db: DatabaseSyncType): void {
+function runMigrations(db: DatabaseSync): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS _migrations (
       id         INTEGER PRIMARY KEY,
