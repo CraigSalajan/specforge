@@ -327,4 +327,14 @@ describe('createLinearAdapterBuilder — production adapter builder (AC #2)', ()
 
     expect(calls).toEqual([{ connectionId: CONNECTION_ID, kind: 'refreshToken' }]);
   });
+
+  it('throws for a provider with no registered adapter factory', () => {
+    const { secrets } = fakeSecrets();
+    // A valid AdapterName that isn't registered in ADAPTER_REGISTRY (only 'linear' is).
+    const conn = { ...connection(), provider: 'github' } as unknown as Connection;
+
+    expect(() => createLinearAdapterBuilder(secrets)(conn)).toThrow(
+      /No adapter registered for provider: github/,
+    );
+  });
 });
