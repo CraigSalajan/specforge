@@ -59,3 +59,7 @@ memory/
 bench/.env
 bench/target/
 bench/results/
+
+# Linear E2E harness runtime — the gitignored credential file (the bundle output
+# lands under /dist, already ignored above). The harness source is tracked.
+e2e/linear/.env
