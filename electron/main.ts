@@ -8,6 +8,8 @@ import { registerVaultHandlers } from './ipc/vault';
 import { registerWatcherHandlers, disposeWatcher } from './ipc/watcher';
 import { registerSettingsHandlers } from './ipc/settings';
 import { registerConnectionSecretHandlers } from './ipc/connection-secrets';
+import { registerSyncHandlers } from './ipc/sync';
+import { createProductionSyncContext } from './ipc/sync-deps';
 import { migratePlaintextSecrets } from './ipc/secure-settings';
 import { secretSettingsStore } from './ipc/settings-secret-store';
 import { registerIndexHandlers } from './ipc/index';
@@ -146,6 +148,7 @@ app.whenReady().then(async () => {
   registerWatcherHandlers(() => BrowserWindow.getAllWindows());
   registerSettingsHandlers();
   registerConnectionSecretHandlers();
+  registerSyncHandlers(createProductionSyncContext());
   registerIndexHandlers();
   registerLinkHandlers();
   registerDocPropertiesHandlers();
