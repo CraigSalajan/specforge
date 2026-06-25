@@ -1520,3 +1520,226 @@ describe('LinearAdapter — TER-21: criteria checklist', () => {
     expect(occurrences(secondDescription, MARKER_END)).toBe(1);
   });
 });
+
+/**
+ * TER-24: non-auth error propagation. The adapter re-wraps *only* `auth`-coded
+ * failures with team context (so callers see which token/team to fix); every
+ * other code — `rate_limit`, `server`, `timeout`, `network`, etc. — must
+ * propagate **unchanged**. That "only auth is re-wrapped" guarantee is what the
+ * existing per-op auth tests imply but never assert from the other side, so this
+ * block injects non-`auth` failures and proves the structured info (code,
+ * retryable, and the *original* message — never a "Linear ... failed for team
+ * ..." prefix) arrives intact across every operation. The adapter owns no
+ * retry/backoff logic (that lives in the client), so these only assert
+ * pass-through, not re-issued requests. The injected transport is faked with a
+ * `vi.fn()` `request`, so the suite touches no network.
+ */
+describe('LinearAdapter — TER-24: non-auth error propagation (rate-limit / transport)', () => {
+  /** Fakes the GraphQL transport with a single recordable `request` method. */
+  function fakeClientWith(request: ReturnType<typeof vi.fn>): LinearGraphQLClient {
+    return { request } as unknown as LinearGraphQLClient;
+  }
+
+  /** A `team(...)` metadata envelope carrying the given label nodes (TER-22 shape). */
+  function metadataWithLabels(
+    labels: Array<{ id: string; name: string; isGroup?: boolean }>,
+  ) {
+    return {
+      team: {
+        id: 'team-1',
+        name: 'Eng',
+        states: { nodes: [] },
+        labels: {
+          nodes: labels.map((l) => ({
+            id: l.id,
+            name: l.name,
+            isGroup: l.isGroup ?? false,
+            parent: null,
+          })),
+        },
+      },
+    };
+  }
+
+  /** The non-`auth` transport codes the adapter must pass through untouched. */
+  const NON_AUTH_CODES = ['rate_limit', 'server', 'timeout', 'network'] as const;
+
+  it.each(NON_AUTH_CODES)(
+    'createItem (issue path) propagates a %s error unchanged',
+    async (code) => {
+      const message = `injected ${code}`;
+      const request = vi
+        .fn()
+        .mockRejectedValue(new LinearRequestError({ code, retryable: true, message }));
+      const item: CanonicalItem = { localId: 'local-1', level: 'story', title: 'A story' };
+      const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+      const error = await adapter.createItem(item).then(
+        () => {
+          throw new Error('expected createItem to reject');
+        },
+        (err: unknown) => err,
+      );
+
+      expect(error).toBeInstanceOf(LinearRequestError);
+      // The original info survives untouched — no "failed for team ..." prefix.
+      expect((error as LinearRequestError).info).toMatchObject({ code, retryable: true, message });
+    },
+  );
+
+  it('updateItem (issue path) propagates a rate_limit error unchanged', async () => {
+    const message = 'injected rate_limit';
+    const request = vi
+      .fn()
+      .mockRejectedValue(
+        new LinearRequestError({ code: 'rate_limit', retryable: true, message }),
+      );
+    const item: CanonicalItem = { localId: 'local-1', level: 'story', title: 'A story' };
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    const error = await adapter.updateItem('issue-ext-id', item).then(
+      () => {
+        throw new Error('expected updateItem to reject');
+      },
+      (err: unknown) => err,
+    );
+
+    expect(error).toBeInstanceOf(LinearRequestError);
+    expect((error as LinearRequestError).info).toMatchObject({
+      code: 'rate_limit',
+      retryable: true,
+      message,
+    });
+  });
+
+  it('linkItems propagates a rate_limit error unchanged through the child issueUpdate', async () => {
+    const message = 'injected rate_limit';
+    const request = vi
+      .fn()
+      .mockRejectedValue(
+        new LinearRequestError({ code: 'rate_limit', retryable: true, message }),
+      );
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    const error = await adapter.linkItems('parent-1', ['child-1']).then(
+      () => {
+        throw new Error('expected linkItems to reject');
+      },
+      (err: unknown) => err,
+    );
+
+    expect(error).toBeInstanceOf(LinearRequestError);
+    expect((error as LinearRequestError).info).toMatchObject({
+      code: 'rate_limit',
+      retryable: true,
+      message,
+    });
+  });
+
+  it('getMetadata propagates a rate_limit error unchanged', async () => {
+    const message = 'injected rate_limit';
+    const request = vi
+      .fn()
+      .mockRejectedValue(
+        new LinearRequestError({ code: 'rate_limit', retryable: true, message }),
+      );
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    const error = await adapter.getMetadata().then(
+      () => {
+        throw new Error('expected getMetadata to reject');
+      },
+      (err: unknown) => err,
+    );
+
+    expect(error).toBeInstanceOf(LinearRequestError);
+    expect((error as LinearRequestError).info).toMatchObject({
+      code: 'rate_limit',
+      retryable: true,
+      message,
+    });
+  });
+
+  it('createItem (epic path / projectCreate) propagates a server error unchanged', async () => {
+    const message = 'injected server';
+    const request = vi
+      .fn()
+      .mockRejectedValue(new LinearRequestError({ code: 'server', retryable: true, message }));
+    const epic: CanonicalItem = { localId: 'local-1', level: 'epic', title: 'An epic' };
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    const error = await adapter.createItem(epic).then(
+      () => {
+        throw new Error('expected createItem to reject');
+      },
+      (err: unknown) => err,
+    );
+
+    expect(error).toBeInstanceOf(LinearRequestError);
+    expect((error as LinearRequestError).info).toMatchObject({
+      code: 'server',
+      retryable: true,
+      message,
+    });
+  });
+
+  it('updateItem (epic path / projectUpdate) propagates a rate_limit error unchanged', async () => {
+    const message = 'injected rate_limit';
+    const request = vi
+      .fn()
+      .mockRejectedValue(
+        new LinearRequestError({ code: 'rate_limit', retryable: true, message }),
+      );
+    const epic: CanonicalItem = { localId: 'local-1', level: 'epic', title: 'An epic' };
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    const error = await adapter.updateItem('proj-1', epic).then(
+      () => {
+        throw new Error('expected updateItem to reject');
+      },
+      (err: unknown) => err,
+    );
+
+    expect(error).toBeInstanceOf(LinearRequestError);
+    expect((error as LinearRequestError).info).toMatchObject({
+      code: 'rate_limit',
+      retryable: true,
+      message,
+    });
+  });
+
+  it('createLabel (issueLabelCreate) propagates a rate_limit error unchanged', async () => {
+    // The seed metadata query resolves (empty index, so the tag misses and a
+    // create is attempted); only the `issueLabelCreate` mutation rejects.
+    const message = 'injected rate_limit';
+    const request = vi.fn().mockImplementation((query: string) => {
+      if (query.includes('issueLabelCreate')) {
+        return Promise.reject(
+          new LinearRequestError({ code: 'rate_limit', retryable: true, message }),
+        );
+      }
+      return Promise.resolve(metadataWithLabels([]));
+    });
+    const item: CanonicalItem = {
+      localId: 'local-1',
+      level: 'story',
+      title: 'A story',
+      tags: ['spike'],
+    };
+    const adapter = new LinearAdapter({ teamId: 'team-1' }, fakeClientWith(request));
+
+    const error = await adapter.createItem(item).then(
+      () => {
+        throw new Error('expected createItem to reject');
+      },
+      (err: unknown) => err,
+    );
+
+    expect(error).toBeInstanceOf(LinearRequestError);
+    expect((error as LinearRequestError).info).toMatchObject({
+      code: 'rate_limit',
+      retryable: true,
+      message,
+    });
+  });
+});
