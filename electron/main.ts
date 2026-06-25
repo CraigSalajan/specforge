@@ -9,6 +9,7 @@ import { registerWatcherHandlers, disposeWatcher } from './ipc/watcher';
 import { registerSettingsHandlers } from './ipc/settings';
 import { registerConnectionSecretHandlers } from './ipc/connection-secrets';
 import { migratePlaintextSecrets } from './ipc/secure-settings';
+import { secretSettingsStore } from './ipc/settings-secret-store';
 import { registerIndexHandlers } from './ipc/index';
 import { registerLinkHandlers } from './ipc/links';
 import { registerDocPropertiesHandlers } from './ipc/doc-properties';
@@ -135,7 +136,7 @@ app.whenReady().then(async () => {
   // One-time at-rest encryption of secret settings (e.g. ai.apiKey). Runs here
   // because safeStorage requires the app `ready` event and the DB must be open.
   try {
-    migratePlaintextSecrets();
+    migratePlaintextSecrets(secretSettingsStore);
   } catch (err) {
     console.error('[main] Failed to migrate secret settings to encrypted storage:', err);
   }

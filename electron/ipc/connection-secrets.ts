@@ -11,11 +11,12 @@
 
 import { ipcMain } from 'electron';
 import {
-  deleteConnectionSecrets,
-  hasConnectionToken,
-  setConnectionToken,
+  createConnectionSecrets,
   type ConnectionSecretKind,
 } from '../sync/connection-secrets';
+import { secretSettingsStore } from './settings-secret-store';
+
+const secrets = createConnectionSecrets(secretSettingsStore);
 
 const Channels = {
   Set: 'specforge:connection-secret-set',
@@ -49,13 +50,13 @@ export function registerConnectionSecretHandlers(): void {
       assertKind(kind);
       assertToken(token);
       // Persists encrypted; never echoes the token back to the renderer.
-      setConnectionToken(connectionId, kind, token);
+      secrets.setConnectionToken(connectionId, kind, token);
     },
   );
 
   ipcMain.handle(Channels.Clear, async (_e, connectionId: string): Promise<void> => {
     assertConnectionId(connectionId);
-    deleteConnectionSecrets(connectionId);
+    secrets.deleteConnectionSecrets(connectionId);
   });
 
   ipcMain.handle(
@@ -64,7 +65,7 @@ export function registerConnectionSecretHandlers(): void {
       assertConnectionId(connectionId);
       assertKind(kind);
       // Presence only — the credential value is never returned to the renderer.
-      return hasConnectionToken(connectionId, kind);
+      return secrets.hasConnectionToken(connectionId, kind);
     },
   );
 }

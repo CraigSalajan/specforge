@@ -1,5 +1,17 @@
 import { safeStorage } from 'electron';
-import { getAllSettings, setSetting } from '../db/repositories/settings.repo';
+
+/**
+ * A minimal key/value port over the persisted settings, injected into the
+ * repo-dependent helpers here so this module never imports the SQLite-backed
+ * repository directly. Keeping it dependency-free lets the encryption seam be
+ * unit-tested in the renderer's jsdom runner (which cannot load `node:sqlite`);
+ * production binds this to the real repo in `./settings-secret-store`.
+ */
+export interface SecretSettingsStore {
+  get(key: string): string | null;
+  set(key: string, value: string): void;
+  getAll(): Record<string, string>;
+}
 
 /**
  * Transparent at-rest encryption for secret settings values.
@@ -85,16 +97,17 @@ export function decryptSettingValue(key: string, stored: string): string {
  * secret keys (`linear.pat::<id>`, `linear.refreshToken::<id>`) are unknowable
  * at build time, so the legacy global `linear.pat` (an exact-match secret key)
  * and any plaintext per-connection row written under the no-encryption fallback
- * are both encrypted in place here.
+ * are both encrypted in place here. The `store` is injected (see
+ * {@link SecretSettingsStore}) so this stays repo-free and unit-testable.
  */
-export function migratePlaintextSecrets(): void {
+export function migratePlaintextSecrets(store: SecretSettingsStore): void {
   if (!safeStorage.isEncryptionAvailable()) return;
-  for (const [key, stored] of Object.entries(getAllSettings())) {
+  for (const [key, stored] of Object.entries(store.getAll())) {
     if (!isSecretSettingKey(key)) continue;
     if (!stored || stored.startsWith(ENC_PREFIX)) continue;
     const encrypted = encryptSettingValue(key, stored);
     if (encrypted !== stored) {
-      setSetting(key, encrypted);
+      store.set(key, encrypted);
       console.log(`[settings] Migrated "${key}" to encrypted at-rest storage.`);
     }
   }

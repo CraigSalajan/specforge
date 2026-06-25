@@ -32,10 +32,7 @@
             ],
             "loader": {
               ".ttf": "file"
-            },
-            "externalDependencies": [
-              "node:sqlite"
-            ]
+            }
           },
           "configurations": {
             "production": {

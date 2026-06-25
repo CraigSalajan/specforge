@@ -1,79 +1,24 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
  * Unit tests for the at-rest secret encryption seam (TER-28 widens it to the
  * per-connection PM credential keys `linear.pat::<id>` / `linear.refreshToken::<id>`).
  *
- * `electron`'s `safeStorage` is faked with a *reversible* cipher so encrypt →
- * decrypt round-trips deterministically, and the settings repo is backed by an
- * in-memory Map so `getAllSettings`/`setSetting` actually persist within a test
- * (the real repo needs a SQLite handle that does not exist under the renderer's
- * test runner).
+ * Only `electron`'s `safeStorage` is mocked — a *reversible* cipher so encrypt →
+ * decrypt round-trips deterministically. The repo-dependent migration takes an
+ * injected {@link SecretSettingsStore}, so this spec backs it with an in-memory
+ * Map and never imports the SQLite-backed repository (or the `node:sqlite`
+ * built-in the renderer test bundler cannot bundle).
  */
-
-// The Angular unit-test builder rejects relative `vi.mock` specifiers (its
-// `vitest-mock-patch` throws for any path starting with `.`/`/`), so the settings
-// repo is exercised for real against a faked `node:sqlite` — a bare specifier the
-// patch allows. `node:sqlite` is declared in `angular.json` `externalDependencies`
-// so the client test bundler leaves the built-in external (it cannot bundle it);
-// this mock then supplies a `DatabaseSync` backed by `store` (the `settings`
-// table). Everything the hoisted factories reference must live in `vi.hoisted`
-// (it runs before the module's imports).
-const { store, safeStorageMock, FakeDatabaseSync } = vi.hoisted(() => {
-  const backing = new Map<string, string>();
-  const ss = {
+const { safeStorageMock } = vi.hoisted(() => ({
+  safeStorageMock: {
     isEncryptionAvailable: vi.fn(() => true),
     encryptString: vi.fn((s: string) => Buffer.from('cipher:' + s)),
     decryptString: vi.fn((b: Buffer) => b.toString().replace(/^cipher:/, '')),
-  };
-
-  // Minimal `DatabaseSync` answering only the SQL the settings repo + DB
-  // bootstrap issue, all backed by `backing` (the `settings` table).
-  class FakeDb {
-    constructor(_path: string) {}
-    exec(_sql: string): void {}
-    prepare(sql: string) {
-      const q = sql.replace(/\s+/g, ' ').trim();
-      if (q.startsWith('SELECT value FROM settings WHERE key = ?')) {
-        return {
-          get: (key: string) => (backing.has(key) ? { value: backing.get(key) } : undefined),
-          all: () => [],
-          run: () => ({ changes: 0 }),
-        };
-      }
-      if (q.startsWith('SELECT key, value FROM settings')) {
-        return {
-          get: () => undefined,
-          all: () => [...backing.entries()].map(([key, value]) => ({ key, value })),
-          run: () => ({ changes: 0 }),
-        };
-      }
-      if (q.startsWith('INSERT INTO settings')) {
-        return {
-          get: () => undefined,
-          all: () => [],
-          run: (key: string, value: string) => {
-            backing.set(key, value);
-            return { changes: 1 };
-          },
-        };
-      }
-      // DB bootstrap queries (_migrations, sqlite_master) — answered as fresh DB.
-      return { get: () => undefined, all: () => [], run: () => ({ changes: 0 }) };
-    }
-    close(): void {}
-  }
-
-  return { store: backing, safeStorageMock: ss, FakeDatabaseSync: FakeDb };
-});
-
-// `getPath` returns '.' (an always-existing dir) so `getDb()` skips the mkdir;
-// the fake DB ignores the path, so no file is ever created.
-vi.mock('electron', () => ({ safeStorage: safeStorageMock, app: { getPath: () => '.' } }));
-vi.mock('node:sqlite', () => ({
-  DatabaseSync: FakeDatabaseSync,
-  default: { DatabaseSync: FakeDatabaseSync },
+  },
 }));
+
+vi.mock('electron', () => ({ safeStorage: safeStorageMock }));
 
 import {
   decryptSettingValue,
@@ -81,21 +26,29 @@ import {
   isConnectionSecretKey,
   isSecretSettingKey,
   migratePlaintextSecrets,
+  type SecretSettingsStore,
 } from '../../../electron/ipc/secure-settings';
 
 const ENC_PREFIX = 'enc:v1:';
 const CONN_PAT_KEY = 'linear.pat::linear-abc';
 const CONN_REFRESH_KEY = 'linear.refreshToken::linear-abc';
 
+// In-memory SecretSettingsStore backing the migration tests; `backing` is read
+// directly to assert what landed at rest.
+const backing = new Map<string, string>();
+const store: SecretSettingsStore = {
+  get: (k) => (backing.has(k) ? backing.get(k)! : null),
+  set: (k, v) => {
+    backing.set(k, v);
+  },
+  getAll: () => Object.fromEntries(backing),
+};
+
 beforeEach(() => {
-  store.clear();
+  backing.clear();
   safeStorageMock.isEncryptionAvailable.mockReturnValue(true);
   safeStorageMock.encryptString.mockClear();
   safeStorageMock.decryptString.mockClear();
-});
-
-afterEach(() => {
-  vi.clearAllMocks();
 });
 
 describe('isSecretSettingKey / isConnectionSecretKey', () => {
@@ -155,13 +108,13 @@ describe('encryptSettingValue / decryptSettingValue', () => {
 
 describe('migratePlaintextSecrets', () => {
   it('encrypts plaintext per-connection AND legacy global linear.pat rows in place', () => {
-    store.set(CONN_PAT_KEY, 'plain-pat');
-    store.set('linear.pat', 'plain-global-pat');
+    backing.set(CONN_PAT_KEY, 'plain-pat');
+    backing.set('linear.pat', 'plain-global-pat');
 
-    migratePlaintextSecrets();
+    migratePlaintextSecrets(store);
 
-    const migratedConn = store.get(CONN_PAT_KEY)!;
-    const migratedGlobal = store.get('linear.pat')!;
+    const migratedConn = backing.get(CONN_PAT_KEY)!;
+    const migratedGlobal = backing.get('linear.pat')!;
     expect(migratedConn.startsWith(ENC_PREFIX)).toBe(true);
     expect(migratedGlobal.startsWith(ENC_PREFIX)).toBe(true);
     expect(decryptSettingValue(CONN_PAT_KEY, migratedConn)).toBe('plain-pat');
@@ -170,23 +123,23 @@ describe('migratePlaintextSecrets', () => {
 
   it('skips already-encrypted rows, empty rows and non-secret rows', () => {
     const alreadyEncrypted = encryptSettingValue(CONN_PAT_KEY, 'already');
-    store.set(CONN_PAT_KEY, alreadyEncrypted);
-    store.set(CONN_REFRESH_KEY, '');
-    store.set('pm.connections', '{"C:/Vault":[]}'); // non-secret, must stay plaintext
+    backing.set(CONN_PAT_KEY, alreadyEncrypted);
+    backing.set(CONN_REFRESH_KEY, '');
+    backing.set('pm.connections', '{"C:/Vault":[]}'); // non-secret, must stay plaintext
 
-    migratePlaintextSecrets();
+    migratePlaintextSecrets(store);
 
-    expect(store.get(CONN_PAT_KEY)).toBe(alreadyEncrypted); // untouched, not double-encrypted
-    expect(store.get(CONN_REFRESH_KEY)).toBe(''); // empty stays empty
-    expect(store.get('pm.connections')).toBe('{"C:/Vault":[]}'); // never encrypted
+    expect(backing.get(CONN_PAT_KEY)).toBe(alreadyEncrypted); // untouched, not double-encrypted
+    expect(backing.get(CONN_REFRESH_KEY)).toBe(''); // empty stays empty
+    expect(backing.get('pm.connections')).toBe('{"C:/Vault":[]}'); // never encrypted
   });
 
   it('is a no-op when OS encryption is unavailable', () => {
     safeStorageMock.isEncryptionAvailable.mockReturnValue(false);
-    store.set(CONN_PAT_KEY, 'plain-pat');
+    backing.set(CONN_PAT_KEY, 'plain-pat');
 
-    migratePlaintextSecrets();
+    migratePlaintextSecrets(store);
 
-    expect(store.get(CONN_PAT_KEY)).toBe('plain-pat'); // left as plaintext
+    expect(backing.get(CONN_PAT_KEY)).toBe('plain-pat'); // left as plaintext
   });
 });
