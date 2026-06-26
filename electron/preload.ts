@@ -64,6 +64,7 @@ const IpcChannels = {
   SkillsReadResource: 'specforge:skills-read-resource',
   SkillsOpenFolder: 'specforge:skills-open-folder',
   ExportPdf: 'specforge:export-pdf',
+  ShellOpenExternal: 'specforge:open-external',
 } as const;
 
 interface AiToolFunctionDefDto {
@@ -377,6 +378,11 @@ const api = {
   // Export
   exportPdf: (payload: { html: string; title: string; defaultFileName: string }) =>
     ipcRenderer.invoke(IpcChannels.ExportPdf, payload),
+
+  // Shell: open a validated http(s) URL in the system browser (main-side
+  // validates the scheme; never pass arbitrary strings to the OS shell).
+  openExternal: (url: string): Promise<void> =>
+    ipcRenderer.invoke(IpcChannels.ShellOpenExternal, url),
 };
 
 contextBridge.exposeInMainWorld('specforge', api);

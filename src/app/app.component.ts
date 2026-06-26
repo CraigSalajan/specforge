@@ -3,6 +3,7 @@ import {
   Component,
   HostListener,
   OnInit,
+  computed,
   effect,
   inject,
   signal,
@@ -24,6 +25,7 @@ import { InputDialogService } from './core/input-dialog.service';
 import { AiOrchestratorService } from './features/ai/ai-orchestrator.service';
 import { isMacPlatform, primaryModifierLabel } from './shared/platform';
 import { SettingsModalComponent } from './features/settings/settings-modal.component';
+import { PushPreviewComponent } from './features/sync/push-preview.component';
 import { IndexStatusComponent } from './features/indexing/index-status.component';
 import { FileChangeProposalComponent } from './features/ai/file-change-proposal.component';
 import { InputDialogComponent } from './features/shared/input-dialog.component';
@@ -49,6 +51,7 @@ const PANE_MAX = 600;
     EditorTabsComponent,
     AiPanelComponent,
     SettingsModalComponent,
+    PushPreviewComponent,
     IndexStatusComponent,
     FileChangeProposalComponent,
     InputDialogComponent,
@@ -73,6 +76,13 @@ const PANE_MAX = 600;
             <span class="text-danger">IPC bridge unavailable (open via Electron)</span>
           } @else {
             <span>Local · markdown</span>
+          }
+          @if (hasEnabledLinearConnection()) {
+            <button
+              type="button"
+              class="rounded px-1.5 py-0.5 text-text-secondary hover:bg-surface-3 hover:text-text-primary focus:outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent motion-reduce:transition-none"
+              title="Push to Linear…"
+              (click)="openPushPreview()">Push</button>
           }
           <button
             type="button"
@@ -198,6 +208,7 @@ const PANE_MAX = 600;
     </div>
 
     <app-settings-modal />
+    <app-push-preview />
     <app-file-change-proposal />
     <app-input-dialog />
     <app-confirm-dialog />
@@ -224,6 +235,19 @@ export class AppComponent implements OnInit {
   readonly activeFile = this.vault.activeFilePath;
   readonly ipcAvailable = signal(this.ipc.isAvailable);
   readonly sidebarView = this.ui.sidebarView;
+
+  /**
+   * Whether the active vault has an enabled Linear connection — the gate for the
+   * header Push affordance and the `sync.push` command. Stays quiet (false) when
+   * nothing is configured so the tool surfaces the action only when it applies.
+   */
+  readonly hasEnabledLinearConnection = computed(() => {
+    const vaultPath = this.vault.vaultPath();
+    if (!vaultPath) return false;
+    return this.settings
+      .connectionsForVault(vaultPath)
+      .some((c) => c.provider === 'linear' && c.enabled);
+  });
 
   readonly leftWidth = signal(this.settings.leftPaneWidth());
   readonly rightWidth = signal(this.settings.rightPaneWidth());
@@ -297,6 +321,15 @@ export class AppComponent implements OnInit {
         category: 'Navigate',
         shortcut: `${this.modKey}+Shift+F`,
         run: () => this.revealSidebarView('search'),
+      },
+      {
+        id: 'sync.push',
+        title: 'Push to Linear…',
+        category: 'Sync',
+        // Gated on a vault AND an enabled Linear connection — the push surface
+        // is meaningless without somewhere to push to.
+        when: () => this.vault.hasVault() && this.hasEnabledLinearConnection(),
+        run: () => this.openPushPreview(),
       },
     );
   }
@@ -409,9 +442,14 @@ export class AppComponent implements OnInit {
     this.ui.openSettings();
   }
 
+  openPushPreview(): void {
+    this.ui.openPushPreview();
+  }
+
   private blockingOverlayOpen(): boolean {
     return (
       this.ui.settingsOpen() ||
+      this.ui.pushPreviewOpen() ||
       this.inputDialog.request() !== null ||
       this.confirmDialog.request() !== null ||
       this.orchestrator.pendingProposal() !== null

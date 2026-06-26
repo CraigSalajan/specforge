@@ -83,6 +83,9 @@ export const IpcChannels = {
 
   // Export
   ExportPdf: 'specforge:export-pdf',
+
+  // Shell: open a validated http(s) URL in the system browser
+  ShellOpenExternal: 'specforge:open-external',
 } as const;
 
 export type IpcChannel = (typeof IpcChannels)[keyof typeof IpcChannels];
@@ -782,6 +785,11 @@ export interface SpecForgeApi {
 
   // Export
   exportPdf: (payload: ExportPdfPayload) => Promise<ExportPdfResult>;
+
+  // Shell: open a validated http(s) URL in the system browser. The main process
+  // rejects any non-http(s) scheme, so deep links (e.g. created Linear issues)
+  // open while arbitrary strings never reach the OS shell.
+  openExternal: (url: string) => Promise<void>;
 }
 
 declare global {

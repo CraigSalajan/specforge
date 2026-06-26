@@ -29,6 +29,13 @@ export class UiStateService {
 
   readonly settingsOpen = this._settingsOpen.asReadonly();
 
+  // Push-preview modal (TER-32): the approval surface for pushing the active
+  // vault to a PM provider. A plain visibility flag — the preview component owns
+  // its own internal state machine and resets it on open/close.
+  private readonly _pushPreviewOpen = signal(false);
+
+  readonly pushPreviewOpen = this._pushPreviewOpen.asReadonly();
+
   private readonly _paletteRequest = signal<PaletteRequest | null>(null);
   private paletteSeq = 0;
 
@@ -61,6 +68,14 @@ export class UiStateService {
 
   toggleSettings(): void {
     this._settingsOpen.update((v) => !v);
+  }
+
+  openPushPreview(): void {
+    this._pushPreviewOpen.set(true);
+  }
+
+  closePushPreview(): void {
+    this._pushPreviewOpen.set(false);
   }
 
   /** Opens the palette, or re-arms it in `mode` when it is already open. */
