@@ -20,24 +20,24 @@ import {
 } from './orchestrator';
 import { readConnection } from './connection-store';
 import { buildCanonicalItemsForVault } from './spec-to-canonical';
-import { createConnectionSecrets } from './connection-secrets';
+import { getOAuthRuntimeContext } from './oauth-context';
 import {
   listSyncLinksForConnection,
   upsertSyncLink,
 } from '../db/repositories/sync-links.repo';
 import { getActiveVaultRoot } from '../ipc/watcher';
-import { secretSettingsStore } from '../ipc/settings-secret-store';
 
 /**
  * Builds the production {@link SyncOrchestratorDeps}, binding each injected
  * collaborator to its real main-process implementation. The adapter builder is
- * bound to the encrypted per-connection secret store so the credential is
- * resolved lazily on each request from the at-rest store, never held here.
+ * bound to the encrypted per-connection secret store (PAT path) and the shared
+ * OAuth token manager (OAuth path) from {@link getOAuthRuntimeContext}, so the
+ * credential is resolved lazily on each request — a PAT read from the at-rest
+ * store, or a live access token minted/refreshed by the manager — never held here.
  */
 export function createProductionSyncDeps(): SyncOrchestratorDeps {
-  const buildAdapter = createLinearAdapterBuilder(
-    createConnectionSecrets(secretSettingsStore),
-  );
+  const oauth = getOAuthRuntimeContext();
+  const buildAdapter = createLinearAdapterBuilder(oauth.secrets, oauth.tokenManager);
 
   return {
     resolveVaultRoot: getActiveVaultRoot,

@@ -14,6 +14,7 @@ import type {
   ConnectionSecrets,
 } from '../../../electron/sync/connection-secrets';
 import type { TokenSource } from '../../../electron/sync/linear/auth';
+import type { OAuthTokenManager } from '../../../electron/sync/linear/oauth/token-manager';
 import type {
   CreateItemContext,
   ExternalItemResult,
@@ -306,11 +307,29 @@ describe('createLinearAdapterBuilder — production adapter builder (AC #2)', ()
     return { secrets, calls };
   }
 
+  /** A fake OAuth token manager recording the ids `getAccessToken` is asked for. */
+  function fakeTokenManager(): {
+    tokenManager: OAuthTokenManager;
+    accessCalls: string[];
+  } {
+    const accessCalls: string[] = [];
+    const tokenManager: OAuthTokenManager = {
+      getAccessToken: (connectionId) => {
+        accessCalls.push(connectionId);
+        return Promise.resolve('oauth-access-token');
+      },
+      seedFromExchange: () => {},
+      revoke: () => Promise.resolve(),
+    };
+    return { tokenManager, accessCalls };
+  }
+
   it('builds a LinearAdapter whose config equals connectionToLinearConfig(conn) for a PAT connection', () => {
     const { secrets, calls } = fakeSecrets();
+    const { tokenManager } = fakeTokenManager();
     const conn = connection({ authMode: 'pat', projectId: 'proj-9', featureLabelId: 'lbl-3' });
 
-    const builder = createLinearAdapterBuilder(secrets);
+    const builder = createLinearAdapterBuilder(secrets, tokenManager);
     const adapter = builder(conn);
 
     expect(adapter).toBeInstanceOf(LinearAdapter);
@@ -319,21 +338,29 @@ describe('createLinearAdapterBuilder — production adapter builder (AC #2)', ()
     expect(calls).toEqual([{ connectionId: CONNECTION_ID, kind: 'pat' }]);
   });
 
-  it('resolves the refreshToken kind for an OAuth connection', () => {
+  it('routes an OAuth connection through the token manager (not the raw refresh token)', () => {
     const { secrets, calls } = fakeSecrets();
+    const { tokenManager, accessCalls } = fakeTokenManager();
     const conn = connection({ authMode: 'oauth' });
 
-    createLinearAdapterBuilder(secrets)(conn);
+    const adapter = createLinearAdapterBuilder(secrets, tokenManager)(conn);
 
-    expect(calls).toEqual([{ connectionId: CONNECTION_ID, kind: 'refreshToken' }]);
+    expect(adapter).toBeInstanceOf(LinearAdapter);
+    // OAuth no longer wraps the raw refresh token via connectionTokenSource —
+    // the secret store is never asked for a token source on the OAuth path.
+    expect(calls).toEqual([]);
+    // The access token is minted lazily by the token manager only when a request
+    // is actually issued; building the adapter alone must not trigger a mint.
+    expect(accessCalls).toEqual([]);
   });
 
   it('throws for a provider with no registered adapter factory', () => {
     const { secrets } = fakeSecrets();
+    const { tokenManager } = fakeTokenManager();
     // A valid AdapterName that isn't registered in ADAPTER_REGISTRY (only 'linear' is).
     const conn = { ...connection(), provider: 'github' } as unknown as Connection;
 
-    expect(() => createLinearAdapterBuilder(secrets)(conn)).toThrow(
+    expect(() => createLinearAdapterBuilder(secrets, tokenManager)(conn)).toThrow(
       /No adapter registered for provider: github/,
     );
   });

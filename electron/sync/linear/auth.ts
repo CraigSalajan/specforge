@@ -98,6 +98,52 @@ export const LINEAR_OAUTH_REVOKE_URL = 'https://api.linear.app/oauth/revoke';
 export const LINEAR_OAUTH_PKCE_METHOD = 'S256' as const;
 
 /**
+ * Registered Linear OAuth application client_id (TER-33). This is a **public**
+ * desktop PKCE client, so there is intentionally no client secret embedded
+ * anywhere — PKCE proves possession of the authorization request instead.
+ *
+ * Hardcoded as a build constant (the config decision for TER-33): the value is
+ * not secret, identical for every install, and an empty default keeps the app
+ * compilable before the real app is registered. {@link requireOAuthClientId}
+ * turns the blank default into a clear, actionable error at connect/refresh time.
+ */
+// Registered SpecForge Linear OAuth app client_id (public PKCE client — not secret; identical for every install).
+export const LINEAR_OAUTH_CLIENT_ID = 'b0a3a64d2af13f34e2858918d0a00f1d';
+
+/**
+ * Loopback port the OAuth redirect listens on. The redirect URI below MUST be
+ * registered verbatim (including this port) in the Linear OAuth app — Linear
+ * matches it exactly, so it cannot be chosen dynamically at runtime.
+ */
+export const LINEAR_OAUTH_REDIRECT_PORT = 53217;
+
+/**
+ * Loopback redirect URI for the authorization-code flow. Must match a
+ * pre-registered redirect URI on the Linear OAuth app **exactly** (scheme, host,
+ * port, and path), or Linear rejects the authorize request. `127.0.0.1` (not
+ * `localhost`) is used deliberately so the registered value is unambiguous.
+ */
+export const LINEAR_OAUTH_REDIRECT_URI = `http://127.0.0.1:${LINEAR_OAUTH_REDIRECT_PORT}/callback`;
+
+/**
+ * Returns the configured OAuth client_id, throwing a clear, actionable error
+ * when it is still the empty default. The connect/refresh flows call this up
+ * front so a missing registration fails loudly here rather than surfacing as a
+ * confusing HTTP 400 from Linear's token endpoint.
+ *
+ * @throws if {@link LINEAR_OAUTH_CLIENT_ID} is blank.
+ */
+export function requireOAuthClientId(): string {
+  const clientId = LINEAR_OAUTH_CLIENT_ID.trim();
+  if (clientId.length === 0) {
+    throw new Error(
+      '[linear] OAuth is not configured: LINEAR_OAUTH_CLIENT_ID is empty. Register a Linear OAuth app and set the client_id constant.',
+    );
+  }
+  return clientId;
+}
+
+/**
  * Lifetime of a Linear OAuth2 access token (24 hours). The full flow must
  * refresh before this elapses; see the {@link OAuthAuth} TODO.
  */
@@ -117,25 +163,24 @@ export const LINEAR_OAUTH_SCOPES = [
 ] as const;
 
 /**
- * OAuth2 access-token authentication — **production stub**.
+ * OAuth2 access-token authentication.
  *
- * The header shape is final and correct (`Bearer <token>`), so this class is a
- * drop-in for {@link PatAuth} via the shared {@link LinearAuth} interface today.
- * What is NOT implemented yet is the token *acquisition / refresh* machinery,
- * which the constants above document for the eventual full flow:
+ * Surfaces a live OAuth2 access token as `Authorization: Bearer <token>`,
+ * resolved lazily through the injected {@link TokenSource}. The source is
+ * responsible for returning a current, valid token; in production, the injected
+ * source is `() => tokenManager.getAccessToken(connectionId)`, which refreshes
+ * automatically before the 24-hour expiry.
  *
- *   1. Build an authorization URL at {@link LINEAR_OAUTH_AUTHORIZE_URL} with a
- *      PKCE challenge ({@link LINEAR_OAUTH_PKCE_METHOD} = S256) and the desired
- *      {@link LINEAR_OAUTH_SCOPES}; open it in the user's browser.
- *   2. Exchange the returned `code` + PKCE verifier at
- *      {@link LINEAR_OAUTH_TOKEN_URL} for an access token (lifetime
- *      {@link LINEAR_OAUTH_ACCESS_TOKEN_TTL_MS}) and a refresh token.
- *   3. Refresh via {@link LINEAR_OAUTH_TOKEN_URL} before the access token
- *      expires; revoke via {@link LINEAR_OAUTH_REVOKE_URL} on disconnect.
+ * The full authorization-code + PKCE + token-exchange + refresh + revocation
+ * machinery is implemented in sibling modules:
+ *   - `electron/sync/linear/oauth/pkce.ts` — PKCE verifier/challenge generation
+ *   - `electron/sync/linear/oauth/token-client.ts` — HTTP calls to Linear's token endpoints
+ *   - `electron/sync/linear/oauth/token-manager.ts` — maintains and auto-refreshes tokens
+ *   - `electron/ipc/linear-oauth.ts` — IPC shim bridging the renderer to token management
  *
- * Until that lands, this class simply surfaces an externally-acquired access
- * token supplied through the injected source — the refresh/acquire path is a
- * documented TODO, not silently faked.
+ * The {@link authorizationHeader} method resolves the token via the source and
+ * returns the properly-formatted bearer token; the actual acquisition and refresh
+ * are driven by the IPC connect flow, not by this class.
  */
 export class OAuthAuth implements LinearAuth {
   /**
@@ -155,8 +200,10 @@ export class OAuthAuth implements LinearAuth {
   /**
    * Acquire a fresh access token via the OAuth2 authorization-code + PKCE flow.
    *
-   * Not implemented — see the class docblock for the steps and endpoints. The
-   * method exists so the production wiring point is explicit rather than absent.
+   * Retained as an explicit, throwing marker. The real token acquisition and refresh
+   * are driven by the IPC connect flow (via `electron/ipc/linear-oauth.ts`) and managed
+   * by the token manager, not by this method. This method exists to clearly signal that
+   * OAuth token management is handled elsewhere in the system.
    */
   static async acquireToken(): Promise<never> {
     throw new Error(

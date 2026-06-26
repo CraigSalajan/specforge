@@ -1,6 +1,6 @@
 import { Injectable, inject } from '@angular/core';
 import { IpcService } from './ipc.service';
-import type { AiErrorInfo, SyncPreviewData } from '../shared/types';
+import type { AiErrorInfo, LinearOAuthBeginData, SyncPreviewData } from '../shared/types';
 import type {
   LinearProject,
   LinearTeam,
@@ -102,5 +102,48 @@ export class SyncService {
     const res = await this.ipc.syncListProjects(pat, teamId);
     if (!res.ok) throw new SyncError(res.error);
     return res.data;
+  }
+
+  /**
+   * Begin the Linear OAuth2 (auth-code + PKCE) flow (TER-33): opens the system
+   * browser, captures the redirect main-side, exchanges the code, and discovers
+   * teams. Resolves `{ sessionId, teams }` — NO token crosses the boundary —
+   * or throws {@link SyncError} on failure (including a user-denied/timed-out flow).
+   */
+  async oauthBegin(): Promise<LinearOAuthBeginData> {
+    const res = await this.ipc.linearOAuthBegin();
+    if (!res.ok) throw new SyncError(res.error);
+    return res.data;
+  }
+
+  /**
+   * Discover the projects under a team for an in-flight OAuth session (TER-33).
+   * Mirrors {@link listProjects} but authenticates from the pending session's
+   * access token main-side instead of a PAT.
+   */
+  async oauthListProjects(sessionId: string, teamId: string): Promise<LinearProject[]> {
+    const res = await this.ipc.linearOAuthListProjects(sessionId, teamId);
+    if (!res.ok) throw new SyncError(res.error);
+    return res.data;
+  }
+
+  /**
+   * Complete the OAuth flow by binding the session's refresh token to a
+   * `connectionId` (persisted + cached main-side). Resolves on success or throws
+   * {@link SyncError} on failure.
+   */
+  async oauthComplete(sessionId: string, connectionId: string): Promise<void> {
+    const res = await this.ipc.linearOAuthComplete(sessionId, connectionId);
+    if (!res.ok) throw new SyncError(res.error);
+  }
+
+  /**
+   * Revoke the stored refresh token for an OAuth connection (TER-33), called
+   * before clearing the secret on disconnect. Resolves on success or throws
+   * {@link SyncError} on failure.
+   */
+  async oauthRevoke(connectionId: string): Promise<void> {
+    const res = await this.ipc.linearOAuthRevoke(connectionId);
+    if (!res.ok) throw new SyncError(res.error);
   }
 }

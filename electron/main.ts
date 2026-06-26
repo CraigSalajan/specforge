@@ -22,9 +22,15 @@ import { registerAiHandlers, disposeAiHandlers } from './ipc/ai';
 import { registerSkillsHandlers } from './ipc/skills';
 import { registerExportHandlers } from './ipc/export';
 import { registerShellHandlers } from './ipc/shell';
+import { registerLinearOAuthHandlers, type DisposeLinearOAuthHandlers } from './ipc/linear-oauth';
+import { getOAuthRuntimeContext } from './sync/oauth-context';
 import { getDb, closeDb } from './db/index';
 
 const isDev = process.env['SPECFORGE_DEV'] === '1';
+
+// Disposer for the Linear OAuth handlers' loopback server, set at registration
+// and invoked on quit so a mid-flow redirect server never outlives the app.
+let disposeLinearOAuth: DisposeLinearOAuthHandlers | null = null;
 
 // Replaced at build time by esbuild `define`. True only in production builds published to
 // GitHub via `npm run release` (CI). Local dev/build/package leave it false so DevTools remain
@@ -160,6 +166,10 @@ app.whenReady().then(async () => {
   registerSkillsHandlers();
   registerExportHandlers();
   registerShellHandlers();
+  // TER-33: Linear OAuth flow. Shares the process-wide OAuth runtime context
+  // (token manager + secret store) with the sync orchestrator so a connect's
+  // seeded refresh token and a later push observe one consistent cache/store.
+  disposeLinearOAuth = registerLinearOAuthHandlers(getOAuthRuntimeContext());
 
   await createWindow();
 
@@ -173,6 +183,7 @@ app.whenReady().then(async () => {
 app.on('window-all-closed', () => {
   disposeAiHandlers();
   disposeWatcher();
+  disposeLinearOAuth?.();
   closeDb();
   if (process.platform !== 'darwin') app.quit();
 });
@@ -180,5 +191,6 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   disposeAiHandlers();
   disposeWatcher();
+  disposeLinearOAuth?.();
   closeDb();
 });
