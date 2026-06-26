@@ -206,6 +206,28 @@ describe('SettingsModalComponent — Integrations (TER-31)', () => {
       expect(component.projects()).toEqual(PROJECTS);
       expect(component.intForm().teamId).toBe('team-1');
     });
+
+    it('clears the stale feature label and label list when the team changes', async () => {
+      const { component } = setup();
+      component.onPatInput('lin_api_token');
+      await component.connectLinear();
+      // Build up a full selection so a feature label gets populated and chosen.
+      await component.onSelectTeam('team-1');
+      component.onSelectProject('proj-1');
+      await component.saveLinear();
+      component.onSelectFeatureLabel('label-1');
+      expect(component.intForm().featureLabelId).toBe('label-1');
+      expect(component.labels().length).toBeGreaterThan(0);
+
+      // Switching teams must drop the team/workspace-scoped label state so it
+      // can't be persisted onto the new connection.
+      await component.onSelectTeam('team-2');
+
+      expect(component.intForm().featureLabelId).toBe('');
+      expect(component.labels()).toEqual([]);
+      // The project selection is cleared too (existing behavior).
+      expect(component.intForm().projectId).toBe('');
+    });
   });
 
   describe('saveLinear', () => {
@@ -231,6 +253,9 @@ describe('SettingsModalComponent — Integrations (TER-31)', () => {
       expect(savedConn.connectionId).toBe(expectedId);
       expect(savedConn.teamId).toBe('team-1');
       expect(savedConn.projectId).toBe('proj-1');
+      // The toggle is honored: a fresh vault defaults the form's `enabled` ON,
+      // so the persisted connection is enabled (it mirrors the form value).
+      expect(savedConn.enabled).toBe(component.intForm().enabled);
       expect(savedConn.enabled).toBe(true);
       expect(savedConn.authMode).toBe('pat');
 
@@ -242,6 +267,25 @@ describe('SettingsModalComponent — Integrations (TER-31)', () => {
       // Labels populated, label GROUPS filtered out.
       expect(component.labels().map((l) => l.id)).toEqual(['label-1']);
       expect(component.intStatus()).toBe('connected');
+    });
+
+    it('honors the Enable toggle: persists enabled=false when the toggle is off at save', async () => {
+      const { component, settings } = setup();
+      component.onPatInput('lin_api_token');
+      await component.connectLinear();
+      await component.onSelectTeam('team-1');
+      component.onSelectProject('proj-1');
+
+      // Turn the (default-on) toggle off before saving. No connection exists yet,
+      // so this records local intent on the sub-draft only.
+      await component.toggleLinearEnabled(false);
+      expect(component.intForm().enabled).toBe(false);
+
+      await component.saveLinear();
+
+      // The persisted connection mirrors the form's toggle value, not a forced true.
+      const savedConn = settings.saveConnection.mock.calls.at(-1)?.[1] as LinearConnection;
+      expect(savedConn.enabled).toBe(false);
     });
 
     it('aborts a brand-new save when no PAT is entered (no credential-less connection)', async () => {

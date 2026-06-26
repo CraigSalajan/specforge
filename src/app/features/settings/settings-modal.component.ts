@@ -41,7 +41,11 @@ type SettingsSection = 'workspace' | 'ai' | 'index' | 'tools' | 'skills' | 'inte
  * Save button — see `syncConnectionsIntoDraft`.
  */
 interface IntegrationForm {
-  /** User intent to enable the connection; persisted only once a connection exists. */
+  /**
+   * User intent to enable the connection; persisted on save (and immediately
+   * when a connection already exists). Defaults on for a fresh vault so the
+   * normal configure → save flow yields an enabled connection.
+   */
   enabled: boolean;
   /** Selected Linear team id (empty until the user picks one). */
   teamId: string;
@@ -55,7 +59,10 @@ interface IntegrationForm {
 type IntegrationStatus = 'idle' | 'loading' | 'connected' | 'error';
 
 const EMPTY_INTEGRATION_FORM: IntegrationForm = {
-  enabled: false,
+  // Defaults on for a fresh/unconnected vault: the Enable toggle is honored on
+  // save (see `saveLinear`), so a default of `true` means the normal
+  // configure → save flow yields an enabled connection without an extra toggle.
+  enabled: true,
   teamId: '',
   projectId: '',
   featureLabelId: '',
@@ -1178,6 +1185,9 @@ export class SettingsModalComponent {
     this._intError.set(null);
     try {
       const teams = await this.sync.listTeams(pat);
+      // Discard a stale response: the user may have changed the PAT while this
+      // request was in flight, in which case it no longer describes the input.
+      if (this._pat() !== pat) return;
       this._teams.set(teams);
       this._intStatus.set('connected');
     } catch (err) {
@@ -1188,16 +1198,21 @@ export class SettingsModalComponent {
   }
 
   /**
-   * Selects a team and, when a PAT is present, discovers its projects. Clears any
-   * previously-selected project so a stale id from another team can't persist.
+   * Selects a team and, when a PAT is present, discovers its projects. Clears the
+   * previously-selected project and feature label (both team/workspace-scoped) so
+   * stale ids from another team can't persist onto the new connection.
    */
   async onSelectTeam(teamId: string): Promise<void> {
-    this.patchIntForm({ teamId, projectId: '' });
+    this.patchIntForm({ teamId, projectId: '', featureLabelId: '' });
     this._projects.set([]);
+    this._labels.set([]);
     const pat = this._pat();
     if (teamId.length === 0 || pat.length === 0 || !this.ipc.isAvailable) return;
     try {
       const projects = await this.sync.listProjects(pat, teamId);
+      // Discard a stale response: the PAT or selected team may have changed while
+      // this request was in flight, in which case it no longer applies.
+      if (this._pat() !== pat || this._intForm().teamId !== teamId) return;
       this._projects.set(projects);
     } catch (err) {
       this._intStatus.set('error');
@@ -1206,7 +1221,11 @@ export class SettingsModalComponent {
   }
 
   onSelectProject(projectId: string): void {
-    this.patchIntForm({ projectId });
+    // The feature label is workspace/team-scoped, not project-scoped, but a
+    // project change is still a connection-identity change; clear the stale label
+    // so it can't be persisted onto the new connection.
+    this.patchIntForm({ projectId, featureLabelId: '' });
+    this._labels.set([]);
   }
 
   /**
@@ -1245,7 +1264,7 @@ export class SettingsModalComponent {
     const conn: LinearConnection = {
       connectionId: id,
       provider: 'linear',
-      enabled: true,
+      enabled: form.enabled,
       authMode: 'pat',
       teamId: form.teamId,
       ...(projectId !== undefined ? { projectId } : {}),
@@ -1273,8 +1292,6 @@ export class SettingsModalComponent {
         await this.ipc.connectionSecretSet(id, 'pat', pat);
         this._patConfigured.set(true);
       }
-
-      this.patchIntForm({ enabled: true });
 
       // Validate by fetching metadata; populate the feature-label picker (drop
       // label groups — they are containers, not applicable labels).

@@ -35,6 +35,9 @@ import { LinearRequestError } from './errors';
 /** Maximum projects fetched per team in a single discovery request. */
 const PROJECTS_PAGE_SIZE = 250;
 
+/** Maximum teams fetched in a single discovery request. */
+const TEAMS_PAGE_SIZE = 250;
+
 /** Shape of the `teams` discovery query's `data` payload. */
 interface TeamsResponse {
   teams: { nodes: LinearTeam[] };
@@ -59,7 +62,7 @@ interface ProjectsResponse {
 export async function discoverTeams(client: LinearGraphQLClient): Promise<LinearTeam[]> {
   const query = `
     query LinearDiscoverTeams {
-      teams { nodes { id key name } }
+      teams(first: ${TEAMS_PAGE_SIZE}) { nodes { id key name } }
     }
   `;
 
