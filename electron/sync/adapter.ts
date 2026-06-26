@@ -40,6 +40,34 @@ export interface LabelInfo {
 }
 
 /**
+ * A team discovered in a Linear workspace (TER-31). Used by the Settings
+ * Integrations picker to let the user choose *which* team a connection targets
+ * before the connection (and its `connectionId`) exists. Dependency-free and
+ * defined here so both the Electron main process and the renderer can reference
+ * it (the renderer via `import type`).
+ */
+export interface LinearTeam {
+  /** Linear team id (the value persisted as `LinearConnection.teamId`). */
+  id: string;
+  /** Short team key, e.g. `ENG` — shown alongside the name for disambiguation. */
+  key: string;
+  /** Human-readable team name. */
+  name: string;
+}
+
+/**
+ * A project discovered under a Linear team (TER-31). Used by the Settings
+ * Integrations picker once a team is selected. Defined alongside
+ * {@link LinearTeam} for the same dependency-free, both-sides reason.
+ */
+export interface LinearProject {
+  /** Linear project id (the value persisted as `LinearConnection.projectId`). */
+  id: string;
+  /** Human-readable project name. */
+  name: string;
+}
+
+/**
  * Metadata describing the connected target project and its capabilities.
  * First pass — expected to be extended with provider-specific fields as each
  * adapter lands.

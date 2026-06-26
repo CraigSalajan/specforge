@@ -34,6 +34,8 @@ import type {
   SpecForgeApi,
   SyncBuildPreviewResult,
   SyncExecutePushResult,
+  SyncListProjectsResult,
+  SyncListTeamsResult,
   SyncTestConnectionResult,
 } from '../shared/types';
 import type { Connection } from '../../../electron/sync/connection';
@@ -198,6 +200,16 @@ export class IpcService {
 
   syncConnectionList(vaultPath: string): Promise<Connection[]> {
     return this.requireApi().syncConnectionList(vaultPath);
+  }
+
+  // TER-31: team/project discovery. The raw PAT crosses for discovery ONLY (the
+  // sole credential-over-IPC exception, used before a connection exists).
+  syncListTeams(pat: string): Promise<SyncListTeamsResult> {
+    return this.requireApi().syncListTeams(pat);
+  }
+
+  syncListProjects(pat: string, teamId: string): Promise<SyncListProjectsResult> {
+    return this.requireApi().syncListProjects(pat, teamId);
   }
 
   // Phase 3: chats

@@ -238,3 +238,23 @@ export function createLinearAdapterBuilder(
     return factory(config, client);
   };
 }
+
+/**
+ * Build an EPHEMERAL Linear GraphQL client from a raw PAT for team/project
+ * discovery (TER-31) — the credential-direct counterpart to
+ * {@link createLinearAdapterBuilder}.
+ *
+ * Discovery runs in the Settings UI *before* any persisted connection (and thus
+ * any stored credential) exists, so — unlike the adapter builder, which resolves
+ * the credential from the encrypted store via a `connectionId` — the PAT is
+ * passed in directly and wrapped in {@link PatAuth} (the same header abstraction
+ * the adapter path uses). The returned client is short-lived: the discovery
+ * handler issues one query through it and discards it. The PAT is never logged,
+ * persisted, or returned to the renderer.
+ *
+ * Kept pure (no Electron/DB/`fetch` capture beyond the client's own injectable
+ * defaults) so it stays spec-importable like the rest of this module.
+ */
+export function buildEphemeralLinearClient(pat: string): LinearGraphQLClient {
+  return new LinearGraphQLClient({ auth: new PatAuth(() => pat) });
+}

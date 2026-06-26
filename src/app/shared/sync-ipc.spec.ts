@@ -4,11 +4,15 @@ import {
   handleBuildPreview,
   handleConnectionList,
   handleExecutePush,
+  handleListProjects,
+  handleListTeams,
   handleTestConnection,
   type SyncIpcContext,
 } from '../../../electron/ipc/sync-handlers';
 import type { SyncOrchestratorDeps } from '../../../electron/sync/orchestrator';
+import { buildEphemeralLinearClient } from '../../../electron/sync/orchestrator';
 import { LinearRequestError } from '../../../electron/sync/linear/errors';
+import { LinearGraphQLClient } from '../../../electron/sync/linear/client';
 import type { Connection } from '../../../electron/sync/connection';
 import type {
   CreateItemContext,
@@ -123,6 +127,11 @@ function fakeCtx(opts: {
     ctx: {
       deps,
       listConnections: () => (conn ? [conn] : []),
+      // The non-discovery handlers never invoke this; a throwing stub keeps the
+      // context type-complete without pulling a real client into these tests.
+      buildDiscoveryClient: () => {
+        throw new Error('buildDiscoveryClient not used in this test');
+      },
     },
   };
 }
@@ -236,5 +245,166 @@ describe('handleConnectionList (AC #1)', () => {
   it('rejects an invalid vault path', async () => {
     const { ctx } = fakeCtx({});
     await expect(handleConnectionList('', ctx)).rejects.toThrow(/Invalid vault path/);
+  });
+});
+
+// --- TER-31: team/project discovery -----------------------------------------
+
+/** A `fetch` stub returning one GraphQL `data` payload (HTTP 200, no errors). */
+function fetchReturning(data: unknown): typeof fetch {
+  return (async () =>
+    new Response(JSON.stringify({ data }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })) as unknown as typeof fetch;
+}
+
+/** A `fetch` stub returning a 401 so the client classifies it as an `auth` error. */
+function fetchUnauthorized(): typeof fetch {
+  return (async () =>
+    new Response(JSON.stringify({ errors: [{ message: 'Authentication required' }] }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' },
+    })) as unknown as typeof fetch;
+}
+
+/**
+ * Builds a discovery context whose `buildDiscoveryClient` records the PAT it was
+ * handed and returns a real {@link LinearGraphQLClient} over the supplied
+ * `fetchFn` — so the full ephemeral-client + discovery-query path runs with no
+ * network. The recorded PAT lets tests assert the credential reached the client
+ * (and ONLY the client).
+ */
+function discoveryCtx(fetchFn: typeof fetch): {
+  ctx: SyncIpcContext;
+  pats: string[];
+} {
+  const pats: string[] = [];
+  const ctx: SyncIpcContext = {
+    deps: {
+      resolveVaultRoot: () => VAULT_PATH,
+      readConnection: () => undefined,
+      sourceCanonicalItems: () => [],
+      listLinks: () => [],
+      writeLink: () => undefined,
+      buildAdapter: () => fakeAdapter(),
+      now: () => FIXED_NOW,
+    },
+    listConnections: () => [],
+    buildDiscoveryClient: (pat: string) => {
+      pats.push(pat);
+      return new LinearGraphQLClient({ auth: { authorizationHeader: () => Promise.resolve(pat) }, fetchFn });
+    },
+  };
+  return { ctx, pats };
+}
+
+describe('handleListTeams (TER-31)', () => {
+  it('builds the ephemeral adapter from the PAT and returns the {ok,data} envelope', async () => {
+    const teams = [
+      { id: 't1', key: 'ENG', name: 'Engineering' },
+      { id: 't2', key: 'DES', name: 'Design' },
+    ];
+    const { ctx, pats } = discoveryCtx(fetchReturning({ teams: { nodes: teams } }));
+
+    const res = await handleListTeams({ provider: 'linear', pat: 'lin_api_secret' }, ctx);
+
+    expect(res).toEqual({ ok: true, data: teams });
+    // The PAT reached the (ephemeral) client and nothing else.
+    expect(pats).toEqual(['lin_api_secret']);
+  });
+
+  it('maps an auth failure to { ok: false, error } (code auth)', async () => {
+    const { ctx } = discoveryCtx(fetchUnauthorized());
+
+    const res = await handleListTeams({ provider: 'linear', pat: 'bad' }, ctx);
+
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.error.code).toBe('auth');
+      // The discovery context is appended to the auth message.
+      expect(res.error.message).toContain('read access to this workspace');
+    }
+  });
+
+  it('rejects a non-linear provider before touching the PAT', async () => {
+    const built: string[] = [];
+    const ctx: SyncIpcContext = {
+      ...discoveryCtx(fetchReturning({ teams: { nodes: [] } })).ctx,
+      buildDiscoveryClient: (pat) => {
+        built.push(pat);
+        return buildEphemeralLinearClient(pat);
+      },
+    };
+
+    const res = await handleListTeams(
+      { provider: 'jira', pat: 'lin_api_secret' },
+      ctx,
+    );
+
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.message).toContain('Unsupported discovery provider');
+    // The client builder was never invoked, so the PAT was never used.
+    expect(built).toEqual([]);
+  });
+
+  it('rejects an empty PAT', async () => {
+    const { ctx } = discoveryCtx(fetchReturning({ teams: { nodes: [] } }));
+    const res = await handleListTeams({ provider: 'linear', pat: '' }, ctx);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.message).toContain('Invalid PAT');
+  });
+});
+
+describe('handleListProjects (TER-31)', () => {
+  it('builds the ephemeral adapter and returns the team projects', async () => {
+    const projects = [
+      { id: 'p1', name: 'Platform' },
+      { id: 'p2', name: 'Mobile' },
+    ];
+    const { ctx, pats } = discoveryCtx(
+      fetchReturning({ team: { projects: { nodes: projects } } }),
+    );
+
+    const res = await handleListProjects(
+      { provider: 'linear', pat: 'lin_api_secret', teamId: 't1' },
+      ctx,
+    );
+
+    expect(res).toEqual({ ok: true, data: projects });
+    expect(pats).toEqual(['lin_api_secret']);
+  });
+
+  it('returns [] when the team is not visible (null team node)', async () => {
+    const { ctx } = discoveryCtx(fetchReturning({ team: null }));
+
+    const res = await handleListProjects(
+      { provider: 'linear', pat: 'lin_api_secret', teamId: 'missing' },
+      ctx,
+    );
+
+    expect(res).toEqual({ ok: true, data: [] });
+  });
+
+  it('maps an auth failure to { ok: false, error }', async () => {
+    const { ctx } = discoveryCtx(fetchUnauthorized());
+
+    const res = await handleListProjects(
+      { provider: 'linear', pat: 'bad', teamId: 't1' },
+      ctx,
+    );
+
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe('auth');
+  });
+
+  it('rejects an empty team id', async () => {
+    const { ctx } = discoveryCtx(fetchReturning({ team: { projects: { nodes: [] } } }));
+    const res = await handleListProjects(
+      { provider: 'linear', pat: 'lin_api_secret', teamId: '' },
+      ctx,
+    );
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.message).toContain('Invalid team id');
   });
 });

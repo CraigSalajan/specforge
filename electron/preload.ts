@@ -34,6 +34,8 @@ const IpcChannels = {
   SyncBuildPreview: 'specforge:sync-build-preview',
   SyncExecutePush: 'specforge:sync-execute-push',
   SyncConnectionList: 'specforge:sync-connection-list',
+  SyncListTeams: 'specforge:sync-list-teams',
+  SyncListProjects: 'specforge:sync-list-projects',
   ChatsListSessions: 'specforge:chats-list-sessions',
   ChatsCreateSession: 'specforge:chats-create-session',
   ChatsGetMessages: 'specforge:chats-get-messages',
@@ -274,6 +276,14 @@ const api = {
     ipcRenderer.invoke(IpcChannels.SyncExecutePush, connectionId),
   syncConnectionList: (vaultPath: string) =>
     ipcRenderer.invoke(IpcChannels.SyncConnectionList, vaultPath),
+
+  // TER-31: team/project discovery. The raw PAT crosses for discovery ONLY (the
+  // one credential-over-IPC exception, used pre-connection); it is never logged,
+  // persisted, or returned. Provider is fixed to 'linear' (the only V1 provider).
+  syncListTeams: (pat: string) =>
+    ipcRenderer.invoke(IpcChannels.SyncListTeams, 'linear', pat),
+  syncListProjects: (pat: string, teamId: string) =>
+    ipcRenderer.invoke(IpcChannels.SyncListProjects, 'linear', pat, teamId),
 
   // Phase 3: chats
   chatsListSessions: (vaultPath: string) =>

@@ -17,10 +17,56 @@ import { EmbeddingIndexerService } from '../ai/providers/indexing.service';
 import { ToolRegistryService } from '../ai/tools/tool-registry.service';
 import { SkillRegistryService } from '../ai/skills/skill-registry.service';
 import { IpcService } from '../../core/ipc.service';
+import { SyncService, SyncError } from '../../core/sync.service';
 import { toAiErrorInfo } from '../ai/providers/ai-harness-error';
-import type { AiModelInfo, Settings, SkillMeta } from '../../shared/types';
+import type {
+  AiModelInfo,
+  LinearProject,
+  LinearTeam,
+  Settings,
+  SkillMeta,
+} from '../../shared/types';
+import type { LabelInfo } from '../../../../electron/sync/adapter';
+import {
+  makeConnectionId,
+  type LinearConnection,
+} from '../../../../electron/sync/connection';
 
-type SettingsSection = 'workspace' | 'ai' | 'index' | 'tools' | 'skills';
+type SettingsSection = 'workspace' | 'ai' | 'index' | 'tools' | 'skills' | 'integrations';
+
+/**
+ * The transient, per-vault Integrations form state (TER-31). Kept separate from
+ * the modal's global `draft()` because the connection model persists out-of-band
+ * (immediately via `SettingsService.saveConnection`), not through the modal's
+ * Save button — see `syncConnectionsIntoDraft`.
+ */
+interface IntegrationForm {
+  /**
+   * User intent to enable the connection; persisted on save (and immediately
+   * when a connection already exists). Defaults on for a fresh vault so the
+   * normal configure → save flow yields an enabled connection.
+   */
+  enabled: boolean;
+  /** Selected Linear team id (empty until the user picks one). */
+  teamId: string;
+  /** Optional selected project id (empty for "team only"). */
+  projectId: string;
+  /** Optional feature-label id (empty for none). */
+  featureLabelId: string;
+}
+
+/** Connection lifecycle status for the Integrations panel. */
+type IntegrationStatus = 'idle' | 'loading' | 'connected' | 'error';
+
+const EMPTY_INTEGRATION_FORM: IntegrationForm = {
+  // Defaults on for a fresh/unconnected vault: the Enable toggle is honored on
+  // save (see `saveLinear`), so a default of `true` means the normal
+  // configure → save flow yields an enabled connection without an extra toggle.
+  enabled: true,
+  teamId: '',
+  projectId: '',
+  featureLabelId: '',
+};
 
 @Component({
   selector: 'app-settings-modal',
@@ -423,6 +469,153 @@ type SettingsSection = 'workspace' | 'ai' | 'index' | 'tools' | 'skills';
               }
             </section>
             }
+
+            @if (activeSection() === 'integrations') {
+            <section>
+              <h3 class="mb-3 text-xs font-semibold uppercase tracking-wider text-text-muted">Integrations</h3>
+
+              @if (!vault.hasVault()) {
+                <p class="text-xs text-text-muted">Open a vault to configure integrations.</p>
+              } @else {
+                <p class="mb-3 text-xs text-text-muted">
+                  Connect SpecForge to a project-management tool to push your specs as
+                  work items. Connections are stored per vault.
+                </p>
+
+                <div class="mb-3 flex items-center justify-between rounded border border-border-subtle bg-surface-2 px-3 py-2">
+                  <div>
+                    <div class="text-xs text-text-primary">Enable Linear</div>
+                    <div class="text-xs text-text-muted">Allow pushing this vault's specs to Linear.</div>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    [attr.aria-checked]="intForm().enabled"
+                    aria-label="Enable Linear"
+                    (click)="toggleLinearEnabled(!intForm().enabled)"
+                    class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border transition-colors focus:outline-none focus:ring-1 focus:ring-accent motion-reduce:transition-none"
+                    [class.bg-accent]="intForm().enabled"
+                    [class.border-accent]="intForm().enabled"
+                    [class.bg-surface-3]="!intForm().enabled"
+                    [class.border-border-subtle]="!intForm().enabled">
+                    <span
+                      class="inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform motion-reduce:transition-none"
+                      [class.translate-x-4]="intForm().enabled"
+                      [class.translate-x-0.5]="!intForm().enabled"></span>
+                  </button>
+                </div>
+
+                <div class="mb-3">
+                  <label class="mb-1 block text-xs text-text-secondary">Personal Access Token</label>
+                  <input
+                    [type]="showPat() ? 'text' : 'password'"
+                    class="w-full rounded border border-border-subtle bg-surface-2 px-2 py-1.5 font-mono text-xs text-text-primary focus:border-accent focus:outline-none"
+                    placeholder="lin_api_…"
+                    [ngModel]="pat()"
+                    (ngModelChange)="onPatInput($event)" />
+                  <div class="mt-1 flex items-center justify-between">
+                    <p class="text-xs text-text-muted">
+                      @if (patConfigured() && pat().length === 0) {
+                        A token is stored for this connection. Enter a new one only to replace it.
+                      } @else {
+                        Stored locally, encrypted with your OS keychain when available.
+                      }
+                    </p>
+                    <button
+                      type="button"
+                      class="text-xs text-accent hover:text-accent-hover"
+                      (click)="toggleShowPat()">{{ showPat() ? 'Hide' : 'Show' }}</button>
+                  </div>
+                </div>
+
+                <div class="mb-3 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    class="rounded bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent-hover disabled:opacity-50"
+                    [disabled]="pat().length === 0 || intStatus() === 'loading'"
+                    (click)="connectLinear()">
+                    {{ intStatus() === 'loading' ? 'Connecting…' : 'Connect' }}
+                  </button>
+                  <button
+                    type="button"
+                    class="rounded border border-border-subtle bg-surface-2 px-3 py-1.5 text-xs text-text-secondary hover:bg-surface-3 hover:text-text-primary disabled:opacity-50"
+                    disabled
+                    title="OAuth — coming soon (TER-33)">Connect with OAuth</button>
+                  <span class="text-xs text-text-muted">OAuth — coming soon (TER-33)</span>
+                </div>
+
+                @if (intStatus() === 'error') {
+                  <p class="mb-3 text-xs text-danger">{{ intError() }}</p>
+                } @else if (intStatus() === 'connected') {
+                  <p class="mb-3 text-xs text-accent">Connected.</p>
+                }
+
+                @if (teams().length > 0) {
+                  <div class="mb-3">
+                    <label class="mb-1 block text-xs text-text-secondary">Team</label>
+                    <select
+                      class="w-full rounded border border-border-subtle bg-surface-2 px-2 py-1.5 font-mono text-xs text-text-primary focus:border-accent focus:outline-none"
+                      [ngModel]="intForm().teamId"
+                      (ngModelChange)="onSelectTeam($event)">
+                      <option value="">Select a team…</option>
+                      @for (t of teams(); track t.id) {
+                        <option [value]="t.id">{{ t.name }} ({{ t.key }})</option>
+                      }
+                    </select>
+                  </div>
+                }
+
+                @if (intForm().teamId.length > 0) {
+                  <div class="mb-3">
+                    <label class="mb-1 block text-xs text-text-secondary">Project (optional)</label>
+                    <select
+                      class="w-full rounded border border-border-subtle bg-surface-2 px-2 py-1.5 font-mono text-xs text-text-primary focus:border-accent focus:outline-none"
+                      [ngModel]="intForm().projectId"
+                      (ngModelChange)="onSelectProject($event)">
+                      <option value="">No project (team only)</option>
+                      @for (p of projects(); track p.id) {
+                        <option [value]="p.id">{{ p.name }}</option>
+                      }
+                    </select>
+                  </div>
+
+                  <div class="mb-3 flex items-center gap-2">
+                    <button
+                      type="button"
+                      class="rounded bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent-hover disabled:opacity-50"
+                      [disabled]="intStatus() === 'loading'"
+                      (click)="saveLinear()">Save &amp; validate</button>
+                    @if (intStatus() === 'loading') {
+                      <span class="text-xs text-accent">Validating…</span>
+                    }
+                  </div>
+                }
+
+                @if (labels().length > 0) {
+                  <div class="mb-3">
+                    <label class="mb-1 block text-xs text-text-secondary">Feature label (optional)</label>
+                    <select
+                      class="w-full rounded border border-border-subtle bg-surface-2 px-2 py-1.5 font-mono text-xs text-text-primary focus:border-accent focus:outline-none"
+                      [ngModel]="intForm().featureLabelId"
+                      (ngModelChange)="onSelectFeatureLabel($event)">
+                      <option value="">No label</option>
+                      @for (l of labels(); track l.id) {
+                        <option [value]="l.id">{{ l.name }}</option>
+                      }
+                    </select>
+                    <p class="mt-1 text-xs text-text-muted">Applied to Feature-level items pushed to Linear.</p>
+                  </div>
+                }
+
+                @if (activeConnection()) {
+                  <button
+                    type="button"
+                    class="rounded border border-border-subtle bg-surface-2 px-3 py-1.5 text-xs text-text-secondary hover:bg-surface-3 hover:text-text-primary"
+                    (click)="disconnectLinear()">Disconnect</button>
+                }
+              }
+            </section>
+            }
             </div>
           </div>
 
@@ -451,6 +644,7 @@ export class SettingsModalComponent {
   private readonly toolRegistry = inject(ToolRegistryService);
   protected readonly skillRegistry = inject(SkillRegistryService);
   private readonly ipc = inject(IpcService);
+  private readonly sync = inject(SyncService);
   private readonly destroyRef = inject(DestroyRef);
 
   /** Tools are static after construction, so a plain readonly snapshot is fine. */
@@ -462,6 +656,7 @@ export class SettingsModalComponent {
     { id: 'index', label: 'Index' },
     { id: 'tools', label: 'Tools' },
     { id: 'skills', label: 'Skills' },
+    { id: 'integrations', label: 'Integrations' },
   ];
 
   readonly activeSection = signal<SettingsSection>('workspace');
@@ -481,6 +676,46 @@ export class SettingsModalComponent {
   readonly draft = this._draft.asReadonly();
   readonly draftVaultPath = this._draftVaultPath.asReadonly();
   readonly showApiKey = this._showApiKey.asReadonly();
+
+  // --- Integrations (TER-31) -------------------------------------------------
+  // Transient, NOT part of `draft()`: the connection model persists out-of-band
+  // (immediately) via SettingsService.saveConnection, not the modal's Save. The
+  // sub-draft (`_intForm`) holds the in-progress selection; the lists/status are
+  // ephemeral UI state reset on vault switch and modal open.
+
+  /** Write-only PAT input. Never read back from storage (PAT is write-only). */
+  private readonly _pat = signal('');
+  private readonly _showPat = signal(false);
+  /** Whether a PAT is already stored for the active connection (status only). */
+  private readonly _patConfigured = signal(false);
+  private readonly _intStatus = signal<IntegrationStatus>('idle');
+  private readonly _intError = signal<string | null>(null);
+  private readonly _teams = signal<LinearTeam[]>([]);
+  private readonly _projects = signal<LinearProject[]>([]);
+  private readonly _labels = signal<LabelInfo[]>([]);
+  private readonly _intForm = signal<IntegrationForm>({ ...EMPTY_INTEGRATION_FORM });
+
+  readonly pat = this._pat.asReadonly();
+  readonly showPat = this._showPat.asReadonly();
+  readonly patConfigured = this._patConfigured.asReadonly();
+  readonly intStatus = this._intStatus.asReadonly();
+  readonly intError = this._intError.asReadonly();
+  readonly teams = this._teams.asReadonly();
+  readonly projects = this._projects.asReadonly();
+  readonly labels = this._labels.asReadonly();
+  readonly intForm = this._intForm.asReadonly();
+
+  /**
+   * The persisted Linear connection for the active vault, or `null` when none is
+   * configured. Drives the Disconnect button and the connectionId computation.
+   */
+  readonly activeConnection = computed<LinearConnection | null>(() => {
+    const vaultPath = this.vault.vaultPath();
+    if (!vaultPath) return null;
+    const conns = this.settings.connectionsForVault(vaultPath);
+    const linear = conns.find((c): c is LinearConnection => c.provider === 'linear');
+    return linear ?? null;
+  });
 
   // Provider model list (TER-5). One shared list feeds both the chat and
   // embedding dropdowns; the fetch always reads the DRAFT base URL / key so it
@@ -592,12 +827,28 @@ export class SettingsModalComponent {
           this._models.set([]);
           this._modelsError.set(null);
           this._modelsLoading.set(false);
+          // Reset the transient Integrations state and reload the visible
+          // connection for the active vault (mirrors `_showApiKey`'s reset).
+          this.resetIntegrationState();
+          void this.loadIntegrationConnection();
           // Refresh the skill list so the Skills section reflects what is on
           // disk right now (a skill could have been added since last open).
           void this.skillRegistry.reload();
         });
       }
       this.wasOpen = open;
+    });
+
+    // Reload the visible Integrations connection whenever the active vault
+    // changes (switching vaults must show that vault's connection). Keyed on the
+    // vault path; the reload itself runs untracked so reading other signals there
+    // can't widen this effect's dependency set.
+    effect(() => {
+      this.vault.vaultPath();
+      untracked(() => {
+        this.resetIntegrationState();
+        void this.loadIntegrationConnection();
+      });
     });
 
     // Debounced auto-fetch of the provider model list. Depends only on the AI
@@ -865,6 +1116,266 @@ export class SettingsModalComponent {
     // takes effect after the save above; refresh the discovered list now.
     if (dirsChanged) void this.skillRegistry.reload();
     this.close();
+  }
+
+  // --- Integrations (TER-31) -------------------------------------------------
+
+  toggleShowPat(): void {
+    this._showPat.update((v) => !v);
+  }
+
+  /** Mirrors `patch` for the transient PAT input — keeps it write-only. */
+  onPatInput(value: string): void {
+    this._pat.set(value);
+  }
+
+  /** Updates a subset of the integration sub-draft. */
+  private patchIntForm(partial: Partial<IntegrationForm>): void {
+    this._intForm.update((f) => ({ ...f, ...partial }));
+  }
+
+  /** Resets all transient Integrations UI/sub-draft state to empty. */
+  private resetIntegrationState(): void {
+    this._pat.set('');
+    this._showPat.set(false);
+    this._patConfigured.set(false);
+    this._intStatus.set('idle');
+    this._intError.set(null);
+    this._teams.set([]);
+    this._projects.set([]);
+    this._labels.set([]);
+    this._intForm.set({ ...EMPTY_INTEGRATION_FORM });
+  }
+
+  /**
+   * Hydrates the sub-draft + PAT-configured flag from the active vault's
+   * persisted Linear connection (if any). Leaves the transient lists empty —
+   * the user re-enters/validates the PAT to repopulate teams/projects/labels,
+   * since the PAT is write-only and cannot be read back.
+   */
+  private async loadIntegrationConnection(): Promise<void> {
+    const conn = this.activeConnection();
+    if (!conn) return;
+    this._intForm.set({
+      enabled: conn.enabled,
+      teamId: conn.teamId,
+      projectId: conn.projectId ?? '',
+      featureLabelId: conn.featureLabelId ?? '',
+    });
+    if (this.ipc.isAvailable) {
+      try {
+        const configured = await this.ipc.connectionSecretStatus(conn.connectionId, 'pat');
+        this._patConfigured.set(configured);
+      } catch {
+        this._patConfigured.set(false);
+      }
+    }
+  }
+
+  /**
+   * Validates the entered PAT by discovering teams (TER-31). Requires a PAT in
+   * the input. On success the team list populates and status becomes
+   * `'connected'`; on failure the status is `'error'` and the message is shown.
+   */
+  async connectLinear(): Promise<void> {
+    const pat = this._pat();
+    if (pat.length === 0) return;
+    if (!this.ipc.isAvailable) return;
+    this._intStatus.set('loading');
+    this._intError.set(null);
+    try {
+      const teams = await this.sync.listTeams(pat);
+      // Discard a stale response: the user may have changed the PAT while this
+      // request was in flight, in which case it no longer describes the input.
+      if (this._pat() !== pat) return;
+      this._teams.set(teams);
+      this._intStatus.set('connected');
+    } catch (err) {
+      this._teams.set([]);
+      this._intStatus.set('error');
+      this._intError.set(this.toIntegrationMessage(err));
+    }
+  }
+
+  /**
+   * Selects a team and, when a PAT is present, discovers its projects. Clears the
+   * previously-selected project and feature label (both team/workspace-scoped) so
+   * stale ids from another team can't persist onto the new connection.
+   */
+  async onSelectTeam(teamId: string): Promise<void> {
+    this.patchIntForm({ teamId, projectId: '', featureLabelId: '' });
+    this._projects.set([]);
+    this._labels.set([]);
+    const pat = this._pat();
+    if (teamId.length === 0 || pat.length === 0 || !this.ipc.isAvailable) return;
+    try {
+      const projects = await this.sync.listProjects(pat, teamId);
+      // Discard a stale response: the PAT or selected team may have changed while
+      // this request was in flight, in which case it no longer applies.
+      if (this._pat() !== pat || this._intForm().teamId !== teamId) return;
+      this._projects.set(projects);
+    } catch (err) {
+      this._intStatus.set('error');
+      this._intError.set(this.toIntegrationMessage(err));
+    }
+  }
+
+  onSelectProject(projectId: string): void {
+    // The feature label is workspace/team-scoped, not project-scoped, but a
+    // project change is still a connection-identity change; clear the stale label
+    // so it can't be persisted onto the new connection.
+    this.patchIntForm({ projectId, featureLabelId: '' });
+    this._labels.set([]);
+  }
+
+  /**
+   * Persists the connection and validates the label path (TER-31). Computes the
+   * identity-bearing connectionId from team+project; if a prior connection has a
+   * different id (the team/project changed), removes it first (clearing its
+   * stored secret). Saves the connection, stores the PAT when newly entered, then
+   * fetches metadata to populate the feature-label picker.
+   */
+  async saveLinear(): Promise<void> {
+    const vaultPath = this.vault.vaultPath();
+    if (!vaultPath || !this.vault.hasVault()) return;
+    const form = this._intForm();
+    if (form.teamId.length === 0) return;
+
+    const projectId = form.projectId.length > 0 ? form.projectId : undefined;
+    const id = makeConnectionId({ vaultPath, provider: 'linear', teamId: form.teamId, projectId });
+    const existing = this.activeConnection();
+    const idChanged = existing ? existing.connectionId !== id : true;
+
+    // Credential guard: the stored secret is keyed on the connectionId, so the
+    // "empty input = keep existing token" shortcut is only valid when the id is
+    // unchanged AND a token is already configured for it. Whenever the id is new
+    // — a brand-new connection OR a team/project change that churns the id (which
+    // also clears the old id's secret below) — a fresh PAT is required, since a
+    // write-only token can't be carried over to a different id. Without one we
+    // would persist a connection that can never validate, so abort with a clear
+    // error instead.
+    const pat = this._pat();
+    if (pat.length === 0 && (idChanged || !this._patConfigured())) {
+      this._intStatus.set('error');
+      this._intError.set('Enter a Personal Access Token before saving this connection.');
+      return;
+    }
+
+    const conn: LinearConnection = {
+      connectionId: id,
+      provider: 'linear',
+      enabled: form.enabled,
+      authMode: 'pat',
+      teamId: form.teamId,
+      ...(projectId !== undefined ? { projectId } : {}),
+      ...(form.featureLabelId.length > 0 ? { featureLabelId: form.featureLabelId } : {}),
+    };
+
+    // Persist (connection + secret) BEFORE validating: `testConnection` resolves
+    // the credential main-side from the connectionId, so the secret must already
+    // be stored under `id`. The whole flow — remove-on-churn, save, store-secret,
+    // validate — runs under one try so any failure (not just validation) surfaces
+    // as an error in the panel rather than escaping as an unhandled rejection.
+    this._intStatus.set('loading');
+    this._intError.set(null);
+    try {
+      // If the identity changed (team/project), drop the old connection + secret
+      // first so a stale id (and its credential) can't linger.
+      if (existing && idChanged) {
+        await this.settings.removeConnection(vaultPath, existing.connectionId);
+      }
+      await this.settings.saveConnection(vaultPath, conn);
+
+      // Store the PAT only when freshly entered (it is write-only; an empty input
+      // when a token is already configured means "keep the existing one").
+      if (pat.length > 0 && this.ipc.isAvailable) {
+        await this.ipc.connectionSecretSet(id, 'pat', pat);
+        this._patConfigured.set(true);
+      }
+
+      // Validate by fetching metadata; populate the feature-label picker (drop
+      // label groups — they are containers, not applicable labels).
+      const metadata = await this.sync.testConnection(id);
+      this._labels.set((metadata.labels ?? []).filter((l) => !l.isGroup));
+      this._intStatus.set('connected');
+    } catch (err) {
+      this._intStatus.set('error');
+      this._intError.set(this.toIntegrationMessage(err));
+    }
+
+    this.syncConnectionsIntoDraft();
+  }
+
+  /**
+   * Sets the feature label and persists it. `featureLabelId` is NOT part of the
+   * connection identity, so this reuses the same id — no remove/re-add needed.
+   */
+  async onSelectFeatureLabel(labelId: string): Promise<void> {
+    this.patchIntForm({ featureLabelId: labelId });
+    const conn = this.activeConnection();
+    const vaultPath = this.vault.vaultPath();
+    if (!conn || !vaultPath) return;
+    // Rebuild the connection so an empty selection omits `featureLabelId`
+    // entirely (rather than persisting an explicit `undefined`). The label is
+    // not part of the connection identity, so the connectionId is unchanged.
+    const next: LinearConnection = {
+      connectionId: conn.connectionId,
+      provider: 'linear',
+      enabled: conn.enabled,
+      authMode: conn.authMode,
+      teamId: conn.teamId,
+      ...(conn.projectId !== undefined ? { projectId: conn.projectId } : {}),
+      ...(labelId.length > 0 ? { featureLabelId: labelId } : {}),
+    };
+    await this.settings.saveConnection(vaultPath, next);
+    this.syncConnectionsIntoDraft();
+  }
+
+  /**
+   * Toggles the connection's enabled flag. When a connection exists the change is
+   * persisted immediately; otherwise it is recorded as local intent only (applied
+   * on the next save).
+   */
+  async toggleLinearEnabled(enabled: boolean): Promise<void> {
+    this.patchIntForm({ enabled });
+    const conn = this.activeConnection();
+    const vaultPath = this.vault.vaultPath();
+    if (!conn || !vaultPath) return;
+    await this.settings.saveConnection(vaultPath, { ...conn, enabled });
+    this.syncConnectionsIntoDraft();
+  }
+
+  /**
+   * Removes the active connection (and, via SettingsService, its stored
+   * credential), then resets all transient Integrations state.
+   */
+  async disconnectLinear(): Promise<void> {
+    const conn = this.activeConnection();
+    const vaultPath = this.vault.vaultPath();
+    if (!conn || !vaultPath) return;
+    await this.settings.removeConnection(vaultPath, conn.connectionId);
+    this.resetIntegrationState();
+    this.syncConnectionsIntoDraft();
+  }
+
+  /**
+   * Re-syncs the persisted `pm.connections` into the modal's draft baseline so
+   * the global Save button never clobbers the out-of-band connection writes (the
+   * connection model persists immediately, not through Save).
+   */
+  private syncConnectionsIntoDraft(): void {
+    const persisted = this.settings.settings()['pm.connections'];
+    this._draft.update((d) => ({ ...d, 'pm.connections': persisted }));
+    const baseline = JSON.parse(this._initialJson()) as Settings;
+    baseline['pm.connections'] = persisted;
+    this._initialJson.set(JSON.stringify(baseline));
+  }
+
+  /** Extracts a human-readable message from a SyncError (or any thrown value). */
+  private toIntegrationMessage(err: unknown): string {
+    if (err instanceof SyncError) return err.info.message;
+    if (err instanceof Error) return err.message;
+    return String(err);
   }
 
   close(): void {

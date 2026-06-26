@@ -1,7 +1,14 @@
-import type { AdapterName, ProjectMetadata } from '../../../electron/sync/adapter';
+import type {
+  AdapterName,
+  LinearProject,
+  LinearTeam,
+  ProjectMetadata,
+} from '../../../electron/sync/adapter';
 import type { Connection } from '../../../electron/sync/connection';
 import type { PushPreviewTree } from '../../../electron/sync/preview';
 import type { PushResult } from '../../../electron/sync/executor';
+
+export type { LinearProject, LinearTeam } from '../../../electron/sync/adapter';
 
 export const IpcChannels = {
   SelectVault: 'specforge:select-vault',
@@ -35,6 +42,10 @@ export const IpcChannels = {
   SyncBuildPreview: 'specforge:sync-build-preview',
   SyncExecutePush: 'specforge:sync-execute-push',
   SyncConnectionList: 'specforge:sync-connection-list',
+
+  // TER-31: team/project discovery (the raw PAT crosses for discovery only)
+  SyncListTeams: 'specforge:sync-list-teams',
+  SyncListProjects: 'specforge:sync-list-projects',
 
   // Phase 3
   ChatsListSessions: 'specforge:chats-list-sessions',
@@ -614,6 +625,19 @@ export type SyncExecutePushResult =
   | { ok: true; data: PushResult | null }
   | { ok: false; error: AiErrorInfo };
 
+/**
+ * TER-31 discovery envelopes. The two discovery channels (list-teams,
+ * list-projects) travel their failures as data — same reason as the AI/sync
+ * handlers above — reusing the shared {@link AiErrorInfo} vocabulary.
+ */
+export type SyncListTeamsResult =
+  | { ok: true; data: LinearTeam[] }
+  | { ok: false; error: AiErrorInfo };
+
+export type SyncListProjectsResult =
+  | { ok: true; data: LinearProject[] }
+  | { ok: false; error: AiErrorInfo };
+
 // PDF export. The renderer sends sanitized HTML; the main process shows the
 // save dialog, prints it in a hidden window and writes the file.
 export interface ExportPdfPayload {
@@ -687,6 +711,12 @@ export interface SpecForgeApi {
   syncBuildPreview: (connectionId: string) => Promise<SyncBuildPreviewResult>;
   syncExecutePush: (connectionId: string) => Promise<SyncExecutePushResult>;
   syncConnectionList: (vaultPath: string) => Promise<Connection[]>;
+
+  // TER-31: team/project discovery. The raw PAT crosses for discovery ONLY (the
+  // sole credential-over-IPC exception, used before any connection exists); it
+  // is never logged, persisted, or returned.
+  syncListTeams: (pat: string) => Promise<SyncListTeamsResult>;
+  syncListProjects: (pat: string, teamId: string) => Promise<SyncListProjectsResult>;
 
   // Phase 3: chat persistence
   chatsListSessions: (vaultPath: string) => Promise<ChatSessionSummary[]>;

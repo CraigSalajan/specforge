@@ -15,6 +15,7 @@
  */
 
 import { createProductionSyncDeps } from '../sync/orchestrator-deps';
+import { buildEphemeralLinearClient } from '../sync/orchestrator';
 import { readConnectionsForVault } from '../sync/connection-store';
 import type { SyncIpcContext } from './sync';
 
@@ -28,5 +29,8 @@ export function createProductionSyncContext(): SyncIpcContext {
   return {
     deps: createProductionSyncDeps(),
     listConnections: readConnectionsForVault,
+    // TER-31: discovery builds an ephemeral PAT-authed client (the only path
+    // where the credential is passed in rather than resolved from the store).
+    buildDiscoveryClient: buildEphemeralLinearClient,
   };
 }
