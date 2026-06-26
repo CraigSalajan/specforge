@@ -10,13 +10,27 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  * Map and never imports the SQLite-backed repository (or the `node:sqlite`
  * built-in the renderer test bundler cannot bundle).
  */
-const { safeStorageMock } = vi.hoisted(() => ({
-  safeStorageMock: {
+// The unit-test builder bundles every spec into ONE module graph, so the modules
+// under test bind to a SINGLE `electron` mock across the whole bundle. Share one
+// safeStorage mock instance via globalThis so that — whichever file's vi.mock factory
+// wins the binding — every spec mutates the same object. Otherwise a per-file mock's
+// isEncryptionAvailable override is invisible to the bound module and the suite flakes
+// order-dependently (green locally, red on CI).
+const { safeStorageMock } = vi.hoisted(() => {
+  const g = globalThis as typeof globalThis & {
+    __sfSafeStorageMock__?: {
+      isEncryptionAvailable: ReturnType<typeof vi.fn>;
+      encryptString: ReturnType<typeof vi.fn>;
+      decryptString: ReturnType<typeof vi.fn>;
+    };
+  };
+  g.__sfSafeStorageMock__ ??= {
     isEncryptionAvailable: vi.fn(() => true),
     encryptString: vi.fn((s: string) => Buffer.from('cipher:' + s)),
     decryptString: vi.fn((b: Buffer) => b.toString().replace(/^cipher:/, '')),
-  },
-}));
+  };
+  return { safeStorageMock: g.__sfSafeStorageMock__ };
+});
 
 vi.mock('electron', () => ({ safeStorage: safeStorageMock }));
 
