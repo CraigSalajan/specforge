@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 
 import {
   handleBuildPreview,
+  handlePreviewFromItems,
   handleConnectionList,
   handleExecutePush,
+  handleExecutePushFromItems,
   handleListProjects,
   handleListTeams,
   handleTestConnection,
@@ -206,6 +208,42 @@ describe('handleBuildPreview (AC #1)', () => {
   });
 });
 
+describe('handlePreviewFromItems (TER-37 — combined review)', () => {
+  it('plans from the PASSED items (not the disk source) against the connection links', async () => {
+    // The disk source is empty — the preview must come purely from the passed items.
+    const { ctx } = fakeCtx({ items: [] });
+    const passed = [item({ localId: 'epic1', level: 'epic' }), item({ localId: 's1', parentLocalId: 'epic1' })];
+
+    const res = await handlePreviewFromItems(CONNECTION_ID, passed, ctx);
+
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.data.provider).toBe('linear');
+      expect(res.data.preview.counts).toEqual({ create: 2, update: 0, skip: 0, total: 2 });
+      expect(Object.keys(res.data).sort()).toEqual(['preview', 'provider']);
+    }
+  });
+
+  it('rejects a malformed items payload', async () => {
+    const { ctx } = fakeCtx({});
+
+    const bad = [{ level: 'story', title: 'no id' }];
+    const res = await handlePreviewFromItems(CONNECTION_ID, bad, ctx);
+
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.message).toContain('Invalid canonical items');
+  });
+
+  it('returns an error envelope on a disabled connection', async () => {
+    const { ctx } = fakeCtx({ connection: connection({ enabled: false }) });
+
+    const res = await handlePreviewFromItems(CONNECTION_ID, [item({ localId: 'a' })], ctx);
+
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.message).toContain('is disabled');
+  });
+});
+
 describe('handleExecutePush (AC #1)', () => {
   it('returns { ok: true, data: pushResult } after executing the plan', async () => {
     const items = [item({ localId: 'a' }), item({ localId: 'b' })];
@@ -229,6 +267,110 @@ describe('handleExecutePush (AC #1)', () => {
 
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.message).toContain('No active vault');
+  });
+});
+
+describe('handleExecutePushFromItems (TER-37 — combined apply)', () => {
+  it('executes the plan from the PASSED items, NOT the disk source', async () => {
+    // The disk source is empty, so anything created must come from the passed items.
+    const { ctx, writtenLinks, adapter } = fakeCtx({ items: [] });
+    const passed = [item({ localId: 'a' }), item({ localId: 'b' })];
+
+    const res = await handleExecutePushFromItems(CONNECTION_ID, passed, ctx);
+
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.data?.created).toBe(2);
+      expect(res.data?.failed).toBe(0);
+    }
+    expect(adapter.creates.map((c) => c.localId).sort()).toEqual(['a', 'b']);
+    // Idempotency: a link is written per item, keyed on its (marker-id) localId.
+    expect(writtenLinks.map((l) => l.specItemId).sort()).toEqual(['a', 'b']);
+  });
+
+  it('pushes the FULL structured description + criteria the renderer previewed', async () => {
+    const { ctx, adapter } = fakeCtx({ items: [] });
+    const structured = item({
+      localId: 's-reset',
+      title: 'Reset password',
+      description:
+        'As a locked-out user, I want reset my password, so that I regain access\n\n' +
+        'Covers the email reset link and its expiry window.\n\n' +
+        '**Open questions**\n- Should the link be single-use?\n\n' +
+        '**Risks**\n- Reset emails may land in spam.',
+      criteria: ['A reset link is emailed.'],
+    });
+
+    const res = await handleExecutePushFromItems(CONNECTION_ID, [structured], ctx);
+
+    expect(res.ok).toBe(true);
+    // The item that reaches the adapter carries the FULL structured description and
+    // its criteria verbatim — not a title+criteria-only shape.
+    expect(adapter.creates).toHaveLength(1);
+    const pushed = adapter.creates[0];
+    expect(pushed.description).toContain('As a locked-out user');
+    expect(pushed.description).toContain('Covers the email reset link');
+    expect(pushed.description).toContain('**Open questions**');
+    expect(pushed.description).toContain('**Risks**');
+    expect(pushed.criteria).toEqual(['A reset link is emailed.']);
+  });
+
+  it('rejects a malformed items payload (before any push)', async () => {
+    const { ctx, adapter } = fakeCtx({});
+    const bad = [{ level: 'story', title: 'no id' }];
+
+    const res = await handleExecutePushFromItems(CONNECTION_ID, bad, ctx);
+
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.message).toContain('Invalid canonical items');
+    // A rejected payload must never reach the adapter.
+    expect(adapter.creates).toHaveLength(0);
+  });
+
+  it('returns an error envelope on a disabled connection', async () => {
+    const { ctx } = fakeCtx({ connection: connection({ enabled: false }) });
+
+    const res = await handleExecutePushFromItems(CONNECTION_ID, [item({ localId: 'a' })], ctx);
+
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.message).toContain('is disabled');
+  });
+});
+
+describe('handleExecutePush* — live progress sink (TER-37)', () => {
+  it('handleExecutePush forwards a start+done pair per item to onProgress', async () => {
+    const { ctx } = fakeCtx({ items: [item({ localId: 'a' }), item({ localId: 'b' })] });
+    const events: string[] = [];
+
+    const res = await handleExecutePush(CONNECTION_ID, ctx, undefined, (ev) =>
+      events.push(`${ev.phase}:${ev.localId}`),
+    );
+
+    expect(res.ok).toBe(true);
+    // The plain callback is threaded all the way to the executor, mid-execute.
+    expect(events).toEqual(['start:a', 'done:a', 'start:b', 'done:b']);
+  });
+
+  it('handleExecutePushFromItems forwards progress for the passed items', async () => {
+    const { ctx } = fakeCtx({ items: [] });
+    const passed = [item({ localId: 'x' })];
+    const events: string[] = [];
+
+    const res = await handleExecutePushFromItems(CONNECTION_ID, passed, ctx, (ev) =>
+      events.push(`${ev.phase}:${ev.localId}`),
+    );
+
+    expect(res.ok).toBe(true);
+    expect(events).toEqual(['start:x', 'done:x']);
+  });
+
+  it('runs cleanly with no onProgress (the sink is optional)', async () => {
+    const { ctx } = fakeCtx({ items: [item({ localId: 'a' })] });
+
+    const res = await handleExecutePush(CONNECTION_ID, ctx);
+
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.data?.created).toBe(1);
   });
 });
 
@@ -406,5 +548,131 @@ describe('handleListProjects (TER-31)', () => {
     );
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.message).toContain('Invalid team id');
+  });
+});
+
+/**
+ * TER-37 — per-file push: `handleBuildPreview`/`handleExecutePush` accept an
+ * optional `filePath` naming ANY markdown file in the vault. When supplied it is
+ * validated (`.md`, no traversal/absolute/drive-letter — folder is irrelevant)
+ * and threaded into the orchestrator's item source; when omitted the whole-vault
+ * behavior is unchanged. The validator is private, so it is exercised through the
+ * handlers' result envelopes.
+ */
+describe('per-file push filePath (TER-37)', () => {
+  /** A context whose item source records each (vaultPath, filePath) call. */
+  function recordingCtx(): {
+    ctx: SyncIpcContext;
+    sourceCalls: Array<{ vaultPath: string; filePath?: string }>;
+  } {
+    const sourceCalls: Array<{ vaultPath: string; filePath?: string }> = [];
+    const conn = connection();
+    const deps: SyncOrchestratorDeps = {
+      resolveVaultRoot: () => VAULT_PATH,
+      readConnection: (_vaultPath, connectionId) =>
+        connectionId === conn.connectionId ? conn : undefined,
+      sourceCanonicalItems: (vaultPath, filePath) => {
+        sourceCalls.push({ vaultPath, filePath });
+        return [item({ localId: 'prd/x.md' })];
+      },
+      listLinks: () => [],
+      writeLink: () => undefined,
+      buildAdapter: () => fakeAdapter(),
+      now: () => FIXED_NOW,
+    };
+    return {
+      sourceCalls,
+      ctx: {
+        deps,
+        listConnections: () => [conn],
+        buildDiscoveryClient: () => {
+          throw new Error('buildDiscoveryClient not used in this test');
+        },
+      },
+    };
+  }
+
+  it('handleBuildPreview forwards a valid filePath into the item source', async () => {
+    const { ctx, sourceCalls } = recordingCtx();
+
+    const res = await handleBuildPreview(CONNECTION_ID, ctx, 'prd/x.md');
+
+    expect(res.ok).toBe(true);
+    expect(sourceCalls).toEqual([{ vaultPath: VAULT_PATH, filePath: 'prd/x.md' }]);
+  });
+
+  it('accepts a markdown file in any folder (no /prd restriction)', async () => {
+    for (const accepted of ['notes/foo.md', 'foo.md', 'docs/sub/spec.md']) {
+      const { ctx, sourceCalls } = recordingCtx();
+      const res = await handleBuildPreview(CONNECTION_ID, ctx, accepted);
+      expect(res.ok).toBe(true);
+      expect(sourceCalls).toEqual([{ vaultPath: VAULT_PATH, filePath: accepted }]);
+    }
+  });
+
+  it('handleBuildPreview passes filePath=undefined when omitted', async () => {
+    const { ctx, sourceCalls } = recordingCtx();
+
+    const res = await handleBuildPreview(CONNECTION_ID, ctx);
+
+    expect(res.ok).toBe(true);
+    expect(sourceCalls).toEqual([{ vaultPath: VAULT_PATH, filePath: undefined }]);
+  });
+
+  it('handleExecutePush forwards a valid filePath into the item source', async () => {
+    const { ctx, sourceCalls } = recordingCtx();
+
+    const res = await handleExecutePush(CONNECTION_ID, ctx, 'prd/x.md');
+
+    expect(res.ok).toBe(true);
+    expect(sourceCalls).toEqual([{ vaultPath: VAULT_PATH, filePath: 'prd/x.md' }]);
+  });
+
+  it('handleExecutePush passes filePath=undefined when omitted', async () => {
+    const { ctx, sourceCalls } = recordingCtx();
+
+    const res = await handleExecutePush(CONNECTION_ID, ctx);
+
+    expect(res.ok).toBe(true);
+    expect(sourceCalls).toEqual([{ vaultPath: VAULT_PATH, filePath: undefined }]);
+  });
+
+  // assertFilePath: accepts any vault-relative *.md path, rejects unsafe / non-md.
+  const REJECTED: Array<{ name: string; path: string }> = [
+    { name: 'parent traversal', path: 'notes/../secrets.md' },
+    { name: 'leading traversal', path: '../notes/x.md' },
+    { name: 'absolute (posix)', path: '/etc/passwd' },
+    { name: 'absolute (backslash)', path: '\\\\server\\share\\x.md' },
+    { name: 'windows drive + slash', path: 'C:/notes/x.md' },
+    { name: 'windows drive + backslash', path: 'C:\\notes\\x.md' },
+    // Drive-RELATIVE forms (no separator after the colon) still escape the vault
+    // when resolved (`D:foo.md` -> root of drive D), so they must be rejected.
+    { name: 'drive-relative (same drive)', path: 'C:secrets.md' },
+    { name: 'drive-relative (other drive)', path: 'D:payload.md' },
+    { name: 'drive-relative lowercase', path: 'c:secrets.md' },
+    { name: 'not markdown', path: 'notes/x.txt' },
+    { name: 'empty', path: '' },
+  ];
+
+  for (const { name, path } of REJECTED) {
+    it(`handleBuildPreview rejects an invalid filePath: ${name}`, async () => {
+      const { ctx, sourceCalls } = recordingCtx();
+
+      const res = await handleBuildPreview(CONNECTION_ID, ctx, path);
+
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.error.message).toContain('Invalid file path');
+      // A rejected path must never reach the item source.
+      expect(sourceCalls).toEqual([]);
+    });
+  }
+
+  it('accepts a nested path and is case-insensitive on the .md extension', async () => {
+    const { ctx, sourceCalls } = recordingCtx();
+
+    const res = await handleBuildPreview(CONNECTION_ID, ctx, 'docs/auth/login.MD');
+
+    expect(res.ok).toBe(true);
+    expect(sourceCalls).toEqual([{ vaultPath: VAULT_PATH, filePath: 'docs/auth/login.MD' }]);
   });
 });

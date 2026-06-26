@@ -67,10 +67,38 @@ export interface PushExecutionDeps {
    * to `() => new Date().toISOString()`.
    */
   now?: () => string;
+  /**
+   * OPTIONAL per-call progress callback. When supplied, {@link executePush}
+   * emits an {@link ItemProgressEvent} `start` at the top of each item's turn and
+   * a `done` at its terminal result, so a live UI can fill in a per-item list as
+   * the push runs. It is a fire-and-forget SIDE-EFFECT sink — exactly like
+   * {@link writeLink} — so the executor stays network/DB-free; it never awaits
+   * the callback and a throwing callback must not abort the push (callers wrap
+   * their own work). Absent → a pure no-op, identical to the original behavior.
+   */
+  onItemProgress?: (ev: ItemProgressEvent) => void;
 }
 
 /** Outcome of pushing a single item. */
 export type ItemPushStatus = 'created' | 'updated' | 'skipped' | 'failed';
+
+/**
+ * A live per-item progress event emitted by {@link executePush} as the plan is
+ * applied, so callers can drive a live "pending → creating → done/failed" list
+ * instead of waiting for the whole {@link PushResult}.
+ *
+ * `start` fires once at the TOP of an item's turn in the loop (before any adapter
+ * call); `done` fires once at its terminal result (skip/create/update/fail). The
+ * pair is emitted for every item in `plan.ordered`, in order, so a `start`
+ * always precedes its matching `done`. `localId` identifies the item across both
+ * events; `done` additionally carries the item's final {@link ItemPushResult}.
+ */
+export type ItemProgressEvent =
+  | { phase: 'start'; localId: string; decision: SyncDecision; title: string }
+  | { phase: 'done'; localId: string; decision: SyncDecision; title: string; result: ItemPushResult };
+
+/** An {@link ItemProgressEvent} stamped with the renderer-generated `pushId` for the SyncPushProgress IPC channel. */
+export type SyncPushProgressEvent = ItemProgressEvent & { pushId: string };
 
 /** Per-item result of a push, in `plan.ordered` order. */
 export interface ItemPushResult {
@@ -129,6 +157,7 @@ export async function executePush(
 ): Promise<PushResult> {
   const { adapter, writeLink } = deps;
   const now = deps.now ?? (() => new Date().toISOString());
+  const onItemProgress = deps.onItemProgress;
 
   // Resolved external ids keyed by SpecForge-local id, populated as we go.
   // Because parents precede children in `plan.ordered`, a parent's external id is
@@ -146,6 +175,19 @@ export async function executePush(
   for (const diff of plan.ordered) {
     const { item, decision } = diff;
     const localId = item.localId;
+
+    // One place that BOTH records the terminal result AND emits its `done`
+    // progress event, so every result site (skip/create/update/fail/catch) is
+    // covered without a per-site emit that could be forgotten. Returns `void` so
+    // it reads as a statement at each call site.
+    const record = (r: ItemPushResult): void => {
+      results.push(r);
+      onItemProgress?.({ phase: 'done', localId, decision, title: item.title, result: r });
+    };
+
+    // `start` fires at the TOP of the turn, before any adapter call, so a live
+    // UI can flip the row to "creating…" the moment its work begins.
+    onItemProgress?.({ phase: 'start', localId, decision, title: item.title });
 
     // Whether children of this item join it as members of a provider container
     // (e.g. Linear project membership) rather than being parent-linked to it, and
@@ -167,7 +209,7 @@ export async function executePush(
         // carries the parent's owner forward.
         const owner = isContainer ? diff.link?.externalId : parentOwner;
         if (owner !== undefined) ownerProjectByLocalId.set(localId, owner);
-        results.push({ localId, decision, status: 'skipped' });
+        record({ localId, decision, status: 'skipped' });
         continue;
       }
 
@@ -229,7 +271,7 @@ export async function executePush(
           }
         }
 
-        results.push(result);
+        record(result);
         continue;
       }
 
@@ -241,7 +283,7 @@ export async function executePush(
         // rather than calling the adapter with no id. Narrowing on `existingLink`
         // (not just its id) also lets us reuse `externalUrl` below without a
         // non-null assertion.
-        results.push({
+        record({
           localId,
           decision,
           status: 'failed',
@@ -268,7 +310,7 @@ export async function executePush(
       const owner = isContainer ? externalId : parentOwner;
       if (owner !== undefined) ownerProjectByLocalId.set(localId, owner);
 
-      results.push({
+      record({
         localId,
         decision,
         status: 'updated',
@@ -280,7 +322,7 @@ export async function executePush(
       // push. No link is written and the item is left out of the external-id map,
       // so its descendants will report `parent external id unavailable`.
       console.error('[sync] failed to push item', localId, err);
-      results.push({
+      record({
         localId,
         decision,
         status: 'failed',

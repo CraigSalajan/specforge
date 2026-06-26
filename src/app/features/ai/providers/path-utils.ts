@@ -43,7 +43,9 @@ export function joinRel(folder: string, filename: string): string {
  */
 export function isSafeRelPath(relPath: string): boolean {
   if (typeof relPath !== 'string' || relPath.length === 0) return false;
-  if (/^[a-zA-Z]:[\\/]/.test(relPath)) return false;
+  // Reject ANY Windows drive prefix — including the drive-relative `C:foo` form
+  // (no separator after the colon), which still escapes the vault when resolved.
+  if (/^[a-zA-Z]:/.test(relPath)) return false;
   if (relPath.startsWith('/') || relPath.startsWith('\\')) return false;
   const normalized = relPath.replace(/\\/g, '/');
   const segments = normalized.split('/');

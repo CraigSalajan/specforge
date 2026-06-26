@@ -32,7 +32,10 @@ const IpcChannels = {
   ConnectionSecretStatus: 'specforge:connection-secret-status',
   SyncTestConnection: 'specforge:sync-test-connection',
   SyncBuildPreview: 'specforge:sync-build-preview',
+  SyncPreviewFromItems: 'specforge:sync-preview-from-items',
   SyncExecutePush: 'specforge:sync-execute-push',
+  SyncExecutePushFromItems: 'specforge:sync-execute-push-from-items',
+  SyncPushProgress: 'specforge:sync-push-progress',
   SyncConnectionList: 'specforge:sync-connection-list',
   SyncListTeams: 'specforge:sync-list-teams',
   SyncListProjects: 'specforge:sync-list-projects',
@@ -198,6 +201,16 @@ interface AiStreamErrorEventDto {
   error?: AiErrorInfoDto;
 }
 
+/** Per-item push progress event (TER-37 live progress), demuxed by `pushId`. */
+interface SyncPushProgressEventDto {
+  pushId: string;
+  phase: 'start' | 'done';
+  localId: string;
+  decision: 'create' | 'update' | 'skip';
+  title: string;
+  result?: unknown;
+}
+
 const api = {
   selectVault: (): Promise<string | null> => ipcRenderer.invoke(IpcChannels.SelectVault),
   selectDirectory: (): Promise<string | null> => ipcRenderer.invoke(IpcChannels.SelectDirectory),
@@ -275,10 +288,26 @@ const api = {
   // never a credential). test/preview/push return result envelopes; list is bare.
   syncTestConnection: (connectionId: string) =>
     ipcRenderer.invoke(IpcChannels.SyncTestConnection, connectionId),
-  syncBuildPreview: (connectionId: string) =>
-    ipcRenderer.invoke(IpcChannels.SyncBuildPreview, connectionId),
-  syncExecutePush: (connectionId: string) =>
-    ipcRenderer.invoke(IpcChannels.SyncExecutePush, connectionId),
+  syncBuildPreview: (connectionId: string, filePath?: string) =>
+    ipcRenderer.invoke(IpcChannels.SyncBuildPreview, connectionId, filePath),
+  syncPreviewFromItems: (connectionId: string, items: unknown) =>
+    ipcRenderer.invoke(IpcChannels.SyncPreviewFromItems, connectionId, items),
+  // TER-37 (live progress): `pushId` is a renderer-generated correlation id. When
+  // supplied, main streams per-item progress over SyncPushProgress stamped with
+  // it; the renderer demuxes by `pushId` and ignores other pushes' events.
+  syncExecutePush: (connectionId: string, filePath?: string, pushId?: string) =>
+    ipcRenderer.invoke(IpcChannels.SyncExecutePush, connectionId, filePath, pushId),
+  // TER-37: execute the push from the combined review's in-memory items (the apply
+  // half of syncPreviewFromItems) so Linear matches the previewed structured doc.
+  syncExecutePushFromItems: (connectionId: string, items: unknown, pushId?: string) =>
+    ipcRenderer.invoke(IpcChannels.SyncExecutePushFromItems, connectionId, items, pushId),
+  // TER-37 (live progress): subscribe to per-item push progress. Mirrors the AI
+  // stream bridges — returns an unsubscribe that removes the listener.
+  onSyncPushProgress: (cb: (evt: SyncPushProgressEventDto) => void): (() => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, payload: SyncPushProgressEventDto) => cb(payload);
+    ipcRenderer.on(IpcChannels.SyncPushProgress, handler);
+    return () => ipcRenderer.removeListener(IpcChannels.SyncPushProgress, handler);
+  },
   syncConnectionList: (vaultPath: string) =>
     ipcRenderer.invoke(IpcChannels.SyncConnectionList, vaultPath),
 

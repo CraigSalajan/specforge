@@ -2,6 +2,7 @@ import { CREATE_PRD_PROMPT } from './create-prd.prompt';
 import { CREATE_ADR_PROMPT } from './create-adr.prompt';
 import { CREATE_PLAN_PROMPT } from './create-plan.prompt';
 import { CREATE_STORIES_PROMPT } from './create-stories.prompt';
+import { DECOMPOSE_STORIES_PROMPT } from './decompose-stories.prompt';
 import { FIND_RELATED_PROMPT } from './find-related.prompt';
 import { OPEN_QUESTIONS_PROMPT } from './open-questions.prompt';
 import { SUMMARIZE_FEATURE_PROMPT } from './summarize-feature.prompt';
@@ -13,6 +14,7 @@ export type PlanningCommandId =
   | 'create-adr'
   | 'create-plan'
   | 'create-stories'
+  | 'decompose-stories'
   | 'find-related'
   | 'open-questions'
   | 'summarize-feature'
@@ -30,6 +32,14 @@ export interface PlanningCommand {
   systemPrompt: string;
   /** Default user intent placeholder shown in the input as a hint. */
   defaultUserPrompt: string;
+  /**
+   * When true, the command forces an in-place EDIT of the active markdown file
+   * (any folder, rather than drafting a new document): the orchestrator resolves
+   * the active file's vault-rel path, pins it into the turn, and passes it as
+   * `forcedEditRelPath` so the model's `content` revises that file. Requires
+   * `expectsFileProposal: true`. See `runCommand` in ai-orchestrator.service.ts.
+   */
+  forceEditActiveFile?: boolean;
 }
 
 /**
@@ -87,6 +97,21 @@ export const PLANNING_COMMANDS: ReadonlyArray<PlanningCommand> = [
     defaultFolder: '/prd/',
     systemPrompt: CREATE_STORIES_PROMPT,
     defaultUserPrompt: 'Feature or PRD to generate stories for:',
+  },
+  {
+    id: 'decompose-stories',
+    label: 'Decompose & Push this file',
+    description:
+      'Decompose the active epic into ID-tagged stories, then push them to Linear — one review',
+    mode: 'draft',
+    // The combined flow (decompose + push behind one review) is owned by
+    // AiOrchestratorService.decomposeAndPushActiveFile, dispatched directly from
+    // the AI panel — NOT through the generic `runCommand`/proposal pipeline. The
+    // registry entry exists so the slash menu still lists + describes it.
+    expectsFileProposal: false,
+    defaultFolder: null,
+    systemPrompt: DECOMPOSE_STORIES_PROMPT,
+    defaultUserPrompt: 'Anything to emphasize while decomposing? (optional)',
   },
   {
     id: 'find-related',

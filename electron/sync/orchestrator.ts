@@ -45,7 +45,7 @@
 
 import { planPush, type PushPlan, type SyncLinkResolver } from './sync-engine';
 import { buildPushPreview, type PushPreviewTree } from './preview';
-import { executePush, type PushResult } from './executor';
+import { executePush, type PushResult, type ItemProgressEvent } from './executor';
 import { ADAPTER_REGISTRY } from './adapter-registry';
 import { connectionToLinearConfig, type Connection } from './connection';
 import { LinearGraphQLClient } from './linear/client';
@@ -68,8 +68,15 @@ export interface SyncOrchestratorDeps {
   resolveVaultRoot(): string | null;
   /** Reads the persisted, non-secret connection by id within a vault. */
   readConnection(vaultPath: string, connectionId: string): Connection | undefined;
-  /** Builds the provider-agnostic canonical items to push from a vault's specs. */
-  sourceCanonicalItems(vaultPath: string): CanonicalItem[];
+  /**
+   * Builds the provider-agnostic canonical items to push. When `filePath` (a
+   * vault-relative markdown path, any folder) is provided, the source is scoped
+   * to ONLY that file's items (TER-37 — push one file); when omitted, the whole
+   * vault's specs are sourced (the TER-29 default — walks `/prd`). The whole-vault
+   * path is behavior-identical to before, so `filePath` is optional everywhere it
+   * threads through.
+   */
+  sourceCanonicalItems(vaultPath: string, filePath?: string): CanonicalItem[];
   /** Reads every existing SyncLink for a connection (one query → map lookup). */
   listLinks(connectionId: string): SyncLink[];
   /** Persists a SyncLink after a successful create/update. */
@@ -108,13 +115,56 @@ export interface PlannedPush {
  * {@link PushPreviewTree}. Touches no network and writes nothing — it is safe to
  * call repeatedly while the user revises a selection.
  *
+ * When `filePath` (a vault-relative markdown path, any folder) is supplied, the
+ * push is scoped to ONLY that file's items (TER-37); omitting it sources the
+ * whole vault, which is behavior-identical to the original signature.
+ *
  * @throws if no vault is active, the connection is unknown, or the connection is
  * disabled.
  */
 export function planPushForConnection(
   connectionId: string,
   deps: SyncOrchestratorDeps,
+  filePath?: string,
 ): PlannedPush {
+  // Items come from disk: the whole vault, or the single file when `filePath` is
+  // set (resolved against the active vault inside the deps).
+  const { conn, vaultPath } = resolveEnabledConnection(connectionId, deps);
+  return planForConnection(conn, deps.sourceCanonicalItems(vaultPath, filePath), deps);
+}
+
+/**
+ * Plan a push for a connection from PRE-BUILT canonical items — the combined
+ * decompose-and-push review path (TER-37).
+ *
+ * Identical to {@link planPushForConnection} except the canonical items are passed
+ * in rather than sourced from disk, so the combined review can preview the AI's
+ * *proposed* (not-yet-written) doc content while still resolving idempotency
+ * against the connection's real, persisted SyncLinks. Read-only: touches no
+ * network and writes nothing.
+ *
+ * @throws if no vault is active, the connection is unknown, or it is disabled.
+ */
+export function planPushFromItems(
+  connectionId: string,
+  items: CanonicalItem[],
+  deps: SyncOrchestratorDeps,
+): PlannedPush {
+  const { conn } = resolveEnabledConnection(connectionId, deps);
+  return planForConnection(conn, items, deps);
+}
+
+/**
+ * Resolves the active vault and the persisted, ENABLED connection for
+ * `connectionId`, shared by both planning entry points so the gate ordering +
+ * error messages stay identical.
+ *
+ * @throws if no vault is active, the connection is unknown, or it is disabled.
+ */
+function resolveEnabledConnection(
+  connectionId: string,
+  deps: SyncOrchestratorDeps,
+): { conn: Connection; vaultPath: string } {
   const vaultPath = deps.resolveVaultRoot();
   if (vaultPath === null) {
     throw new Error('No active vault; open a vault before syncing.');
@@ -127,9 +177,19 @@ export function planPushForConnection(
   if (conn.enabled === false) {
     throw new Error(`Connection ${connectionId} is disabled`);
   }
+  return { conn, vaultPath };
+}
 
-  const items = deps.sourceCanonicalItems(vaultPath);
-
+/**
+ * Plans the create/update/skip diff for `items` against `conn`'s persisted
+ * SyncLinks and builds the preview + adapter — the shared tail of both planning
+ * entry points. Read-only: touches no network and writes nothing.
+ */
+function planForConnection(
+  conn: Connection,
+  items: CanonicalItem[],
+  deps: SyncOrchestratorDeps,
+): PlannedPush {
   // One query → a Map lookup, so planning N items costs one read, not N.
   const linksById = new Map<string, SyncLink>();
   for (const link of deps.listLinks(conn.connectionId)) {
@@ -160,15 +220,21 @@ export function planPushForConnection(
  * Delegates straight to {@link executePush}, which captures per-item failures
  * (including a `LinearRequestError`) into {@link PushResult} and never throws on
  * an item failure — so this never wraps it in a throw-expecting try/catch.
+ *
+ * `onItemProgress` is an OPTIONAL PER-CALL progress sink (not a stored dep),
+ * forwarded straight into the executor so a live UI can fill in a per-item list
+ * as the push runs. Omitting it is the original behavior exactly.
  */
 export function executePlannedPush(
   planned: PlannedPush,
   deps: SyncOrchestratorDeps,
+  onItemProgress?: (ev: ItemProgressEvent) => void,
 ): Promise<PushResult> {
   return executePush(planned.plan, planned.connectionId, {
     adapter: planned.adapter,
     writeLink: deps.writeLink,
     now: deps.now,
+    onItemProgress,
   });
 }
 
@@ -180,6 +246,14 @@ export function executePlannedPush(
  * non-interactive path the e2e harness uses). When approval is declined the
  * plan is returned with a `null` result and nothing is executed or written.
  *
+ * When `filePath` (a vault-relative markdown path, any folder) is supplied, the
+ * push is scoped to ONLY that file's items (TER-37); omitting it pushes the whole
+ * vault.
+ *
+ * `onItemProgress` is an OPTIONAL PER-CALL progress sink forwarded into the
+ * execute half once approval passes (it never fires when approval is declined,
+ * since nothing executes).
+ *
  * @returns the plan and the execution result, or `{ planned, result: null }`
  * when approval is declined.
  */
@@ -187,12 +261,14 @@ export async function runSyncPush(
   connectionId: string,
   deps: SyncOrchestratorDeps,
   approve: (preview: PushPreviewTree) => boolean | Promise<boolean> = () => true,
+  filePath?: string,
+  onItemProgress?: (ev: ItemProgressEvent) => void,
 ): Promise<{ planned: PlannedPush; result: PushResult | null }> {
-  const planned = planPushForConnection(connectionId, deps);
+  const planned = planPushForConnection(connectionId, deps, filePath);
   if (!(await approve(planned.preview))) {
     return { planned, result: null };
   }
-  const result = await executePlannedPush(planned, deps);
+  const result = await executePlannedPush(planned, deps, onItemProgress);
   return { planned, result };
 }
 

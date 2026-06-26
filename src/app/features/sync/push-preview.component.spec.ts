@@ -11,7 +11,7 @@ import { UiStateService } from '../../core/ui-state.service';
 import { DEFAULT_SETTINGS, type Settings, type SyncPreviewData } from '../../shared/types';
 import type { LinearConnection } from '../../../../electron/sync/connection';
 import type { PushPreviewTree, PreviewNode } from '../../../../electron/sync/preview';
-import type { PushResult } from '../../../../electron/sync/executor';
+import type { PushResult, ItemProgressEvent } from '../../../../electron/sync/executor';
 
 const VAULT = '/vault';
 
@@ -131,10 +131,22 @@ class FakeVaultService {
   readonly hasVault = signal(true);
 }
 
+type ProgressCb = (ev: ItemProgressEvent) => void;
+
 function makeSync() {
   return {
-    buildPreview: vi.fn(async (): Promise<SyncPreviewData> => PREVIEW),
-    executePush: vi.fn(async (): Promise<PushResult> => PUSH_RESULT),
+    buildPreview: vi.fn(async (_conn: string, _file?: string): Promise<SyncPreviewData> => PREVIEW),
+    buildPreviewFromItems: vi.fn(
+      async (_conn: string, _items: unknown): Promise<SyncPreviewData> => PREVIEW,
+    ),
+    executePush: vi.fn(
+      async (_conn: string, _file?: string, _onProgress?: ProgressCb): Promise<PushResult> =>
+        PUSH_RESULT,
+    ),
+    executePushFromItems: vi.fn(
+      async (_conn: string, _items: unknown, _onProgress?: ProgressCb): Promise<PushResult> =>
+        PUSH_RESULT,
+    ),
   };
 }
 
@@ -154,7 +166,17 @@ function setup(overrides?: {
   const sync = overrides?.sync ?? makeSync();
   const ipc = overrides?.ipc ?? makeIpc();
   const pushPreviewOpen = signal(false);
-  const uiState = { pushPreviewOpen, openPushPreview: vi.fn(), closePushPreview: vi.fn() };
+  const pushPreviewFilePath = signal<string | null>(null);
+  const combinedPushRequest = signal<unknown>(null);
+  const uiState = {
+    pushPreviewOpen,
+    pushPreviewFilePath,
+    combinedPushRequest,
+    openPushPreview: vi.fn(),
+    openPushPreviewForFile: vi.fn(),
+    openCombinedPushReview: vi.fn(),
+    closePushPreview: vi.fn(),
+  };
 
   TestBed.configureTestingModule({
     providers: [
@@ -170,7 +192,18 @@ function setup(overrides?: {
   const component = fixture.componentInstance;
   // Settle the constructor effects (vault-change reset) while the modal is closed.
   fixture.detectChanges();
-  return { component, fixture, settings, vault, sync, ipc, uiState, pushPreviewOpen };
+  return {
+    component,
+    fixture,
+    settings,
+    vault,
+    sync,
+    ipc,
+    uiState,
+    pushPreviewOpen,
+    pushPreviewFilePath,
+    combinedPushRequest,
+  };
 }
 
 /** Lets queued microtasks (awaited sync promises) settle. */
@@ -204,7 +237,7 @@ describe('PushPreviewComponent (TER-32)', () => {
       const ctx = setup();
       await open(ctx);
 
-      expect(ctx.sync.buildPreview).toHaveBeenCalledWith(CONNECTION.connectionId);
+      expect(ctx.sync.buildPreview).toHaveBeenCalledWith(CONNECTION.connectionId, undefined);
       expect(ctx.component.phase()).toBe('preview');
       const out = text(ctx.fixture);
       // Counts roll-up.
@@ -295,7 +328,11 @@ describe('PushPreviewComponent (TER-32)', () => {
       await ctx.component.approve();
       ctx.fixture.detectChanges();
 
-      expect(ctx.sync.executePush).toHaveBeenCalledWith(CONNECTION.connectionId);
+      expect(ctx.sync.executePush).toHaveBeenCalledWith(
+        CONNECTION.connectionId,
+        undefined,
+        expect.any(Function),
+      );
       expect(ctx.component.phase()).toBe('done');
 
       // Rows joined back to preview titles, in plan order, with a mixed result.
@@ -427,6 +464,243 @@ describe('PushPreviewComponent (TER-32)', () => {
 
       // The first vault's preview must not leak into the new vault's state.
       expect(ctx.component.previewTree()).toBeNull();
+    });
+  });
+
+  describe('per-file scope (TER-37)', () => {
+    const FILE = 'prd/auth.md';
+
+    it('threads the per-file path into buildPreview and executePush', async () => {
+      const ctx = setup();
+      // Scope the modal to a single file before opening (as openPushPreviewForFile would).
+      ctx.pushPreviewFilePath.set(FILE);
+      await open(ctx);
+
+      expect(ctx.sync.buildPreview).toHaveBeenCalledWith(CONNECTION.connectionId, FILE);
+      expect(ctx.component.filePath()).toBe(FILE);
+
+      await ctx.component.approve();
+      ctx.fixture.detectChanges();
+
+      expect(ctx.sync.executePush).toHaveBeenCalledWith(
+        CONNECTION.connectionId,
+        FILE,
+        expect.any(Function),
+      );
+    });
+
+    it('reflects the per-file scope in the modal header', async () => {
+      const ctx = setup();
+      ctx.pushPreviewFilePath.set(FILE);
+      await open(ctx);
+
+      const out = text(ctx.fixture);
+      expect(out).toContain('Push this file to Linear');
+      expect(out).toContain(FILE);
+    });
+
+    it('falls back to whole-vault wording and no filePath when unscoped', async () => {
+      const ctx = setup();
+      await open(ctx);
+
+      expect(ctx.sync.buildPreview).toHaveBeenCalledWith(CONNECTION.connectionId, undefined);
+      expect(ctx.component.filePath()).toBeNull();
+      expect(text(ctx.fixture)).toContain('Push to Linear');
+    });
+  });
+
+  describe('combined decompose-and-push mode (TER-37)', () => {
+    // The combined push is FLAT + stories-only (TER-37): the items the renderer
+    // passes are tagged stories with no epic/theme parents. They carry the full
+    // folded body + acceptance criteria so the combined preview can render richly.
+    const ITEMS = [
+      {
+        localId: 's1',
+        level: 'story' as const,
+        title: 'Log in with email',
+        description: 'As a user I can log in.\n\n**Open questions**\n- SSO?',
+        criteria: ['Valid creds succeed', 'Bad creds show an error'],
+      },
+      { localId: 's2', level: 'story' as const, title: 'Reset password' },
+    ];
+
+    /** A combined preview tree whose roots match the in-memory items by localId. */
+    const COMBINED_TREE: PushPreviewTree = {
+      roots: [
+        node({ localId: 's1', decision: 'create', title: 'Log in with email' }),
+        node({ localId: 's2', decision: 'update', title: 'Reset password' }),
+      ],
+      counts: { create: 1, update: 1, skip: 0, total: 2 },
+      cycles: [],
+    };
+
+    function combinedReq(
+      onApprove: (onProgress?: (ev: ItemProgressEvent) => void) => Promise<PushResult>,
+    ) {
+      return {
+        filePath: 'prd/auth.md',
+        items: ITEMS,
+        summary: { storiesAdded: 2, sectionCreated: true },
+        onApprove,
+      };
+    }
+
+    it('previews from in-memory items (not the file) and shows the doc-save summary', async () => {
+      const ctx = setup();
+      ctx.pushPreviewFilePath.set('prd/auth.md');
+      ctx.combinedPushRequest.set(combinedReq(async () => PUSH_RESULT));
+      await open(ctx);
+
+      // Preview came from the items path, NOT the disk buildPreview.
+      expect(ctx.sync.buildPreviewFromItems).toHaveBeenCalledWith(CONNECTION.connectionId, ITEMS);
+      expect(ctx.sync.buildPreview).not.toHaveBeenCalled();
+
+      const out = text(ctx.fixture);
+      // Doc-save summary + combined header + Save & Push button.
+      expect(out).toContain('Will save to prd/auth.md');
+      expect(out).toContain('2 new stories');
+      expect(out).toContain('Decompose & Push this file');
+      expect(out).toContain('Save & Push to Linear');
+    });
+
+    it('renders per-story description + acceptance criteria from the in-memory items', async () => {
+      const sync = makeSync();
+      sync.buildPreviewFromItems.mockResolvedValueOnce({ provider: 'linear', preview: COMBINED_TREE });
+      const ctx = setup({ sync });
+      ctx.pushPreviewFilePath.set('prd/auth.md');
+      ctx.combinedPushRequest.set(combinedReq(async () => PUSH_RESULT));
+      await open(ctx);
+
+      const rows = ctx.component.combinedStories();
+      expect(rows.map((r) => r.localId)).toEqual(['s1', 's2']);
+      expect(rows[0].decision).toBe('create');
+      expect(rows[0].criteria).toEqual(['Valid creds succeed', 'Bad creds show an error']);
+
+      const out = text(ctx.fixture);
+      // Story title + folded body + criteria + heading, not just counts.
+      expect(out).toContain('Log in with email');
+      expect(out).toContain('As a user I can log in.');
+      expect(out).toContain('Acceptance criteria');
+      expect(out).toContain('Valid creds succeed');
+      expect(out).toContain('Bad creds show an error');
+    });
+
+    it('approve runs the write-then-push callback (not the push-only executePush)', async () => {
+      const ctx = setup();
+      const onApprove = vi.fn(async () => PUSH_RESULT);
+      ctx.pushPreviewFilePath.set('prd/auth.md');
+      ctx.combinedPushRequest.set(combinedReq(onApprove));
+      await open(ctx);
+
+      await ctx.component.approve();
+      ctx.fixture.detectChanges();
+
+      expect(onApprove).toHaveBeenCalledTimes(1);
+      // The combined approve forwards a progress sink to the write-then-push callback.
+      expect(onApprove).toHaveBeenCalledWith(expect.any(Function));
+      // The combined approve must NOT call the push-only executePush directly.
+      expect(ctx.sync.executePush).not.toHaveBeenCalled();
+      expect(ctx.component.phase()).toBe('done');
+    });
+  });
+
+  describe('live per-item progress (TER-37)', () => {
+    it('seeds pending rows then transitions pending → creating → done as events arrive', async () => {
+      const sync = makeSync();
+      // Hold the push open so we can drive progress events before it resolves.
+      let resolvePush!: (r: PushResult) => void;
+      let progress: ((ev: ItemProgressEvent) => void) | undefined;
+      sync.executePush.mockImplementationOnce(
+        (_conn: string, _file: string | undefined, onProgress?: (ev: ItemProgressEvent) => void) => {
+          progress = onProgress;
+          return new Promise<PushResult>((resolve) => {
+            resolvePush = resolve;
+          });
+        },
+      );
+      const ctx = setup({ sync });
+      await open(ctx);
+
+      void ctx.component.approve();
+      await flushMicrotasks();
+      ctx.fixture.detectChanges();
+
+      // Seeded one pending row per preview-tree node, in plan order.
+      expect(ctx.component.phase()).toBe('pushing');
+      expect(ctx.component.progressRows().map((r) => r.localId)).toEqual([
+        'epic-1',
+        'story-1',
+        'story-2',
+      ]);
+      expect(ctx.component.progressRows().every((r) => r.status === 'pending')).toBe(true);
+
+      // start → creating in place; the row's badge vocabulary (statusClass) is reused.
+      progress?.({ phase: 'start', localId: 'epic-1', decision: 'create', title: 'Checkout revamp' });
+      ctx.fixture.detectChanges();
+      expect(ctx.component.progressRows().find((r) => r.localId === 'epic-1')?.status).toBe('creating');
+
+      // done → done, carrying the per-item result for the final badge/link.
+      progress?.({
+        phase: 'done',
+        localId: 'epic-1',
+        decision: 'create',
+        title: 'Checkout revamp',
+        result: {
+          localId: 'epic-1',
+          decision: 'create',
+          status: 'created',
+          externalUrl: 'https://linear.app/acme/issue/LIN-10',
+        },
+      });
+      ctx.fixture.detectChanges();
+      const epicRow = ctx.component.progressRows().find((r) => r.localId === 'epic-1');
+      expect(epicRow?.status).toBe('done');
+      // The done badge reuses the result-row badge vocabulary (created = accent).
+      const badge = (ctx.fixture.nativeElement as HTMLElement).querySelector('.bg-accent.text-white');
+      expect(badge?.textContent).toContain('created');
+      expect(text(ctx.fixture)).toContain('View in Linear');
+
+      // A failed item flips the row to failed.
+      progress?.({
+        phase: 'done',
+        localId: 'story-1',
+        decision: 'create',
+        title: 'Cart page',
+        result: { localId: 'story-1', decision: 'create', status: 'failed', error: 'rate limited' },
+      });
+      ctx.fixture.detectChanges();
+      expect(ctx.component.progressRows().find((r) => r.localId === 'story-1')?.status).toBe('failed');
+      expect(text(ctx.fixture)).toContain('rate limited');
+
+      resolvePush(PUSH_RESULT);
+      await flushMicrotasks();
+      ctx.fixture.detectChanges();
+      expect(ctx.component.phase()).toBe('done');
+    });
+
+    it('ignores progress from a stale generation (modal closed mid-push)', async () => {
+      const sync = makeSync();
+      let progress: ((ev: ItemProgressEvent) => void) | undefined;
+      sync.executePush.mockImplementationOnce(
+        (_conn: string, _file: string | undefined, onProgress?: (ev: ItemProgressEvent) => void) => {
+          progress = onProgress;
+          return new Promise<PushResult>(() => {});
+        },
+      );
+      const ctx = setup({ sync });
+      await open(ctx);
+
+      void ctx.component.approve();
+      await flushMicrotasks();
+      expect(ctx.component.phase()).toBe('pushing');
+
+      // Close bumps the generation (reset()). A late event must be discarded.
+      ctx.pushPreviewOpen.set(false);
+      ctx.fixture.detectChanges();
+      progress?.({ phase: 'start', localId: 'epic-1', decision: 'create', title: 'Checkout revamp' });
+
+      // The map was cleared by reset and the stale event did not repopulate it.
+      expect(ctx.component.progressRows()).toEqual([]);
     });
   });
 });

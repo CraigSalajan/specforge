@@ -19,7 +19,10 @@ import {
   type SyncOrchestratorDeps,
 } from './orchestrator';
 import { readConnection } from './connection-store';
-import { buildCanonicalItemsForVault } from './spec-to-canonical';
+import {
+  buildCanonicalItemsForVault,
+  buildTaskItemsForFile,
+} from './spec-to-canonical';
 import { getOAuthRuntimeContext } from './oauth-context';
 import {
   listSyncLinksForConnection,
@@ -42,7 +45,22 @@ export function createProductionSyncDeps(): SyncOrchestratorDeps {
   return {
     resolveVaultRoot: getActiveVaultRoot,
     readConnection,
-    sourceCanonicalItems: buildCanonicalItemsForVault,
+    // Routing guard — a per-file push must NEVER silently degrade to the
+    // whole-vault converter, which is FLAT-dropping for stories (it emits stories as
+    // `{title, criteria}` only, losing the structured description/open-questions/
+    // risks — the TER-37 regression). So:
+    //   - `filePath` present  → the per-file FLAT, stories-only source
+    //     (`buildTaskItemsForFile` → `buildTaskItemsFromContent`), which carries the
+    //     full structured `description` + `criteria` for each AI-tagged `sf:id` story
+    //     and NEVER the epic/themes/prose. This is the `/push-file` path.
+    //   - `filePath` absent   → the whole-vault Push button: parse the entire `/prd`
+    //     heading structure (`buildCanonicalItemsForVault`). ONLY this explicit
+    //     no-filePath case may reach the whole-vault converter.
+    // Story localIds are the marker ids in BOTH paths, so re-runs update rather than
+    // duplicate. (The combined `/decompose-stories` execute does not flow through here
+    // at all — it pushes its previewed in-memory items via `planPushFromItems`.)
+    sourceCanonicalItems: (root, filePath) =>
+      filePath ? buildTaskItemsForFile(root, filePath) : buildCanonicalItemsForVault(root),
     listLinks: listSyncLinksForConnection,
     writeLink: upsertSyncLink,
     buildAdapter,

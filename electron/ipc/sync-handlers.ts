@@ -9,10 +9,13 @@
  * `ipcMain.handle` registration shim lives in {@link ./sync}.
  *
  * ## Security — no credential ever crosses the boundary
- * Every channel accepts ONLY a `connectionId`/`vaultPath`, never a raw
- * credential. Credentials are resolved main-side inside `deps.buildAdapter` from
- * the encrypted at-rest store (TER-28), so a token never enters renderer memory
- * and no payload here ever carries one.
+ * Every channel accepts ONLY non-secret params — a `connectionId`/`vaultPath`,
+ * and (TER-37) an optional `filePath` naming the active markdown file to push.
+ * No channel accepts a raw credential. Credentials are resolved main-side inside
+ * `deps.buildAdapter` from the encrypted at-rest store (TER-28), so a token never
+ * enters renderer memory and no payload here ever carries one. The `filePath`
+ * param is validated (`.md`, no traversal/absolute/drive-letter) before it is
+ * threaded to the orchestrator's file-scoped item source.
  *
  * ## Deliberate read/write split — no connection writer lives here
  * Connection *persistence* (save/delete) stays in the renderer's reactive
@@ -38,12 +41,15 @@
  */
 
 import {
+  executePlannedPush,
   planPushForConnection,
+  planPushFromItems,
   runSyncPush,
 } from '../sync/orchestrator';
 import { LinearRequestError } from '../sync/linear/errors';
 import { discoverProjects, discoverTeams } from '../sync/linear/discovery';
 import type { SyncOrchestratorDeps } from '../sync/orchestrator';
+import type { CanonicalItem } from '../sync/canonical-item';
 import type { AiErrorInfo } from './ai-error';
 import type {
   AdapterName,
@@ -53,7 +59,7 @@ import type {
 } from '../sync/adapter';
 import type { LinearGraphQLClient } from '../sync/linear/client';
 import type { PushPreviewTree } from '../sync/preview';
-import type { PushResult } from '../sync/executor';
+import type { PushResult, ItemProgressEvent } from '../sync/executor';
 import type { Connection } from '../sync/connection';
 
 /**
@@ -150,6 +156,76 @@ function assertVaultPath(vaultPath: unknown): asserts vaultPath is string {
 }
 
 /**
+ * Validates the per-file push target (TER-37). The path is a vault-relative
+ * markdown file (any folder — the AI does the decomposition, so the source
+ * file's location is irrelevant), never a credential, but it IS consumed by a
+ * main-side `readFileSync`, so it is hardened against traversal before it reaches
+ * the orchestrator.
+ *
+ * Mirrors the renderer's `isSafeRelPath` (src/app/features/ai/providers/path-utils.ts)
+ * — replicated here rather than cross-imported, since this module deliberately
+ * imports only pure sync modules — PLUS a `.md` extension requirement. Rejects
+ * empty/non-string, absolute paths, ANY Windows drive prefix (`C:\`, `C:/`, and
+ * the drive-relative `C:foo.md`), and any `.`/`..` segment.
+ */
+function assertFilePath(filePath: unknown): asserts filePath is string {
+  if (typeof filePath !== 'string' || filePath.length === 0) {
+    throw new Error('Invalid file path');
+  }
+  // Reject ANY Windows drive prefix (`C:\`, `C:/`, AND the drive-RELATIVE form
+  // `C:foo.md`). The drive-relative form has no separator after the colon, so a
+  // `[a-zA-Z]:[\\/]` check misses it — yet `path.resolve(root, 'D:foo.md')`
+  // resolves to the root of drive D (and `C:foo.md` to the cwd of drive C),
+  // escaping the vault entirely. Matching the bare `[a-zA-Z]:` prefix closes
+  // both the absolute and the drive-relative bypass.
+  if (/^[a-zA-Z]:/.test(filePath)) {
+    throw new Error('Invalid file path');
+  }
+  if (filePath.startsWith('/') || filePath.startsWith('\\')) {
+    throw new Error('Invalid file path');
+  }
+  const normalized = filePath.replace(/\\/g, '/');
+  for (const seg of normalized.split('/')) {
+    if (seg === '..' || seg === '.' || seg.length === 0) {
+      throw new Error('Invalid file path');
+    }
+  }
+  // Per-file push targets a markdown file in any vault folder.
+  if (!/\.md$/i.test(normalized)) {
+    throw new Error('Invalid file path');
+  }
+}
+
+/**
+ * Validates the pre-built canonical items that cross IPC for the combined
+ * decompose-and-push preview (TER-37). They are renderer-computed and never a
+ * credential, but they ARE planned against the connection's SyncLinks, so each
+ * must be a well-formed {@link CanonicalItem} (non-empty string `localId`, a valid
+ * `level`, a string `title`). A bounded array guards against a runaway payload.
+ */
+function assertCanonicalItems(items: unknown): asserts items is CanonicalItem[] {
+  if (!Array.isArray(items) || items.length > 5000) {
+    throw new Error('Invalid canonical items');
+  }
+  const levels = new Set(['epic', 'feature', 'story', 'criterion']);
+  for (const item of items) {
+    if (typeof item !== 'object' || item === null) {
+      throw new Error('Invalid canonical items');
+    }
+    const it = item as Record<string, unknown>;
+    if (typeof it['localId'] !== 'string' || it['localId'].length === 0) {
+      throw new Error('Invalid canonical items');
+    }
+    if (typeof it['level'] !== 'string' || !levels.has(it['level'])) {
+      throw new Error('Invalid canonical items');
+    }
+    if (typeof it['title'] !== 'string') {
+      throw new Error('Invalid canonical items');
+    }
+  }
+}
+
+/**
  * Maps an unknown thrown value to the shared {@link AiErrorInfo} envelope: a
  * `LinearRequestError` surrenders its structured `.info` verbatim; anything else
  * becomes a generic, non-retryable `unknown` error carrying a string message.
@@ -202,11 +278,84 @@ export async function handleTestConnection(
 export async function handleBuildPreview(
   connectionId: string,
   ctx: SyncIpcContext,
+  filePath?: string,
 ): Promise<SyncBuildPreviewResult> {
   try {
     assertConnectionId(connectionId);
-    const planned = planPushForConnection(connectionId, ctx.deps);
+    // Per-file push (TER-37): when a target markdown file is supplied, validate +
+    // scope the preview to it; otherwise the whole-vault behavior is unchanged.
+    if (filePath !== undefined) assertFilePath(filePath);
+    const planned = planPushForConnection(connectionId, ctx.deps, filePath);
     return { ok: true, data: { provider: planned.provider, preview: planned.preview } };
+  } catch (err) {
+    return { ok: false, error: toErrorInfo(err) };
+  }
+}
+
+/**
+ * Build the read-only push preview from PRE-BUILT canonical items (TER-37 — the
+ * combined decompose-and-push review). The renderer computes the items in-memory
+ * from the AI's *proposed* (not-yet-written) doc content via
+ * `buildCanonicalItemsFromContent`, so the user can review what the push will do
+ * BEFORE anything is written to disk — while idempotency is still resolved against
+ * the connection's real, persisted SyncLinks (so previously-pushed stories show as
+ * update/skip, new ones as create).
+ *
+ * The matching apply half is {@link handleExecutePushFromItems}: the combined
+ * `/decompose-stories` flow writes the doc first (so disk stays the source of
+ * truth for any later re-push), then executes the push from these SAME in-memory
+ * items — NOT a disk re-read — so what lands in Linear is provably identical to the
+ * previewed structured stories (statement / description / open questions / risks),
+ * which a re-plan from disk via the whole-vault converter would otherwise drop.
+ */
+export async function handlePreviewFromItems(
+  connectionId: string,
+  items: unknown,
+  ctx: SyncIpcContext,
+): Promise<SyncBuildPreviewResult> {
+  try {
+    assertConnectionId(connectionId);
+    assertCanonicalItems(items);
+    const planned = planPushFromItems(connectionId, items, ctx.deps);
+    return { ok: true, data: { provider: planned.provider, preview: planned.preview } };
+  } catch (err) {
+    return { ok: false, error: toErrorInfo(err) };
+  }
+}
+
+/**
+ * Plan + execute a push from PRE-BUILT canonical items (TER-37 — the apply half of
+ * the combined decompose-and-push review). The renderer passes the EXACT items it
+ * already previewed via {@link handlePreviewFromItems} (built in-memory from the
+ * AI's proposed doc content), so the executed plan carries the full structured story
+ * `description` (statement + description + `**Open questions**` + `**Risks**`) and
+ * `criteria` — not the title+criteria-only shape a re-plan from disk through the
+ * whole-vault converter would yield.
+ *
+ * Idempotency is unchanged: every item's `localId` is its `sf:id` marker id, so the
+ * push resolves create/update/skip against the connection's persisted SyncLinks just
+ * as a disk-sourced plan would, and a re-run UPDATES rather than duplicates.
+ *
+ * The renderer preview is the approval gate, so this always applies (no second
+ * gate). Returns the serializable {@link PushResult}.
+ *
+ * `onProgress` is an OPTIONAL, ELECTRON-FREE per-item progress sink: this module
+ * forbids importing `electron` (see the module docblock), so it accepts a PLAIN
+ * callback and forwards it to the executor. The registration shim in `./sync`
+ * (which already imports electron) is what turns each event into a `sender.send`.
+ */
+export async function handleExecutePushFromItems(
+  connectionId: string,
+  items: unknown,
+  ctx: SyncIpcContext,
+  onProgress?: (ev: ItemProgressEvent) => void,
+): Promise<SyncExecutePushResult> {
+  try {
+    assertConnectionId(connectionId);
+    assertCanonicalItems(items);
+    const planned = planPushFromItems(connectionId, items, ctx.deps);
+    const result = await executePlannedPush(planned, ctx.deps, onProgress);
+    return { ok: true, data: result };
   } catch (err) {
     return { ok: false, error: toErrorInfo(err) };
   }
@@ -231,14 +380,24 @@ export async function handleBuildPreview(
  * retry where the remote create succeeded but its SyncLink write did not can
  * re-create the item. Durable create-before-link reconciliation belongs to the
  * sync engine and is out of scope here.
+ *
+ * `onProgress` is an OPTIONAL, ELECTRON-FREE per-item progress sink — same
+ * contract as {@link handleExecutePushFromItems}: a plain callback forwarded to
+ * the executor (through the orchestrator's default-approve `runSyncPush`), turned
+ * into `sender.send` by the registration shim in `./sync`.
  */
 export async function handleExecutePush(
   connectionId: string,
   ctx: SyncIpcContext,
+  filePath?: string,
+  onProgress?: (ev: ItemProgressEvent) => void,
 ): Promise<SyncExecutePushResult> {
   try {
     assertConnectionId(connectionId);
-    const { result } = await runSyncPush(connectionId, ctx.deps);
+    // Per-file push (TER-37): validate + scope to the target file when supplied;
+    // the default-approve gate is preserved (the renderer preview is the gate).
+    if (filePath !== undefined) assertFilePath(filePath);
+    const { result } = await runSyncPush(connectionId, ctx.deps, undefined, filePath, onProgress);
     return { ok: true, data: result };
   } catch (err) {
     return { ok: false, error: toErrorInfo(err) };

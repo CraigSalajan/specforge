@@ -1,13 +1,28 @@
 import { Injectable, inject } from '@angular/core';
 import { IpcService } from './ipc.service';
-import type { AiErrorInfo, LinearOAuthBeginData, SyncPreviewData } from '../shared/types';
+import type {
+  AiErrorInfo,
+  LinearOAuthBeginData,
+  SyncPreviewData,
+  SyncPushProgressEvent,
+} from '../shared/types';
 import type {
   LinearProject,
   LinearTeam,
   ProjectMetadata,
 } from '../../../electron/sync/adapter';
 import type { Connection } from '../../../electron/sync/connection';
-import type { PushResult } from '../../../electron/sync/executor';
+import type { PushResult, ItemProgressEvent } from '../../../electron/sync/executor';
+import type { CanonicalItem } from '../../../electron/sync/canonical-item';
+
+/**
+ * Per-item progress callback the push UI passes to {@link SyncService.executePush}
+ * / {@link SyncService.executePushFromItems}. It receives the bare executor
+ * {@link ItemProgressEvent} — the transport-level `pushId` is stripped by the
+ * service, which owns the subscribe/demux/unsubscribe lifecycle so the component
+ * never touches the IPC event stream directly.
+ */
+export type PushProgressListener = (ev: ItemProgressEvent) => void;
 
 /**
  * Error thrown by {@link SyncService} when a sync action channel returns a
@@ -53,9 +68,31 @@ export class SyncService {
   /**
    * Build the read-only push preview (the approval surface) for a connection.
    * Resolves `{ provider, preview }`, or throws {@link SyncError} on failure.
+   *
+   * When `filePath` (a vault-relative markdown path, any folder) is supplied, the
+   * preview is scoped to ONLY that file's items (TER-37); omitting it previews the
+   * whole vault. Pass the SAME `filePath` to {@link executePush} so the approved
+   * preview matches what is pushed.
    */
-  async buildPreview(connectionId: string): Promise<SyncPreviewData> {
-    const res = await this.ipc.syncBuildPreview(connectionId);
+  async buildPreview(connectionId: string, filePath?: string): Promise<SyncPreviewData> {
+    const res = await this.ipc.syncBuildPreview(connectionId, filePath);
+    if (!res.ok) throw new SyncError(res.error);
+    return res.data;
+  }
+
+  /**
+   * Build the push preview from PRE-BUILT canonical items (TER-37 — the combined
+   * decompose-and-push review). The items are computed in-memory from the AI's
+   * *proposed* doc content (via `buildCanonicalItemsFromContent`), so the user
+   * reviews the push BEFORE anything is written; idempotency is still resolved
+   * main-side against the connection's persisted SyncLinks. Resolves
+   * `{ provider, preview }` or throws {@link SyncError} on failure.
+   */
+  async buildPreviewFromItems(
+    connectionId: string,
+    items: CanonicalItem[],
+  ): Promise<SyncPreviewData> {
+    const res = await this.ipc.syncPreviewFromItems(connectionId, items);
     if (!res.ok) throw new SyncError(res.error);
     return res.data;
   }
@@ -63,16 +100,91 @@ export class SyncService {
   /**
    * Execute the push for a connection (the renderer preview is the approval gate).
    * Resolves the {@link PushResult}, or throws {@link SyncError} on failure.
+   *
+   * When `filePath` (a vault-relative markdown path, any folder) is supplied, the
+   * push is scoped to ONLY that file's items (TER-37) — pass the SAME `filePath`
+   * that was passed to {@link buildPreview}.
+   *
+   * When `onProgress` is supplied, this generates a `pushId`, subscribes to the
+   * live per-item progress stream filtered to that id, forwards each matching
+   * event to `onProgress`, and ALWAYS unsubscribes once the invoke settles (even
+   * on throw). The component never touches the IPC event stream directly.
    */
-  async executePush(connectionId: string): Promise<PushResult> {
-    const res = await this.ipc.syncExecutePush(connectionId);
-    if (!res.ok) throw new SyncError(res.error);
-    // `data` is `null` only when a gate declines; the renderer preview is the
-    // gate here, so the default-approve path always yields a concrete result.
-    if (res.data === null) {
-      throw new SyncError({ code: 'unknown', message: 'Push was not executed', retryable: false });
+  async executePush(
+    connectionId: string,
+    filePath?: string,
+    onProgress?: PushProgressListener,
+  ): Promise<PushResult> {
+    return this.runWithProgress(onProgress, (pushId) =>
+      this.ipc.syncExecutePush(connectionId, filePath, pushId),
+    );
+  }
+
+  /**
+   * Execute the push from PRE-BUILT canonical items (TER-37 — the apply half of the
+   * combined decompose-and-push review). Pushes the EXACT items
+   * {@link buildPreviewFromItems} previewed, so what lands in Linear is provably the
+   * full structured doc (statement / description / open questions / risks), not a
+   * disk re-read reshaped by the whole-vault converter. Idempotency is resolved
+   * main-side against the connection's persisted SyncLinks (marker-id `localId`s).
+   * Resolves the {@link PushResult}, or throws {@link SyncError} on failure.
+   *
+   * `onProgress` works exactly as in {@link executePush}: a `pushId`-scoped live
+   * stream of per-item progress, unsubscribed in a `finally`.
+   */
+  async executePushFromItems(
+    connectionId: string,
+    items: CanonicalItem[],
+    onProgress?: PushProgressListener,
+  ): Promise<PushResult> {
+    return this.runWithProgress(onProgress, (pushId) =>
+      this.ipc.syncExecutePushFromItems(connectionId, items, pushId),
+    );
+  }
+
+  /**
+   * Shared push-with-progress lifecycle for both execute flows. Generates a
+   * `pushId`, (when `onProgress` is set) subscribes to the progress stream
+   * filtered to that id, runs `invoke(pushId)`, unwraps the result envelope, and
+   * ALWAYS unsubscribes in a `finally` — even when the invoke rejects. The
+   * subscription lifecycle stays here so the component owns none of it (mirrors
+   * the AI provider's subscribe / `finally`-cleanup discipline).
+   */
+  private async runWithProgress(
+    onProgress: PushProgressListener | undefined,
+    invoke: (pushId: string) => Promise<{ ok: true; data: PushResult | null } | { ok: false; error: AiErrorInfo }>,
+  ): Promise<PushResult> {
+    // Correlation id for this push: every streamed event is stamped with it, so a
+    // stale/overlapping push's events are filtered out below.
+    const pushId = this.nextPushId();
+    let unsubscribe: (() => void) | undefined;
+    if (onProgress) {
+      unsubscribe = this.ipc.onSyncPushProgress((evt: SyncPushProgressEvent) => {
+        // Demux: ignore events from any other push sharing this renderer.
+        if (evt.pushId !== pushId) return;
+        // Strip the transport-level `pushId`; the component cares only about the
+        // executor event. Destructure so we never forward the id downstream.
+        const { pushId: _id, ...ev } = evt;
+        onProgress(ev);
+      });
     }
-    return res.data;
+    try {
+      const res = await invoke(pushId);
+      if (!res.ok) throw new SyncError(res.error);
+      // `data` is `null` only when a gate declines; the renderer preview is the
+      // gate here, so the default-approve path always yields a concrete result.
+      if (res.data === null) {
+        throw new SyncError({ code: 'unknown', message: 'Push was not executed', retryable: false });
+      }
+      return res.data;
+    } finally {
+      unsubscribe?.();
+    }
+  }
+
+  /** Generates a unique-per-renderer push correlation id. */
+  private nextPushId(): string {
+    return `push-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
   }
 
   /** List the persisted connections for a vault (a bare read, no envelope). */
