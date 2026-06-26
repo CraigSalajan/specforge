@@ -99,6 +99,20 @@ export function createOAuthTokenManager(deps: OAuthTokenManagerDeps): OAuthToken
   const cache = new Map<string, CachedAccess>();
   /** connectionId → in-flight refresh, so concurrent calls share one rotation. */
   const inFlight = new Map<string, Promise<string>>();
+  /**
+   * connectionId → monotonically-increasing revoke generation. `revoke()` bumps
+   * this; `doRefresh()` snapshots it before the network call and re-checks it
+   * after the (awaited) refresh. A bump in between means the connection was
+   * revoked while this refresh was in flight, so its late write (rotated refresh
+   * token + cache seed) must be discarded — otherwise a just-disconnected
+   * connection would be resurrected with a freshly-rotated, valid credential.
+   */
+  const revokeGeneration = new Map<string, number>();
+
+  /** Current revoke generation for a connection (0 when never revoked). */
+  function generationOf(connectionId: string): number {
+    return revokeGeneration.get(connectionId) ?? 0;
+  }
 
   /** True when a cached entry is still safely valid (outside the refresh skew). */
   function isFresh(entry: CachedAccess | undefined): entry is CachedAccess {
@@ -127,8 +141,23 @@ export function createOAuthTokenManager(deps: OAuthTokenManagerDeps): OAuthToken
       );
     }
 
+    // Snapshot the revoke generation BEFORE the network call. If `revoke()` runs
+    // (and bumps it) while this refresh is in flight, the post-await check below
+    // discards the late write so we never resurrect a disconnected connection.
+    const generationAtStart = generationOf(connectionId);
+
     // Propagates OAuthReconnectRequiredError on invalid_grant unchanged.
     const res = await deps.tokenClient.refresh(refreshToken);
+
+    // Late-write fence: a revoke landed while we were awaiting the network, so the
+    // rotated token we just minted belongs to a connection the user disconnected.
+    // Drop it — DON'T persist or cache it (that would un-revoke the connection) —
+    // and surface a reconnect error to the caller instead of a stale access token.
+    if (generationOf(connectionId) !== generationAtStart) {
+      throw new OAuthReconnectRequiredError(
+        `[linear] Connection ${connectionId} was disconnected during refresh; reconnect required.`,
+      );
+    }
 
     // Persist the ROTATED refresh token immediately — before returning — so the
     // next refresh uses the live token, not the one Linear just invalidated.
@@ -161,6 +190,20 @@ export function createOAuthTokenManager(deps: OAuthTokenManagerDeps): OAuthToken
     },
 
     async revoke(connectionId: string): Promise<void> {
+      // Fence FIRST: bump the generation so any refresh already past its
+      // refresh-token read discards its late write (rotated token + cache seed)
+      // instead of resurrecting this just-revoked connection.
+      revokeGeneration.set(connectionId, generationOf(connectionId) + 1);
+
+      // Drain any in-flight refresh before we read the stored token and clear the
+      // cache, so a refresh that resolves mid-revoke can't re-seed the cache or
+      // re-persist a rotated token after we've torn the connection down. Its late
+      // write is already neutralized by the generation bump; we only await so the
+      // ordering (revoke → clear) is deterministic. Swallow its rejection — the
+      // refresh failing is irrelevant to a disconnect.
+      const pending = inFlight.get(connectionId);
+      if (pending) await pending.catch(() => undefined);
+
       const refreshToken = deps.secrets.getConnectionToken(connectionId, 'refreshToken');
       // Drop the cache entry regardless of whether a token is present, so a
       // disconnect never leaves a live access token cached.

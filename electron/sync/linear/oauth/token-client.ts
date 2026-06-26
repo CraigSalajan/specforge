@@ -36,6 +36,14 @@ import {
 } from '../auth';
 
 /**
+ * Deadline for every token-endpoint HTTP call. These run on the main-process
+ * auth/sync path (connect, refresh, disconnect), so a stalled socket would
+ * otherwise hang those flows indefinitely; an {@link AbortController} bounds the
+ * connect/read so a dead peer surfaces as a clear timeout instead.
+ */
+export const OAUTH_HTTP_TIMEOUT_MS = 15_000;
+
+/**
  * The parsed, normalized result of a successful token exchange or refresh. Field
  * names are camelCased away from Linear's snake_case wire shape; `expiresInSec`
  * is the access token's lifetime in **seconds** (Linear returns ~86399 ≈ 24h).
@@ -165,7 +173,7 @@ export class LinearTokenClient {
   async revoke(token: string, hint?: 'access_token' | 'refresh_token'): Promise<void> {
     const body = new URLSearchParams({ token });
     if (hint) body.set('token_type_hint', hint);
-    const res = await this.fetchFn(LINEAR_OAUTH_REVOKE_URL, {
+    const res = await this.fetchWithTimeout(LINEAR_OAUTH_REVOKE_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: body.toString(),
@@ -181,7 +189,7 @@ export class LinearTokenClient {
    * to a generic `Error`, and validates the success shape before returning it.
    */
   private async postToken(body: URLSearchParams): Promise<OAuthTokenResponse> {
-    const res = await this.fetchFn(LINEAR_OAUTH_TOKEN_URL, {
+    const res = await this.fetchWithTimeout(LINEAR_OAUTH_TOKEN_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: body.toString(),
@@ -203,6 +211,28 @@ export class LinearTokenClient {
     }
 
     return this.parseTokenBody(parsed);
+  }
+
+  /**
+   * Runs the injected `fetch` under an {@link OAUTH_HTTP_TIMEOUT_MS} deadline via
+   * an {@link AbortController}, so a stalled socket can't hang the auth/sync path.
+   * A timeout-induced `AbortError` is mapped to a clear, timeout-specific error;
+   * any other rejection (and the caller's own abort, if a signal was passed) is
+   * propagated unchanged. The timer is always cleared.
+   */
+  private async fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), OAUTH_HTTP_TIMEOUT_MS);
+    try {
+      return await this.fetchFn(url, { ...init, signal: controller.signal });
+    } catch (err) {
+      if (controller.signal.aborted) {
+        throw new Error('[linear] OAuth request timed out.');
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /** Parses a JSON body, tolerating an unreadable/non-JSON response. */

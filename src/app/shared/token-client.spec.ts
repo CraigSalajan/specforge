@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   LinearTokenClient,
+  OAUTH_HTTP_TIMEOUT_MS,
   OAuthReconnectRequiredError,
 } from '../../../electron/sync/linear/oauth/token-client';
 import {
@@ -179,5 +180,43 @@ describe('LinearTokenClient.revoke', () => {
   it('throws on a non-2xx revoke response', async () => {
     const { client } = makeClient([new Response('', { status: 400 })]);
     await expect(client.revoke('x')).rejects.toThrow(/revocation failed/);
+  });
+});
+
+describe('LinearTokenClient — request timeout', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /**
+   * A fake `fetch` that never resolves on its own; it only settles when the
+   * caller-supplied `AbortSignal` fires (rejecting with an `AbortError`, exactly
+   * as the platform `fetch` does). Used with fake timers to drive the deadline.
+   */
+  function hangingFetch(): typeof fetch {
+    return ((_url: string | URL | Request, init?: RequestInit): Promise<Response> =>
+      new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (!signal) return; // never settles without a signal — the client must add one
+        signal.addEventListener('abort', () => {
+          reject(new DOMException('The operation was aborted.', 'AbortError'));
+        });
+      })) as typeof fetch;
+  }
+
+  it('rejects a never-resolving refresh with a timeout error once the deadline elapses', async () => {
+    vi.useFakeTimers();
+    const client = new LinearTokenClient({
+      fetchFn: hangingFetch(),
+      resolveClientId: () => STUB_CLIENT_ID,
+    });
+
+    const pending = client.refresh('r');
+    const assertion = expect(pending).rejects.toThrow(/timed out/);
+
+    // Advance past the deadline so the AbortController fires.
+    await vi.advanceTimersByTimeAsync(OAUTH_HTTP_TIMEOUT_MS + 1);
+
+    await assertion;
   });
 });

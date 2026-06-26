@@ -1310,17 +1310,23 @@ export class SettingsModalComponent {
     const existing = this.activeConnection();
     const idChanged = existing ? existing.connectionId !== id : true;
 
-    // The credential path is OAuth when a session is in flight, otherwise PAT.
+    // The credential path is OAuth when a fresh browser session is in flight OR
+    // when re-saving an UNCHANGED connection that is already OAuth-backed. The
+    // latter matters after an app reload: an existing OAuth connection has no
+    // session id, so editing it (project / feature-label) must NOT fall into the
+    // PAT path and demand a PAT — it reuses the already-bound rotating refresh token.
     const sessionId = this._oauthSessionId();
-    const isOAuth = sessionId.length > 0;
-    const authMode: LinearConnection['authMode'] = isOAuth ? 'oauth' : 'pat';
+    const hasOAuthSession = sessionId.length > 0;
+    const canReuseExistingOAuth = !idChanged && existing?.authMode === 'oauth';
+    const authMode: LinearConnection['authMode'] =
+      hasOAuthSession || canReuseExistingOAuth ? 'oauth' : 'pat';
 
     // Credential guards. Both kinds are write-only and keyed on the connectionId,
     // so a token can't be carried onto a NEW id (a brand-new connection, or a
     // team/project change that churns the id, which also clears the old secret).
-    if (isOAuth) {
-      // The pending session always carries fresh tokens, so it can bind any id.
-      // (No additional guard beyond having a session, which `isOAuth` implies.)
+    if (authMode === 'oauth') {
+      // A fresh session carries new tokens; the reuse path keeps the already-bound
+      // refresh token. Either way there is nothing the user must enter, so no guard.
     } else {
       const pat = this._pat();
       if (pat.length === 0 && (idChanged || !this._patConfigured())) {
@@ -1343,7 +1349,7 @@ export class SettingsModalComponent {
 
     // Persist (connection + secret) BEFORE validating: `testConnection` resolves
     // the credential main-side from the connectionId, so the secret must already
-    // be stored under `id`. The whole flow — remove-on-churn, save, bind-secret,
+    // be stored under `id`. The whole flow — remove-on-churn, bind-secret, save,
     // validate — runs under one try so any failure (not just validation) surfaces
     // as an error in the panel rather than escaping as an unhandled rejection.
     this._intStatus.set('loading');
@@ -1354,14 +1360,21 @@ export class SettingsModalComponent {
       if (existing && idChanged) {
         await this.settings.removeConnection(vaultPath, existing.connectionId);
       }
-      await this.settings.saveConnection(vaultPath, conn);
 
-      if (isOAuth) {
-        // Bind the pending session's rotating refresh token to this id (persisted
-        // + cached main-side); the session is single-use, so drop it afterward.
+      if (hasOAuthSession) {
+        // Bind the pending session's rotating refresh token to this id BEFORE
+        // persisting the connection (persisted + cached main-side); the session is
+        // single-use, so drop it afterward. Binding first means a bind failure can
+        // never leave an `authMode:'oauth'` connection persisted without a stored
+        // refresh token (which would silently fail every later push). The
+        // reuse-existing-oauth path has no fresh session, so there's nothing to bind.
         await this.sync.oauthComplete(sessionId, id);
         this._oauthSessionId.set('');
-      } else if (pat.length > 0 && this.ipc.isAvailable) {
+      }
+
+      await this.settings.saveConnection(vaultPath, conn);
+
+      if (authMode === 'pat' && pat.length > 0 && this.ipc.isAvailable) {
         // Store the PAT only when freshly entered (it is write-only; an empty
         // input when a token is already configured means "keep the existing one").
         await this.ipc.connectionSecretSet(id, 'pat', pat);

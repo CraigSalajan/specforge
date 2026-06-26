@@ -200,7 +200,16 @@ class LinearOAuthHandlers {
     const captured = this.captureLoopbackCode(state);
 
     const authorizeUrl = buildAuthorizeUrl(challenge, state);
-    await handleOpenExternal(authorizeUrl);
+    // If opening the browser fails, abort the in-flight capture (server + timer)
+    // and drain its rejection so the listener never leaks until the authorize
+    // timeout and the settled promise can't surface later as an unhandled rejection.
+    try {
+      await handleOpenExternal(authorizeUrl);
+    } catch (err) {
+      this.abortCapture?.(err instanceof Error ? err : new Error(String(err)));
+      await captured.catch(() => undefined);
+      throw err;
+    }
 
     const { code } = await captured;
 
@@ -302,8 +311,11 @@ class LinearOAuthHandlers {
   /**
    * Runs a one-shot loopback HTTP server on `127.0.0.1:<port>` to capture the
    * authorization redirect. Resolves with the `code` once a request with the
-   * matching `state` arrives; rejects on a timeout, an `error` param, a `state`
-   * mismatch, or `EADDRINUSE`. The server is always closed before settling.
+   * matching `state` arrives; rejects on a timeout, an `error` param (with a
+   * matching `state`), or `EADDRINUSE`. A request with a mismatched/absent
+   * `state` is treated as an unauthenticated probe — answered 400 but NOT
+   * settled — so it can't cancel the in-flight flow. The server is always closed
+   * before settling.
    */
   private captureLoopbackCode(expectedState: string): Promise<CapturedCode> {
     // A previous in-flight flow must be torn down first — only one at a time.
@@ -338,15 +350,20 @@ class LinearOAuthHandlers {
         const returnedState = requestUrl.searchParams.get('state');
         const code = requestUrl.searchParams.get('code');
 
+        // CSRF guard FIRST: the returned state MUST match the one we sent. A
+        // mismatched/absent state is an unauthenticated probe (anything that can
+        // reach this loopback port, e.g. `?error=access_denied`) — reject the
+        // request page but DON'T settle the flow, so a stray probe can't cancel
+        // the user's real authorization. The genuine callback can still arrive
+        // (bounded by the authorize timeout). Only a matching state may settle.
+        if (returnedState !== expectedState) {
+          res.writeHead(400, { 'Content-Type': 'text/html' }).end(FAILURE_HTML);
+          return;
+        }
+
         if (error) {
           res.writeHead(400, { 'Content-Type': 'text/html' }).end(FAILURE_HTML);
           finish(() => reject(new Error(`Linear authorization was denied: ${error}`)));
-          return;
-        }
-        // CSRF guard: the returned state MUST match the one we sent.
-        if (returnedState !== expectedState) {
-          res.writeHead(400, { 'Content-Type': 'text/html' }).end(FAILURE_HTML);
-          finish(() => reject(new Error('OAuth state mismatch; aborting for safety.')));
           return;
         }
         if (!code) {

@@ -222,4 +222,54 @@ describe('revoke', () => {
 
     expect(revokeArgs).toEqual([]);
   });
+
+  it('does not let a refresh resolving after revoke() resurrect the connection', async () => {
+    const secrets = makeSecrets();
+
+    // A token client whose single refresh is held open by a deferred promise, so
+    // we can interleave revoke() between the refresh-token read and its resolution.
+    let resolveRefresh!: (res: OAuthTokenResponse) => void;
+    const refreshArgs: string[] = [];
+    const revokeArgs: string[] = [];
+    const client = {
+      exchangeCode: () => Promise.reject(new Error('not used')),
+      refresh: (refreshToken: string): Promise<OAuthTokenResponse> => {
+        refreshArgs.push(refreshToken);
+        return new Promise<OAuthTokenResponse>((resolve) => {
+          resolveRefresh = resolve;
+        });
+      },
+      revoke: (token: string): Promise<void> => {
+        revokeArgs.push(token);
+        return Promise.resolve();
+      },
+    } as unknown as LinearTokenClient;
+
+    const mgr = createOAuthTokenManager({ secrets, tokenClient: client, now: () => 1_000_000 });
+
+    // Seed an already-expired token so the next read forces a refresh.
+    mgr.seedFromExchange(CONN, tokenResponse({ refreshToken: 'refresh-1', expiresInSec: 0 }));
+
+    // Kick off the refresh (reads refresh-1, snapshots the generation, then awaits).
+    const accessPromise = mgr.getAccessToken(CONN);
+    await Promise.resolve(); // let doRefresh run up to its awaited network call
+    expect(refreshArgs).toEqual(['refresh-1']);
+
+    // Revoke while the refresh is still in flight; revoke() awaits the pending refresh.
+    const revokePromise = mgr.revoke(CONN);
+
+    // Now let the (now-stale) refresh resolve with a freshly-rotated token.
+    resolveRefresh(tokenResponse({ accessToken: 'access-late', refreshToken: 'rotated-late' }));
+
+    // The refresh's late write must be discarded — it rejects as reconnect-required.
+    await expect(accessPromise).rejects.toBeInstanceOf(OAuthReconnectRequiredError);
+    await revokePromise;
+
+    // The rotated token must NOT have been persisted: the store still holds the
+    // pre-rotation value (revoke clears the cache, not the persisted secret — the
+    // disconnect path does that), proving the stale write was dropped.
+    expect(secrets.getConnectionToken(CONN, 'refreshToken')).toBe('refresh-1');
+    // The original stored token was revoked at Linear; the rotated one never was.
+    expect(revokeArgs).toEqual(['refresh-1']);
+  });
 });

@@ -494,6 +494,72 @@ describe('SettingsModalComponent — Integrations (TER-31)', () => {
       expect(component.oauthSessionId()).toBe('');
       expect(component.intStatus()).toBe('connected');
     });
+
+    it('binds the refresh token BEFORE persisting the connection (no orphan oauth connection)', async () => {
+      const { component, settings, sync } = setup();
+      await component.connectLinearOAuth();
+      await component.onSelectTeam('team-1');
+      component.onSelectProject('proj-1');
+
+      await component.saveLinear();
+
+      // oauthComplete must precede saveConnection so a bind failure can never leave
+      // an oauth connection persisted without a stored refresh token.
+      const bindOrder = sync.oauthComplete.mock.invocationCallOrder[0];
+      const saveOrder = settings.saveConnection.mock.invocationCallOrder[0];
+      expect(bindOrder).toBeLessThan(saveOrder);
+    });
+
+    it('does NOT persist an oauth connection when binding the refresh token fails', async () => {
+      const sync = makeSync();
+      sync.oauthComplete.mockRejectedValueOnce(
+        new SyncError({ code: 'unknown', message: 'bind failed', retryable: false }),
+      );
+      const { component, settings } = setup({ sync });
+      await component.connectLinearOAuth();
+      await component.onSelectTeam('team-1');
+      component.onSelectProject('proj-1');
+
+      await component.saveLinear();
+
+      // Bind ran first and failed, so nothing was persisted and validation never ran.
+      expect(settings.saveConnection).not.toHaveBeenCalled();
+      expect(sync.testConnection).not.toHaveBeenCalled();
+      expect(component.intStatus()).toBe('error');
+      expect(component.intError()).toBe('bind failed');
+      // No persisted oauth connection remains.
+      expect(settings.connectionsForVault(VAULT)).toEqual([]);
+    });
+
+    it('keeps an unchanged reloaded OAuth connection as oauth without a session or PAT', async () => {
+      const { component, settings, ipc, sync } = setup();
+      // A persisted OAuth connection with NO in-flight session — the post-reload state.
+      const id = makeConnectionId({ vaultPath: VAULT, provider: 'linear', teamId: 'team-1' });
+      settings.seedConnection(VAULT, {
+        connectionId: id,
+        provider: 'linear',
+        enabled: true,
+        authMode: 'oauth',
+        teamId: 'team-1',
+      });
+
+      // Re-select the same team (no session/PAT → discovery early-returns; this just
+      // sets the form's teamId so the connectionId is unchanged) and re-save.
+      await component.onSelectTeam('team-1');
+      expect(component.oauthSessionId()).toBe('');
+
+      await component.saveLinear();
+
+      // The save reused the existing oauth credential: it stays oauth, does NOT
+      // demand a PAT, and does NOT bind a (non-existent) session.
+      expect(component.intStatus()).not.toBe('error');
+      const savedConn = settings.saveConnection.mock.calls.at(-1)?.[1] as LinearConnection;
+      expect(savedConn.connectionId).toBe(id);
+      expect(savedConn.authMode).toBe('oauth');
+      expect(sync.oauthComplete).not.toHaveBeenCalled();
+      expect(ipc.connectionSecretSet).not.toHaveBeenCalled();
+      expect(sync.testConnection).toHaveBeenCalledWith(id);
+    });
   });
 
   describe('disconnectLinear — OAuth path (TER-33)', () => {
