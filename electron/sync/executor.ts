@@ -97,6 +97,9 @@ export type ItemProgressEvent =
   | { phase: 'start'; localId: string; decision: SyncDecision; title: string }
   | { phase: 'done'; localId: string; decision: SyncDecision; title: string; result: ItemPushResult };
 
+/** An {@link ItemProgressEvent} stamped with the renderer-generated `pushId` for the SyncPushProgress IPC channel. */
+export type SyncPushProgressEvent = ItemProgressEvent & { pushId: string };
+
 /** Per-item result of a push, in `plan.ordered` order. */
 export interface ItemPushResult {
   /** The item's SpecForge-local id (== `SyncLink.specItemId`). */

@@ -6,7 +6,7 @@ import type {
 } from '../../../electron/sync/adapter';
 import type { Connection } from '../../../electron/sync/connection';
 import type { PushPreviewTree } from '../../../electron/sync/preview';
-import type { PushResult, ItemProgressEvent } from '../../../electron/sync/executor';
+import type { PushResult, SyncPushProgressEvent } from '../../../electron/sync/executor';
 import type { CanonicalItem } from '../../../electron/sync/canonical-item';
 
 export type { LinearProject, LinearTeam } from '../../../electron/sync/adapter';
@@ -629,13 +629,7 @@ export type SyncExecutePushResult =
   | { ok: true; data: PushResult | null }
   | { ok: false; error: AiErrorInfo };
 
-/**
- * TER-37 live-progress event: an executor {@link ItemProgressEvent} stamped with
- * the renderer-generated `pushId` so the renderer can demux a stream of events
- * against the push it actually started (and ignore a stale/overlapping push's).
- * Carried over the `SyncPushProgress` event channel.
- */
-export type SyncPushProgressEvent = ItemProgressEvent & { pushId: string };
+export type { SyncPushProgressEvent } from '../../../electron/sync/executor';
 
 /**
  * TER-31 discovery envelopes. The two discovery channels (list-teams,

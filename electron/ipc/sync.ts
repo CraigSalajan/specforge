@@ -42,17 +42,8 @@ import {
 } from './sync-handlers';
 import type { AdapterName } from '../sync/adapter';
 import type { CanonicalItem } from '../sync/canonical-item';
-import type { ItemProgressEvent } from '../sync/executor';
-
 export type { SyncIpcContext } from './sync-handlers';
-
-/**
- * The live-progress event the main process pushes to the renderer over
- * {@link Channels.SyncPushProgress}: an executor {@link ItemProgressEvent}
- * stamped with the renderer's `pushId` so the renderer can demux it against the
- * push it actually started (and ignore a stale/overlapping one).
- */
-export type SyncPushProgressEvent = ItemProgressEvent & { pushId: string };
+export type { SyncPushProgressEvent } from '../sync/executor';
 
 /**
  * Send guard mirroring `./ai`'s: a streamed push can still be in flight when the
