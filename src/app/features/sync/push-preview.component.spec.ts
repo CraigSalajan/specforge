@@ -141,7 +141,7 @@ function makeSync() {
 function makeIpc() {
   return {
     isAvailable: true,
-    openExternal: vi.fn(async () => undefined),
+    openExternal: vi.fn(() => Promise.resolve()),
   };
 }
 
@@ -154,6 +154,7 @@ function setup(overrides?: {
   const sync = overrides?.sync ?? makeSync();
   const ipc = overrides?.ipc ?? makeIpc();
   const pushPreviewOpen = signal(false);
+  const uiState = { pushPreviewOpen, openPushPreview: vi.fn(), closePushPreview: vi.fn() };
 
   TestBed.configureTestingModule({
     providers: [
@@ -161,10 +162,7 @@ function setup(overrides?: {
       { provide: VaultService, useValue: vault },
       { provide: SyncService, useValue: sync },
       { provide: IpcService, useValue: ipc },
-      {
-        provide: UiStateService,
-        useValue: { pushPreviewOpen, openPushPreview: vi.fn(), closePushPreview: vi.fn() },
-      },
+      { provide: UiStateService, useValue: uiState },
     ],
   });
 
@@ -172,7 +170,7 @@ function setup(overrides?: {
   const component = fixture.componentInstance;
   // Settle the constructor effects (vault-change reset) while the modal is closed.
   fixture.detectChanges();
-  return { component, fixture, settings, vault, sync, ipc, pushPreviewOpen };
+  return { component, fixture, settings, vault, sync, ipc, uiState, pushPreviewOpen };
 }
 
 /** Lets queued microtasks (awaited sync promises) settle. */
@@ -339,6 +337,28 @@ describe('PushPreviewComponent (TER-32)', () => {
       const url = 'https://linear.app/acme/issue/LIN-10';
       ctx.component.openExternal(url);
       expect(ctx.ipc.openExternal).toHaveBeenCalledWith(url);
+    });
+  });
+
+  describe('close guard while pushing', () => {
+    it('blocks close() while a push is in flight and keeps the modal open', async () => {
+      const sync = makeSync();
+      // A push that never resolves, holding the component in the `pushing` phase.
+      sync.executePush.mockReturnValueOnce(new Promise<PushResult>(() => {}));
+      const ctx = setup({ sync });
+      await open(ctx);
+
+      // Kick off the push but don't await it to completion — it never resolves.
+      void ctx.component.approve();
+      await flushMicrotasks();
+      expect(ctx.component.phase()).toBe('pushing');
+
+      // Attempting to close mid-push must be a no-op on every path.
+      ctx.component.close();
+
+      expect(ctx.uiState.closePushPreview).not.toHaveBeenCalled();
+      expect(ctx.pushPreviewOpen()).toBe(true);
+      expect(ctx.component.phase()).toBe('pushing');
     });
   });
 

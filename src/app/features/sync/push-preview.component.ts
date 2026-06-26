@@ -7,6 +7,7 @@ import {
   effect,
   inject,
   signal,
+  untracked,
   viewChild,
   type ElementRef,
 } from '@angular/core';
@@ -304,17 +305,24 @@ export class PushPreviewComponent {
     });
 
     // Drive the open/close lifecycle. Opening with an enabled connection kicks
-    // off the preview build and focuses the panel; closing resets state.
+    // off the preview build and focuses the panel; closing resets state. Only the
+    // open/close transition should trigger this — loadPreview() reads
+    // activeConnection() synchronously, so without untracked() the effect would also
+    // track the connection signals and restart the build on a settings change while
+    // the modal is open. Vault changes are handled by the reset() effect above.
     effect(() => {
-      if (this.isOpen()) {
-        afterNextRender(
-          { write: () => this.panelRef()?.nativeElement.focus() },
-          { injector: this.injector },
-        );
-        void this.loadPreview();
-      } else {
-        this.reset();
-      }
+      const open = this.isOpen();
+      untracked(() => {
+        if (open) {
+          afterNextRender(
+            { write: () => this.panelRef()?.nativeElement.focus() },
+            { injector: this.injector },
+          );
+          void this.loadPreview();
+        } else {
+          this.reset();
+        }
+      });
     });
   }
 
@@ -376,10 +384,19 @@ export class PushPreviewComponent {
 
   /** Opens a created/existing item in the system browser via the IPC shell seam. */
   openExternal(url: string): void {
-    void this.ipc.openExternal(url);
+    // The IPC handler rejects a non-http(s)/malformed URL; swallow it so a bad
+    // externalUrl can't surface as an unhandled promise rejection.
+    this.ipc.openExternal(url).catch((err) => {
+      console.warn('[push-preview] Failed to open external URL:', err);
+    });
   }
 
   close(): void {
+    // executePush is a non-cancellable request/response: dismissing mid-push would
+    // bump the generation and discard the resolved PushResult while the write still
+    // lands in Linear, hiding the outcome. Block every close path (backdrop, escape,
+    // ✕, Cancel) until the push settles — matching the already-disabled Cancel button.
+    if (this._phase() === 'pushing') return;
     this.ui.closePushPreview();
   }
 
