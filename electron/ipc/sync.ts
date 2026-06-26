@@ -31,8 +31,11 @@ import {
   handleBuildPreview,
   handleExecutePush,
   handleConnectionList,
+  handleListTeams,
+  handleListProjects,
   type SyncIpcContext,
 } from './sync-handlers';
+import type { AdapterName } from '../sync/adapter';
 
 export type { SyncIpcContext } from './sync-handlers';
 
@@ -41,6 +44,10 @@ const Channels = {
   SyncBuildPreview: 'specforge:sync-build-preview',
   SyncExecutePush: 'specforge:sync-execute-push',
   SyncConnectionList: 'specforge:sync-connection-list',
+  // TER-31: team/project discovery — the PAT crosses for discovery only (see
+  // the security note on handleListTeams in ./sync-handlers).
+  SyncListTeams: 'specforge:sync-list-teams',
+  SyncListProjects: 'specforge:sync-list-projects',
 } as const;
 
 /**
@@ -65,5 +72,13 @@ export function registerSyncHandlers(ctx: SyncIpcContext): void {
   );
   ipcMain.handle(Channels.SyncConnectionList, (_e, vaultPath: string) =>
     handleConnectionList(vaultPath, ctx),
+  );
+  ipcMain.handle(Channels.SyncListTeams, (_e, provider: AdapterName, pat: string) =>
+    handleListTeams({ provider, pat }, ctx),
+  );
+  ipcMain.handle(
+    Channels.SyncListProjects,
+    (_e, provider: AdapterName, pat: string, teamId: string) =>
+      handleListProjects({ provider, pat, teamId }, ctx),
   );
 }

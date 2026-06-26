@@ -1,7 +1,11 @@
 import { Injectable, inject } from '@angular/core';
 import { IpcService } from './ipc.service';
 import type { AiErrorInfo, SyncPreviewData } from '../shared/types';
-import type { ProjectMetadata } from '../../../electron/sync/adapter';
+import type {
+  LinearProject,
+  LinearTeam,
+  ProjectMetadata,
+} from '../../../electron/sync/adapter';
 import type { Connection } from '../../../electron/sync/connection';
 import type { PushResult } from '../../../electron/sync/executor';
 
@@ -74,5 +78,29 @@ export class SyncService {
   /** List the persisted connections for a vault (a bare read, no envelope). */
   listConnections(vaultPath: string): Promise<Connection[]> {
     return this.ipc.syncConnectionList(vaultPath);
+  }
+
+  /**
+   * Discover the teams a PAT can see (TER-31) — validates the PAT as a side
+   * effect (an invalid/unauthorized token throws {@link SyncError} with an
+   * `auth` code). Resolves the {@link LinearTeam}[] on success.
+   *
+   * SECURITY: the PAT crosses IPC for discovery only and is never logged,
+   * persisted, or returned by the main-side handler — see `IpcService.syncListTeams`.
+   */
+  async listTeams(pat: string): Promise<LinearTeam[]> {
+    const res = await this.ipc.syncListTeams(pat);
+    if (!res.ok) throw new SyncError(res.error);
+    return res.data;
+  }
+
+  /**
+   * Discover the projects under a team for a PAT (TER-31). Resolves the
+   * {@link LinearProject}[] on success, or throws {@link SyncError} on failure.
+   */
+  async listProjects(pat: string, teamId: string): Promise<LinearProject[]> {
+    const res = await this.ipc.syncListProjects(pat, teamId);
+    if (!res.ok) throw new SyncError(res.error);
+    return res.data;
   }
 }

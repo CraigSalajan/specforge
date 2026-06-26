@@ -42,9 +42,16 @@ import {
   runSyncPush,
 } from '../sync/orchestrator';
 import { LinearRequestError } from '../sync/linear/errors';
+import { discoverProjects, discoverTeams } from '../sync/linear/discovery';
 import type { SyncOrchestratorDeps } from '../sync/orchestrator';
 import type { AiErrorInfo } from './ai-error';
-import type { AdapterName, ProjectMetadata } from '../sync/adapter';
+import type {
+  AdapterName,
+  LinearProject,
+  LinearTeam,
+  ProjectMetadata,
+} from '../sync/adapter';
+import type { LinearGraphQLClient } from '../sync/linear/client';
 import type { PushPreviewTree } from '../sync/preview';
 import type { PushResult } from '../sync/executor';
 import type { Connection } from '../sync/connection';
@@ -60,6 +67,16 @@ export interface SyncIpcContext {
   deps: SyncOrchestratorDeps;
   /** Reads every persisted connection for a vault (non-secret, read-only). */
   listConnections: (vaultPath: string) => Connection[];
+  /**
+   * Builds an EPHEMERAL Linear GraphQL client authenticated with the supplied
+   * raw PAT, for team/project discovery only (TER-31). Discovery runs *before*
+   * any persisted connection exists, so — unlike every other channel here — the
+   * credential cannot be resolved main-side from a `connectionId`; it must be
+   * passed in. The built client is never persisted and the PAT it closes over is
+   * never logged, stored, or returned. Production binds this in `./sync-deps`;
+   * specs pass a fake that records the PAT.
+   */
+  buildDiscoveryClient: (pat: string) => LinearGraphQLClient;
 }
 
 /** Discriminated result for {@link handleTestConnection}. */
@@ -82,6 +99,43 @@ export type SyncBuildPreviewResult =
 export type SyncExecutePushResult =
   | { ok: true; data: PushResult | null }
   | { ok: false; error: AiErrorInfo };
+
+/** Discriminated result for {@link handleListTeams} (TER-31). */
+export type SyncListTeamsResult =
+  | { ok: true; data: LinearTeam[] }
+  | { ok: false; error: AiErrorInfo };
+
+/** Discriminated result for {@link handleListProjects} (TER-31). */
+export type SyncListProjectsResult =
+  | { ok: true; data: LinearProject[] }
+  | { ok: false; error: AiErrorInfo };
+
+/**
+ * Validates the raw PAT that crosses IPC for discovery (TER-31). A non-empty
+ * string within a sane bound — the value is never logged, so the assertion
+ * message deliberately omits it.
+ */
+function assertPat(pat: unknown): asserts pat is string {
+  if (typeof pat !== 'string' || pat.length === 0 || pat.length > 4096) {
+    throw new Error('Invalid PAT');
+  }
+}
+
+/**
+ * Validates the discovery provider. Only `'linear'` exists in V1; the discovery
+ * client builder is Linear-specific, so reject anything else with a clear error.
+ */
+function assertDiscoveryProvider(provider: unknown): asserts provider is 'linear' {
+  if (provider !== 'linear') {
+    throw new Error(`Unsupported discovery provider: ${String(provider)}`);
+  }
+}
+
+function assertTeamId(teamId: unknown): asserts teamId is string {
+  if (typeof teamId !== 'string' || teamId.length === 0 || teamId.length > 256) {
+    throw new Error('Invalid team id');
+  }
+}
 
 function assertConnectionId(connectionId: unknown): asserts connectionId is string {
   if (typeof connectionId !== 'string' || connectionId.length === 0 || connectionId.length > 256) {
@@ -202,4 +256,55 @@ export async function handleConnectionList(
 ): Promise<Connection[]> {
   assertVaultPath(vaultPath);
   return ctx.listConnections(vaultPath);
+}
+
+/**
+ * List the teams a raw PAT can see, for the Settings → Integrations picker
+ * (TER-31).
+ *
+ * ## SECURITY — scoped deviation from "no credentials over IPC"
+ * Every other channel in this module accepts only a `connectionId`/`vaultPath`,
+ * because a connection's credential is resolved main-side from the encrypted
+ * store. Discovery is the one exception: it must run *before* any connection (and
+ * thus any stored credential) exists, so the raw PAT crosses renderer→main here.
+ * The PAT is used to build an EPHEMERAL client and is then discarded — it is
+ * NEVER logged, persisted, or returned to the renderer, and only the non-secret
+ * {@link LinearTeam}[] (or an error envelope) comes back. The provider is
+ * validated to be `'linear'` before the PAT is touched.
+ */
+export async function handleListTeams(
+  args: { provider: AdapterName; pat: string },
+  ctx: SyncIpcContext,
+): Promise<SyncListTeamsResult> {
+  try {
+    assertDiscoveryProvider(args.provider);
+    assertPat(args.pat);
+    const client = ctx.buildDiscoveryClient(args.pat);
+    const data = await discoverTeams(client);
+    return { ok: true, data };
+  } catch (err) {
+    return { ok: false, error: toErrorInfo(err) };
+  }
+}
+
+/**
+ * List the projects under a team for a raw PAT, for the Settings → Integrations
+ * picker (TER-31). The same scoped-PAT security note as {@link handleListTeams}
+ * applies: the PAT crosses the boundary for discovery only, is used to build an
+ * ephemeral client, and is never logged, persisted, or returned.
+ */
+export async function handleListProjects(
+  args: { provider: AdapterName; pat: string; teamId: string },
+  ctx: SyncIpcContext,
+): Promise<SyncListProjectsResult> {
+  try {
+    assertDiscoveryProvider(args.provider);
+    assertPat(args.pat);
+    assertTeamId(args.teamId);
+    const client = ctx.buildDiscoveryClient(args.pat);
+    const data = await discoverProjects(client, args.teamId);
+    return { ok: true, data };
+  } catch (err) {
+    return { ok: false, error: toErrorInfo(err) };
+  }
 }
