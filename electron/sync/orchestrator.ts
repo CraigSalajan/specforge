@@ -54,7 +54,8 @@ import type { AdapterName, IAdapter } from './adapter';
 import type { CanonicalItem } from './canonical-item';
 // Type-only: erased at compile time so this module never loads node:sqlite/fs.
 import type { SyncLink } from '../db/repositories/sync-links.repo';
-import type { ConnectionSecretKind, ConnectionSecrets } from './connection-secrets';
+import type { ConnectionSecrets } from './connection-secrets';
+import type { OAuthTokenManager } from './linear/oauth/token-manager';
 
 /**
  * The impure collaborators {@link planPushForConnection} /
@@ -197,20 +198,29 @@ export async function runSyncPush(
 
 /**
  * Build the production adapter builder for a Linear connection, kept pure by
- * taking the already-bound {@link ConnectionSecrets} as a parameter (the
- * impure store is injected by the deps factory in `./orchestrator-deps`).
+ * taking the already-bound {@link ConnectionSecrets} and
+ * {@link OAuthTokenManager} as parameters (the impure store + manager are
+ * injected by the deps factory in `./orchestrator-deps`).
  *
- * The credential enters only through the {@link TokenSource} the secrets store
- * yields — `pat` for a PAT connection, `refreshToken` for an OAuth one — wrapped
- * in {@link PatAuth}/{@link OAuthAuth}, which alone know the header shape. The
- * adapter itself is built via {@link ADAPTER_REGISTRY}, so the orchestrator never
- * `new`s a concrete adapter.
+ * The credential enters only through a {@link TokenSource} wrapped in
+ * {@link PatAuth}/{@link OAuthAuth}, which alone know the header shape:
+ *
+ *   - **PAT** — the source is the stored PAT, read on each request, so a rotated
+ *     PAT is picked up without rebuilding the client.
+ *   - **OAuth** — the source is `tokenManager.getAccessToken(connectionId)`, which
+ *     returns a cached access token or refreshes it (and persists the rotated
+ *     refresh token) on demand. The raw refresh token is NEVER wrapped directly;
+ *     only the live access token reaches the `Bearer` header.
+ *
+ * The adapter itself is built via {@link ADAPTER_REGISTRY}, so the orchestrator
+ * never `new`s a concrete adapter.
  *
  * @throws if the connection's provider has no registered adapter factory, or is
  * not the Linear provider this builder supports.
  */
 export function createLinearAdapterBuilder(
   secrets: ConnectionSecrets,
+  tokenManager: OAuthTokenManager,
 ): (conn: Connection) => IAdapter {
   return (conn: Connection): IAdapter => {
     // Validate the provider before resolving any credential or building a client,
@@ -227,11 +237,13 @@ export function createLinearAdapterBuilder(
       throw new Error(`Unsupported provider for adapter builder: ${conn.provider}`);
     }
 
-    // A PAT connection authenticates with its stored PAT; an OAuth connection
-    // refreshes against its stored refresh token.
-    const kind: ConnectionSecretKind = conn.authMode === 'oauth' ? 'refreshToken' : 'pat';
-    const tokenSource = secrets.connectionTokenSource(conn.connectionId, kind);
-    const auth = conn.authMode === 'oauth' ? new OAuthAuth(tokenSource) : new PatAuth(tokenSource);
+    // A PAT connection authenticates with its stored PAT, read fresh per request.
+    // An OAuth connection authenticates with a live access token the token
+    // manager mints/refreshes from the stored (rotating) refresh token.
+    const auth =
+      conn.authMode === 'oauth'
+        ? new OAuthAuth(() => tokenManager.getAccessToken(conn.connectionId))
+        : new PatAuth(secrets.connectionTokenSource(conn.connectionId, 'pat'));
     const client = new LinearGraphQLClient({ auth });
 
     const config = connectionToLinearConfig(conn);

@@ -110,6 +110,11 @@ function makeSync() {
     listTeams: vi.fn(async () => TEAMS),
     listProjects: vi.fn(async () => PROJECTS),
     testConnection: vi.fn(async () => METADATA),
+    // TER-33 OAuth surface.
+    oauthBegin: vi.fn(async () => ({ sessionId: 'sess-1', teams: TEAMS })),
+    oauthListProjects: vi.fn(async () => PROJECTS),
+    oauthComplete: vi.fn(async () => undefined),
+    oauthRevoke: vi.fn(async () => undefined),
   };
 }
 
@@ -377,8 +382,8 @@ describe('SettingsModalComponent — Integrations (TER-31)', () => {
     });
   });
 
-  describe('OAuth button', () => {
-    it('renders the OAuth Connect button disabled with a coming-soon caption', () => {
+  describe('OAuth button (TER-33)', () => {
+    it('renders an ENABLED OAuth Connect button wired to connectLinearOAuth', () => {
       const settings = new FakeSettingsService();
       const vault = new FakeVaultService();
       const settingsOpen = signal(true);
@@ -412,12 +417,122 @@ describe('SettingsModalComponent — Integrations (TER-31)', () => {
       const buttons = Array.from(
         fixture.nativeElement.querySelectorAll('button'),
       ) as HTMLButtonElement[];
-      const oauthBtn = buttons.find((b) => /OAuth/i.test(b.textContent ?? ''));
+      const oauthBtn = buttons.find((b) => /Connect with OAuth/i.test(b.textContent ?? ''));
       expect(oauthBtn).toBeDefined();
-      expect(oauthBtn?.disabled).toBe(true);
-
+      // No longer disabled / no "coming soon" caption.
+      expect(oauthBtn?.disabled).toBe(false);
       const text = (fixture.nativeElement.textContent ?? '') as string;
-      expect(text).toContain('OAuth — coming soon (TER-33)');
+      expect(text).not.toContain('coming soon');
+    });
+  });
+
+  describe('connectLinearOAuth (TER-33)', () => {
+    it('begins the flow, populates teams, sets a session id, and clears any PAT', async () => {
+      const { component, sync } = setup();
+      component.onPatInput('stale-pat');
+
+      await component.connectLinearOAuth();
+
+      expect(sync.oauthBegin).toHaveBeenCalledTimes(1);
+      expect(component.teams()).toEqual(TEAMS);
+      expect(component.oauthSessionId()).toBe('sess-1');
+      expect(component.intStatus()).toBe('connected');
+      // OAuth supersedes any half-entered PAT.
+      expect(component.pat()).toBe('');
+    });
+
+    it('routes project discovery through the OAuth session (not the PAT) once connected', async () => {
+      const { component, sync } = setup();
+      await component.connectLinearOAuth();
+
+      await component.onSelectTeam('team-1');
+
+      expect(sync.oauthListProjects).toHaveBeenCalledWith('sess-1', 'team-1');
+      expect(sync.listProjects).not.toHaveBeenCalled();
+      expect(component.projects()).toEqual(PROJECTS);
+    });
+
+    it('surfaces a begin failure as an error state', async () => {
+      const sync = makeSync();
+      sync.oauthBegin.mockRejectedValueOnce(
+        new SyncError({ code: 'unknown', message: 'Timed out', retryable: false }),
+      );
+      const { component } = setup({ sync });
+
+      await component.connectLinearOAuth();
+
+      expect(component.intStatus()).toBe('error');
+      expect(component.intError()).toBe('Timed out');
+      expect(component.oauthSessionId()).toBe('');
+    });
+  });
+
+  describe('saveLinear — OAuth path (TER-33)', () => {
+    it('persists authMode oauth, completes the session, and validates — without storing a PAT', async () => {
+      const { component, settings, ipc, sync } = setup();
+      await component.connectLinearOAuth();
+      await component.onSelectTeam('team-1');
+      component.onSelectProject('proj-1');
+
+      await component.saveLinear();
+
+      const expectedId = makeConnectionId({
+        vaultPath: VAULT,
+        provider: 'linear',
+        teamId: 'team-1',
+        projectId: 'proj-1',
+      });
+
+      const savedConn = settings.saveConnection.mock.calls.at(-1)?.[1] as LinearConnection;
+      expect(savedConn.connectionId).toBe(expectedId);
+      expect(savedConn.authMode).toBe('oauth');
+      // The session's refresh token was bound to the id; no PAT was stored.
+      expect(sync.oauthComplete).toHaveBeenCalledWith('sess-1', expectedId);
+      expect(ipc.connectionSecretSet).not.toHaveBeenCalled();
+      expect(sync.testConnection).toHaveBeenCalledWith(expectedId);
+      // The session is single-use — dropped after completion.
+      expect(component.oauthSessionId()).toBe('');
+      expect(component.intStatus()).toBe('connected');
+    });
+  });
+
+  describe('disconnectLinear — OAuth path (TER-33)', () => {
+    it('revokes the OAuth refresh token BEFORE removing the connection', async () => {
+      const { component, settings, sync } = setup();
+      const id = makeConnectionId({ vaultPath: VAULT, provider: 'linear', teamId: 'team-1' });
+      settings.seedConnection(VAULT, {
+        connectionId: id,
+        provider: 'linear',
+        enabled: true,
+        authMode: 'oauth',
+        teamId: 'team-1',
+      });
+
+      await component.disconnectLinear();
+
+      expect(sync.oauthRevoke).toHaveBeenCalledWith(id);
+      expect(settings.removeConnection).toHaveBeenCalledWith(VAULT, id);
+      // Revoke must precede the local remove (it reads the secret before clearing).
+      const revokeOrder = sync.oauthRevoke.mock.invocationCallOrder[0];
+      const removeOrder = settings.removeConnection.mock.invocationCallOrder[0];
+      expect(revokeOrder).toBeLessThan(removeOrder);
+    });
+
+    it('does NOT revoke for a PAT connection', async () => {
+      const { component, settings, sync } = setup();
+      const id = makeConnectionId({ vaultPath: VAULT, provider: 'linear', teamId: 'team-1' });
+      settings.seedConnection(VAULT, {
+        connectionId: id,
+        provider: 'linear',
+        enabled: true,
+        authMode: 'pat',
+        teamId: 'team-1',
+      });
+
+      await component.disconnectLinear();
+
+      expect(sync.oauthRevoke).not.toHaveBeenCalled();
+      expect(settings.removeConnection).toHaveBeenCalledWith(VAULT, id);
     });
   });
 

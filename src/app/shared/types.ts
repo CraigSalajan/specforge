@@ -641,6 +641,31 @@ export type SyncListProjectsResult =
   | { ok: true; data: LinearProject[] }
   | { ok: false; error: AiErrorInfo };
 
+/**
+ * TER-33 Linear OAuth2 envelopes. The browser flow yields tokens main-side; the
+ * renderer only ever sees an opaque `sessionId` plus the non-secret team/project
+ * lists (the same shapes PAT discovery returns, so the picker is reused). No
+ * token value crosses the boundary.
+ */
+export interface LinearOAuthBeginData {
+  /** Opaque handle to the captured (but unbound) tokens held main-side. */
+  sessionId: string;
+  /** Teams the authorized account can see — reuses the PAT picker shape. */
+  teams: LinearTeam[];
+}
+
+export type LinearOAuthBeginResult =
+  | { ok: true; data: LinearOAuthBeginData }
+  | { ok: false; error: AiErrorInfo };
+
+export type LinearOAuthListProjectsResult =
+  | { ok: true; data: LinearProject[] }
+  | { ok: false; error: AiErrorInfo };
+
+export type LinearOAuthAckResult =
+  | { ok: true; data: { ok: true } }
+  | { ok: false; error: AiErrorInfo };
+
 // PDF export. The renderer sends sanitized HTML; the main process shows the
 // save dialog, prints it in a hidden window and writes the file.
 export interface ExportPdfPayload {
@@ -720,6 +745,17 @@ export interface SpecForgeApi {
   // is never logged, persisted, or returned.
   syncListTeams: (pat: string) => Promise<SyncListTeamsResult>;
   syncListProjects: (pat: string, teamId: string) => Promise<SyncListProjectsResult>;
+
+  // TER-33: Linear OAuth2 (auth-code + PKCE). No token ever crosses the boundary —
+  // begin returns an opaque sessionId + non-secret teams; complete binds the
+  // session's refresh token to a connectionId main-side; revoke invalidates it.
+  linearOAuthBegin: () => Promise<LinearOAuthBeginResult>;
+  linearOAuthListProjects: (
+    sessionId: string,
+    teamId: string,
+  ) => Promise<LinearOAuthListProjectsResult>;
+  linearOAuthComplete: (sessionId: string, connectionId: string) => Promise<LinearOAuthAckResult>;
+  linearOAuthRevoke: (connectionId: string) => Promise<LinearOAuthAckResult>;
 
   // Phase 3: chat persistence
   chatsListSessions: (vaultPath: string) => Promise<ChatSessionSummary[]>;

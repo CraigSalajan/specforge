@@ -539,9 +539,15 @@ const EMPTY_INTEGRATION_FORM: IntegrationForm = {
                   <button
                     type="button"
                     class="rounded border border-border-subtle bg-surface-2 px-3 py-1.5 text-xs text-text-secondary hover:bg-surface-3 hover:text-text-primary disabled:opacity-50"
-                    disabled
-                    title="OAuth — coming soon (TER-33)">Connect with OAuth</button>
-                  <span class="text-xs text-text-muted">OAuth — coming soon (TER-33)</span>
+                    [disabled]="intStatus() === 'loading'"
+                    (click)="connectLinearOAuth()">
+                    {{ oauthSessionId() ? 'Reauthorize with OAuth' : 'Connect with OAuth' }}
+                  </button>
+                  @if (oauthSessionId()) {
+                    <span class="text-xs text-accent">Authorized — pick a team and save.</span>
+                  } @else {
+                    <span class="text-xs text-text-muted">Opens Linear in your browser.</span>
+                  }
                 </div>
 
                 @if (intStatus() === 'error') {
@@ -694,6 +700,13 @@ export class SettingsModalComponent {
   private readonly _projects = signal<LinearProject[]>([]);
   private readonly _labels = signal<LabelInfo[]>([]);
   private readonly _intForm = signal<IntegrationForm>({ ...EMPTY_INTEGRATION_FORM });
+  /**
+   * Opaque id of the in-flight OAuth session (TER-33), or `''` when the
+   * Integrations panel is in the PAT flow. Set by `connectLinearOAuth` after the
+   * browser authorization succeeds; it routes team→project discovery through the
+   * session (vs. the PAT) and tells `saveLinear` to persist `authMode: 'oauth'`.
+   */
+  private readonly _oauthSessionId = signal('');
 
   readonly pat = this._pat.asReadonly();
   readonly showPat = this._showPat.asReadonly();
@@ -704,6 +717,7 @@ export class SettingsModalComponent {
   readonly projects = this._projects.asReadonly();
   readonly labels = this._labels.asReadonly();
   readonly intForm = this._intForm.asReadonly();
+  readonly oauthSessionId = this._oauthSessionId.asReadonly();
 
   /**
    * The persisted Linear connection for the active vault, or `null` when none is
@@ -1145,6 +1159,7 @@ export class SettingsModalComponent {
     this._projects.set([]);
     this._labels.set([]);
     this._intForm.set({ ...EMPTY_INTEGRATION_FORM });
+    this._oauthSessionId.set('');
   }
 
   /**
@@ -1188,6 +1203,9 @@ export class SettingsModalComponent {
       // Discard a stale response: the user may have changed the PAT while this
       // request was in flight, in which case it no longer describes the input.
       if (this._pat() !== pat) return;
+      // A successful PAT validation supersedes any prior OAuth session, so clear
+      // it — the two credential paths must not be mixed for one save.
+      this._oauthSessionId.set('');
       this._teams.set(teams);
       this._intStatus.set('connected');
     } catch (err) {
@@ -1198,21 +1216,66 @@ export class SettingsModalComponent {
   }
 
   /**
-   * Selects a team and, when a PAT is present, discovers its projects. Clears the
-   * previously-selected project and feature label (both team/workspace-scoped) so
-   * stale ids from another team can't persist onto the new connection.
+   * Runs the Linear OAuth2 (auth-code + PKCE) flow (TER-33). Opens Linear in the
+   * system browser; on authorization the main process exchanges the code and
+   * discovers teams, returning an opaque `sessionId` (the tokens stay main-side).
+   * The team/project pickers — the same controls the PAT flow uses — then drive
+   * the selection, and `saveLinear` finalizes with `authMode: 'oauth'`.
+   */
+  async connectLinearOAuth(): Promise<void> {
+    if (!this.ipc.isAvailable) return;
+    this._intStatus.set('loading');
+    this._intError.set(null);
+    try {
+      const { sessionId, teams } = await this.sync.oauthBegin();
+      // OAuth supersedes any half-entered PAT — clear it so the two paths can't
+      // be mixed for a single save.
+      this._pat.set('');
+      this._patConfigured.set(false);
+      this._oauthSessionId.set(sessionId);
+      this._teams.set(teams);
+      // Discovery may reset the selected team's projects, so start the picker
+      // from a clean team selection.
+      this.patchIntForm({ teamId: '', projectId: '', featureLabelId: '' });
+      this._projects.set([]);
+      this._labels.set([]);
+      this._intStatus.set('connected');
+    } catch (err) {
+      this._oauthSessionId.set('');
+      this._teams.set([]);
+      this._intStatus.set('error');
+      this._intError.set(this.toIntegrationMessage(err));
+    }
+  }
+
+  /**
+   * Selects a team and discovers its projects. Discovery runs through the OAuth
+   * session when one is in flight (TER-33), otherwise through the entered PAT
+   * (TER-31). Clears the previously-selected project and feature label (both
+   * team/workspace-scoped) so stale ids from another team can't persist onto the
+   * new connection.
    */
   async onSelectTeam(teamId: string): Promise<void> {
     this.patchIntForm({ teamId, projectId: '', featureLabelId: '' });
     this._projects.set([]);
     this._labels.set([]);
+    if (teamId.length === 0 || !this.ipc.isAvailable) return;
+
+    const sessionId = this._oauthSessionId();
     const pat = this._pat();
-    if (teamId.length === 0 || pat.length === 0 || !this.ipc.isAvailable) return;
+    // OAuth session takes precedence; fall back to the PAT flow. With neither
+    // credential there is nothing to discover against.
+    if (sessionId.length === 0 && pat.length === 0) return;
+
     try {
-      const projects = await this.sync.listProjects(pat, teamId);
-      // Discard a stale response: the PAT or selected team may have changed while
-      // this request was in flight, in which case it no longer applies.
-      if (this._pat() !== pat || this._intForm().teamId !== teamId) return;
+      const projects =
+        sessionId.length > 0
+          ? await this.sync.oauthListProjects(sessionId, teamId)
+          : await this.sync.listProjects(pat, teamId);
+      // Discard a stale response: the credential or selected team may have changed
+      // while this request was in flight, in which case it no longer applies.
+      if (this._oauthSessionId() !== sessionId || this._pat() !== pat) return;
+      if (this._intForm().teamId !== teamId) return;
       this._projects.set(projects);
     } catch (err) {
       this._intStatus.set('error');
@@ -1229,11 +1292,12 @@ export class SettingsModalComponent {
   }
 
   /**
-   * Persists the connection and validates the label path (TER-31). Computes the
+   * Persists the connection and validates the label path. Computes the
    * identity-bearing connectionId from team+project; if a prior connection has a
    * different id (the team/project changed), removes it first (clearing its
-   * stored secret). Saves the connection, stores the PAT when newly entered, then
-   * fetches metadata to populate the feature-label picker.
+   * stored secret). Saves the connection, binds the credential (PAT — TER-31, or
+   * the OAuth refresh token — TER-33), then fetches metadata to populate the
+   * feature-label picker.
    */
   async saveLinear(): Promise<void> {
     const vaultPath = this.vault.vaultPath();
@@ -1246,26 +1310,32 @@ export class SettingsModalComponent {
     const existing = this.activeConnection();
     const idChanged = existing ? existing.connectionId !== id : true;
 
-    // Credential guard: the stored secret is keyed on the connectionId, so the
-    // "empty input = keep existing token" shortcut is only valid when the id is
-    // unchanged AND a token is already configured for it. Whenever the id is new
-    // — a brand-new connection OR a team/project change that churns the id (which
-    // also clears the old id's secret below) — a fresh PAT is required, since a
-    // write-only token can't be carried over to a different id. Without one we
-    // would persist a connection that can never validate, so abort with a clear
-    // error instead.
-    const pat = this._pat();
-    if (pat.length === 0 && (idChanged || !this._patConfigured())) {
-      this._intStatus.set('error');
-      this._intError.set('Enter a Personal Access Token before saving this connection.');
-      return;
+    // The credential path is OAuth when a session is in flight, otherwise PAT.
+    const sessionId = this._oauthSessionId();
+    const isOAuth = sessionId.length > 0;
+    const authMode: LinearConnection['authMode'] = isOAuth ? 'oauth' : 'pat';
+
+    // Credential guards. Both kinds are write-only and keyed on the connectionId,
+    // so a token can't be carried onto a NEW id (a brand-new connection, or a
+    // team/project change that churns the id, which also clears the old secret).
+    if (isOAuth) {
+      // The pending session always carries fresh tokens, so it can bind any id.
+      // (No additional guard beyond having a session, which `isOAuth` implies.)
+    } else {
+      const pat = this._pat();
+      if (pat.length === 0 && (idChanged || !this._patConfigured())) {
+        this._intStatus.set('error');
+        this._intError.set('Enter a Personal Access Token before saving this connection.');
+        return;
+      }
     }
+    const pat = this._pat();
 
     const conn: LinearConnection = {
       connectionId: id,
       provider: 'linear',
       enabled: form.enabled,
-      authMode: 'pat',
+      authMode,
       teamId: form.teamId,
       ...(projectId !== undefined ? { projectId } : {}),
       ...(form.featureLabelId.length > 0 ? { featureLabelId: form.featureLabelId } : {}),
@@ -1273,7 +1343,7 @@ export class SettingsModalComponent {
 
     // Persist (connection + secret) BEFORE validating: `testConnection` resolves
     // the credential main-side from the connectionId, so the secret must already
-    // be stored under `id`. The whole flow — remove-on-churn, save, store-secret,
+    // be stored under `id`. The whole flow — remove-on-churn, save, bind-secret,
     // validate — runs under one try so any failure (not just validation) surfaces
     // as an error in the panel rather than escaping as an unhandled rejection.
     this._intStatus.set('loading');
@@ -1286,9 +1356,14 @@ export class SettingsModalComponent {
       }
       await this.settings.saveConnection(vaultPath, conn);
 
-      // Store the PAT only when freshly entered (it is write-only; an empty input
-      // when a token is already configured means "keep the existing one").
-      if (pat.length > 0 && this.ipc.isAvailable) {
+      if (isOAuth) {
+        // Bind the pending session's rotating refresh token to this id (persisted
+        // + cached main-side); the session is single-use, so drop it afterward.
+        await this.sync.oauthComplete(sessionId, id);
+        this._oauthSessionId.set('');
+      } else if (pat.length > 0 && this.ipc.isAvailable) {
+        // Store the PAT only when freshly entered (it is write-only; an empty
+        // input when a token is already configured means "keep the existing one").
         await this.ipc.connectionSecretSet(id, 'pat', pat);
         this._patConfigured.set(true);
       }
@@ -1347,12 +1422,24 @@ export class SettingsModalComponent {
 
   /**
    * Removes the active connection (and, via SettingsService, its stored
-   * credential), then resets all transient Integrations state.
+   * credential), then resets all transient Integrations state. For an OAuth
+   * connection (TER-33) the stored refresh token is revoked at Linear FIRST —
+   * before the secret is cleared, since the revoke reads it — so a disconnected
+   * token can't be used elsewhere. A revoke failure is non-fatal: the local
+   * disconnect still proceeds so the user is never stuck connected.
    */
   async disconnectLinear(): Promise<void> {
     const conn = this.activeConnection();
     const vaultPath = this.vault.vaultPath();
     if (!conn || !vaultPath) return;
+    if (conn.authMode === 'oauth' && this.ipc.isAvailable) {
+      try {
+        await this.sync.oauthRevoke(conn.connectionId);
+      } catch {
+        // Best-effort: proceed with the local disconnect even if remote revoke
+        // fails (e.g. offline). The refresh token is cleared from the store below.
+      }
+    }
     await this.settings.removeConnection(vaultPath, conn.connectionId);
     this.resetIntegrationState();
     this.syncConnectionsIntoDraft();

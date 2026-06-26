@@ -36,6 +36,10 @@ const IpcChannels = {
   SyncConnectionList: 'specforge:sync-connection-list',
   SyncListTeams: 'specforge:sync-list-teams',
   SyncListProjects: 'specforge:sync-list-projects',
+  LinearOAuthBegin: 'specforge:linear-oauth-begin',
+  LinearOAuthListProjects: 'specforge:linear-oauth-list-projects',
+  LinearOAuthComplete: 'specforge:linear-oauth-complete',
+  LinearOAuthRevoke: 'specforge:linear-oauth-revoke',
   ChatsListSessions: 'specforge:chats-list-sessions',
   ChatsCreateSession: 'specforge:chats-create-session',
   ChatsGetMessages: 'specforge:chats-get-messages',
@@ -285,6 +289,17 @@ const api = {
     ipcRenderer.invoke(IpcChannels.SyncListTeams, 'linear', pat),
   syncListProjects: (pat: string, teamId: string) =>
     ipcRenderer.invoke(IpcChannels.SyncListProjects, 'linear', pat, teamId),
+
+  // TER-33: Linear OAuth2 (auth-code + PKCE). No token ever crosses the boundary —
+  // begin returns an opaque sessionId + non-secret teams; complete binds the
+  // session's refresh token to a connectionId main-side; revoke invalidates it.
+  linearOAuthBegin: () => ipcRenderer.invoke(IpcChannels.LinearOAuthBegin),
+  linearOAuthListProjects: (sessionId: string, teamId: string) =>
+    ipcRenderer.invoke(IpcChannels.LinearOAuthListProjects, { sessionId, teamId }),
+  linearOAuthComplete: (sessionId: string, connectionId: string) =>
+    ipcRenderer.invoke(IpcChannels.LinearOAuthComplete, { sessionId, connectionId }),
+  linearOAuthRevoke: (connectionId: string) =>
+    ipcRenderer.invoke(IpcChannels.LinearOAuthRevoke, { connectionId }),
 
   // Phase 3: chats
   chatsListSessions: (vaultPath: string) =>

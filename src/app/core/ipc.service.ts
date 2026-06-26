@@ -26,6 +26,9 @@ import type {
   FileNode,
   IndexSearchHit,
   IndexStatus,
+  LinearOAuthAckResult,
+  LinearOAuthBeginResult,
+  LinearOAuthListProjectsResult,
   OutgoingLinkRef,
   PendingChunkRef,
   PersistedChatMessage,
@@ -210,6 +213,27 @@ export class IpcService {
 
   syncListProjects(pat: string, teamId: string): Promise<SyncListProjectsResult> {
     return this.requireApi().syncListProjects(pat, teamId);
+  }
+
+  // TER-33: Linear OAuth2 (auth-code + PKCE). No token crosses the boundary; the
+  // renderer receives only an opaque sessionId + non-secret discovery data.
+  linearOAuthBegin(): Promise<LinearOAuthBeginResult> {
+    return this.requireApi().linearOAuthBegin();
+  }
+
+  linearOAuthListProjects(
+    sessionId: string,
+    teamId: string,
+  ): Promise<LinearOAuthListProjectsResult> {
+    return this.requireApi().linearOAuthListProjects(sessionId, teamId);
+  }
+
+  linearOAuthComplete(sessionId: string, connectionId: string): Promise<LinearOAuthAckResult> {
+    return this.requireApi().linearOAuthComplete(sessionId, connectionId);
+  }
+
+  linearOAuthRevoke(connectionId: string): Promise<LinearOAuthAckResult> {
+    return this.requireApi().linearOAuthRevoke(connectionId);
   }
 
   // Phase 3: chats
