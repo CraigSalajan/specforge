@@ -14,11 +14,13 @@ import DOMPurify from 'dompurify';
 import { Marked } from 'marked';
 import { type AiErrorInfo, type ChatSession, type Citation } from '../../shared/types';
 import { renderHighlightedCode } from '../../shared/markdown-code';
-import { fromVaultRel } from '../../shared/vault-paths';
+import { fromVaultRel, toVaultRel } from '../../shared/vault-paths';
+import { canonicalRelPath } from './providers/path-utils';
 import { EditorNavigationService } from '../../core/editor-navigation.service';
 import { EditorSelectionService, resolveActiveSelection } from '../../core/editor-selection.service';
 import { VaultService } from '../../core/vault.service';
 import { UiStateService } from '../../core/ui-state.service';
+import { SettingsService } from '../../core/settings.service';
 import { InputDialogService } from '../../core/input-dialog.service';
 import { ConfirmDialogService } from '../../core/confirm-dialog.service';
 import { ChatService, type UiChatMessage } from './chat.service';
@@ -321,6 +323,7 @@ export class AiPanelComponent {
   private readonly fileChange = inject(FileChangeService);
   private readonly vault = inject(VaultService);
   private readonly ui = inject(UiStateService);
+  private readonly settings = inject(SettingsService);
   private readonly providers = inject(AiProviderService);
   private readonly inputDialog = inject(InputDialogService);
   private readonly confirmDialog = inject(ConfirmDialogService);
@@ -425,9 +428,24 @@ export class AiPanelComponent {
       !q || c.label.toLowerCase().includes(q) || c.id.toLowerCase().includes(q);
     const draftItems = this.commands.filter((c) => c.expectsFileProposal && matches(c)).map(toItem);
     const analyzeItems = this.commands.filter((c) => !c.expectsFileProposal && matches(c)).map(toItem);
+    // The per-file push is a non-AI action, so it lists even when no API key is
+    // configured; it is only disabled while a turn is streaming.
+    const actionItems: AutocompleteItem[] =
+      !q || PUSH_FILE_SLUG.includes(q) || 'push file'.includes(q)
+        ? [
+            {
+              id: PUSH_FILE_SLUG,
+              label: 'Push this file to Linear',
+              hint: 'Push only the active file to Linear',
+              iconType: 'command',
+              disabled: this.streaming(),
+            },
+          ]
+        : [];
     const groups: AutocompleteGroup[] = [];
     if (draftItems.length > 0) groups.push({ heading: 'Draft', items: draftItems });
     if (analyzeItems.length > 0) groups.push({ heading: 'Analyze', items: analyzeItems });
+    if (actionItems.length > 0) groups.push({ heading: 'Actions', items: actionItems });
     return groups;
   }
 
@@ -694,6 +712,16 @@ export class AiPanelComponent {
     this.pinnedToBottom.set(true);
     const raw = this.draft;
 
+    // `/push-file` is an ACTION slash command (no AI): it pushes ONLY the active
+    // file to Linear via the per-file preview modal. Matched before the planning
+    // slash since it is not a planning command.
+    if (matchPushFileCommand(raw)) {
+      this.draft = '';
+      this.closePicker();
+      this.runPushFile();
+      return;
+    }
+
     // A leading `/<known-slug>` runs the matching planning command instead of
     // sending a chat message. Intent (text after the slug) is forwarded; the
     // orchestrator falls back to the command description when it is empty.
@@ -701,6 +729,14 @@ export class AiPanelComponent {
     if (slash) {
       this.draft = '';
       this.closePicker();
+      // `/decompose-stories` is the COMBINED decompose-and-push action (TER-37):
+      // the AI authors ID-tagged stories, they're saved into the doc, and the push
+      // comes from those stories — all behind ONE review. It is dispatched to its
+      // dedicated orchestration rather than the generic proposal pipeline.
+      if (slash.commandId === 'decompose-stories') {
+        await this.orchestrator.decomposeAndPushActiveFile(slash.intent);
+        return;
+      }
       await this.orchestrator.runCommand(slash.commandId, slash.intent);
       return;
     }
@@ -718,6 +754,39 @@ export class AiPanelComponent {
     this.editNudge.set(false);
     this.closePicker();
     await this.orchestrator.sendUserMessage(text, this.composerMode());
+  }
+
+  /**
+   * Handles `/push-file`: pushes ONLY the active file's items to Linear via the
+   * per-file preview modal. No AI is involved. Works on ANY active markdown file
+   * (the source folder is irrelevant). Gates:
+   *  - the active file must resolve to a canonical vault-rel path,
+   *  - the active vault must have an enabled Linear connection,
+   * surfacing a clear chat error and doing nothing otherwise.
+   */
+  private runPushFile(): void {
+    this._actionMessage.set(null);
+    const vaultPath = this.vault.vaultPath();
+    const activeAbs = this.vault.activeFilePath();
+    const rel = vaultPath && activeAbs ? toVaultRel(vaultPath, activeAbs) : null;
+    const canonRel = rel !== null ? canonicalRelPath(rel) : null;
+    if (canonRel === null) {
+      this._actionMessage.set({ kind: 'error', text: 'Open a file to push to Linear.' });
+      return;
+    }
+    const hasLinear =
+      vaultPath !== null &&
+      this.settings
+        .connectionsForVault(vaultPath)
+        .some((c) => c.provider === 'linear' && c.enabled);
+    if (!hasLinear) {
+      this._actionMessage.set({
+        kind: 'error',
+        text: 'No enabled Linear connection for this vault. Add one in Settings → Integrations.',
+      });
+      return;
+    }
+    this.ui.openPushPreviewForFile(canonRel);
   }
 
   /**
@@ -1015,8 +1084,21 @@ export class AiPanelComponent {
   }
 }
 
+/** The slug for the non-AI per-file push action surfaced in the slash menu. */
+export const PUSH_FILE_SLUG = 'push-file';
+
 /** Known command slugs derived from the planning-command registry ids. */
 const KNOWN_COMMAND_SLUGS = new Set<string>(PLANNING_COMMANDS.map((c) => c.id));
+
+/**
+ * Pure helper: true when `text` is a leading `/push-file` token (optionally
+ * followed by ignored trailing text). The push action takes no intent, so any
+ * trailing text is discarded by the caller.
+ */
+export function matchPushFileCommand(text: string): boolean {
+  const match = /^\s*\/(\S+)(?:\s+[\s\S]*)?$/.exec(text);
+  return match !== null && match[1]!.toLowerCase() === PUSH_FILE_SLUG;
+}
 
 /**
  * Pure helper: when `text` starts with `/<known-slug>` (optionally followed by

@@ -22,9 +22,19 @@ import { runAgenticLoop } from './agentic-loop';
 // THE single inline-`<think>` parser, shared with the loop and the IPC layer.
 import { splitThinkTags } from '../../../../electron/ipc/think-tag-parser';
 import { absToRel, canonicalRelPath, relToAbs, sanitizeFilename } from './providers/path-utils';
+import { toVaultRel } from '../../shared/vault-paths';
 import { FileChangeService } from './file-change.service';
 import { ToolRegistryService } from './tools/tool-registry.service';
 import { SkillRegistryService } from './skills/skill-registry.service';
+import { SyncService } from '../../core/sync.service';
+import { UiStateService } from '../../core/ui-state.service';
+import {
+  buildProposedContent,
+  type ProposedStory,
+} from '../../../../electron/sync/story-doc-builder';
+import { buildTaskItemsFromContent } from '../../../../electron/sync/task-items';
+import { parseMarkedHeadings } from '../../../../electron/sync/story-markers';
+import { DECOMPOSE_STORIES_PROMPT } from './prompts/decompose-stories.prompt';
 
 /**
  * System instruction appended when the renderer infers an edit-intent turn.
@@ -167,6 +177,8 @@ export class AiOrchestratorService {
   private readonly fileChange = inject(FileChangeService);
   private readonly tools = inject(ToolRegistryService);
   private readonly skillRegistry = inject(SkillRegistryService);
+  private readonly sync = inject(SyncService);
+  private readonly ui = inject(UiStateService);
 
   private readonly _pendingProposal = signal<FileProposal | null>(null);
   readonly pendingProposal = this._pendingProposal.asReadonly();
@@ -326,6 +338,47 @@ export class AiOrchestratorService {
     if (!session) return;
 
     const scope = this.chat.contextScope();
+
+    // Force-edit commands (e.g. /decompose-stories) revise the ACTIVE markdown
+    // file in place rather than drafting a new document. Resolve the target rel
+    // BEFORE touching the model so a missing active file fails fast with a clear
+    // error instead of an unhelpful model round-trip. Any folder is fine — the AI
+    // does the decomposition, so the source file's location is irrelevant.
+    if (cmd.forceEditActiveFile) {
+      const vaultPath = this.vault.vaultPath();
+      const activeAbs = this.vault.activeFilePath();
+      const activeRel = vaultPath && activeAbs ? toVaultRel(vaultPath, activeAbs) : null;
+      const canonActiveRel = activeRel !== null ? canonicalRelPath(activeRel) : null;
+      if (canonActiveRel === null) {
+        this.chat.setError('Open a markdown file to decompose into stories.');
+        return;
+      }
+
+      // Pin the active file (post-unsaved-edits content) into the turn so the
+      // model sees the full epic it must reproduce + extend. `includeActiveFile`
+      // drives composeMessages' active-file pin; adding the rel to `files`
+      // guarantees the pin even if the active-file derivation differs.
+      const forceEditScope: ContextScope = {
+        ...scope,
+        includeActiveFile: true,
+        files: scope.files.includes(canonActiveRel)
+          ? scope.files
+          : [...scope.files, canonActiveRel],
+      };
+
+      await this.run({
+        userContent: userIntent.trim().length > 0 ? userIntent : cmd.description,
+        selection: null,
+        scope: forceEditScope,
+        additionalInstructions: cmd.systemPrompt,
+        expectsFileProposal: cmd.expectsFileProposal,
+        forcedEditRelPath: canonActiveRel,
+        defaultFolder: cmd.defaultFolder,
+        defaultTitle: cmd.label,
+      });
+      return;
+    }
+
     const hasSelection = scope.wholeVault || scope.folders.length > 0 || scope.files.length > 0;
     const effectiveScope: ContextScope =
       cmd.mode !== 'general' && !hasSelection ? { ...scope, wholeVault: true } : scope;
@@ -342,6 +395,242 @@ export class AiOrchestratorService {
       defaultFolder: cmd.defaultFolder,
       defaultTitle: cmd.label,
     });
+  }
+
+  /**
+   * The combined `/decompose-stories` action (TER-37): break the active feature
+   * document into AI-authored, ID-tagged user stories AND push them to Linear,
+   * behind ONE review.
+   *
+   * Data flow (the rework's whole point): the model is fed the ENTIRE document as
+   * context and returns a flat list of actionable user stories (NOT a heading
+   * parse — the epic, background/goals/context prose, and themes stay in the doc).
+   * Those stories are appended under a plain `## User Stories` section as
+   * `### <title> <!-- sf:id <id> -->` headings with stable marker ids; and the push
+   * comes from ONLY those ID-tagged stories — pushed as FLAT Linear issues (no
+   * epic/theme/parent), idempotency anchored on the explicit marker ids (via
+   * `sync_links.specItemId`). The doc is written FIRST on approve, then the
+   * per-file push re-plans from the written file (the SAME flat tagged-story
+   * extractor), so a create-then-rerun UPDATES rather than duplicates.
+   *
+   * Steps:
+   *  1. Gate: active file, an enabled Linear connection, and a configured provider.
+   *  2. Flush unsaved editor edits, read the FULL file, collect existing tagged
+   *     story titles to feed the model so it proposes only NEW stories.
+   *  3. Call the model (jsonObject) with the full doc as context → parse
+   *     `{ stories: [...] }`.
+   *  4. Build the proposed file content in-memory (existing content preserved
+   *     verbatim, new stories appended tagged under `## User Stories`).
+   *  5. Compute the push preview from the FLAT tagged-story items (only stories —
+   *     no epic/themes/prose) resolved against the connection's SyncLinks, and open
+   *     the single combined review modal.
+   *  6. On approve: write the doc (via FileChangeService — three-way-merge guard),
+   *     then run the per-file push. On discard: nothing is written or pushed.
+   */
+  async decomposeAndPushActiveFile(userIntent: string): Promise<void> {
+    const session =
+      this.chat.activeSession() ??
+      (await this.chat.createSession('Decompose & Push', 'draft'));
+    if (!session) return;
+
+    // Gate 1a: AI provider configured (mirrors the run()/runWithTools() guard).
+    if (!this.providers.isConfigured()) {
+      this.chat.setError('No API key configured. Open Settings to add one.');
+      return;
+    }
+
+    const vaultPath = this.vault.vaultPath();
+    if (!vaultPath) {
+      this.chat.setError('Pick a vault before decomposing.');
+      return;
+    }
+
+    // Gate 1b: an active markdown file to decompose (any folder).
+    const activeAbs = this.vault.activeFilePath();
+    const activeRel = activeAbs ? toVaultRel(vaultPath, activeAbs) : null;
+    const relPath = activeRel !== null ? canonicalRelPath(activeRel) : null;
+    if (relPath === null || activeAbs === null) {
+      this.chat.setError('Open a markdown file to decompose into stories.');
+      return;
+    }
+
+    // Gate 1c: an enabled Linear connection for this vault (mirrors
+    // hasEnabledLinearConnection in app.component.ts). One scan resolves both the
+    // gate and the connection the push targets.
+    const connection = this.settings
+      .connectionsForVault(vaultPath)
+      .find((c) => c.provider === 'linear' && c.enabled);
+    if (!connection) {
+      this.chat.setError(
+        'No enabled Linear connection for this vault. Add one in Settings → Integrations.',
+      );
+      return;
+    }
+
+    // Step 2: flush unsaved edits, read the file, collect existing tagged titles.
+    let existingContent: string;
+    try {
+      await this.editorBuffer.flushIfDirty(activeAbs);
+      existingContent = await this.ipc.readFile(activeAbs);
+    } catch {
+      this.chat.setError('Could not read the active file to decompose.');
+      return;
+    }
+
+    const existingStoryTitles = parseMarkedHeadings(existingContent)
+      .filter((h) => h.level === 3 && h.id !== null)
+      .map((h) => h.title);
+
+    // Step 3: call the model for the structured story list.
+    await this.beginTurn(session.id, this.decomposeUserMessage(userIntent), false);
+    const controller = new AbortController();
+    this.abortController = controller;
+
+    let stories: ProposedStory[];
+    try {
+      const messages = await this.composeMessages({
+        scope: this.decomposeScope(relPath),
+        userContent: this.decomposeUserMessage(userIntent),
+        selection: null,
+        additionalInstructions: this.decomposeInstructions(existingStoryTitles),
+        vaultPath,
+      });
+      const result = await this.providers.chat.chatComplete(messages, {
+        jsonObject: true,
+        signal: controller.signal,
+      });
+      stories = parseStoriesResponse(result.content ?? '');
+    } catch (err) {
+      const isAbort = err instanceof DOMException && err.name === 'AbortError';
+      if (isAbort) {
+        this.chat.updateLastAssistant({ error: null, streaming: false });
+      } else {
+        this.chat.updateLastAssistant({ error: toAiErrorInfo(err), streaming: false });
+        this.chat.setTurnError(toAiErrorInfo(err));
+      }
+      this.abortController = null;
+      this.chat.setStreaming(false);
+      return;
+    }
+    this.abortController = null;
+    this.chat.setStreaming(false);
+
+    // Step 4: build the proposed file content in-memory.
+    let proposed: ReturnType<typeof buildProposedContent>;
+    try {
+      proposed = buildProposedContent(existingContent, stories);
+    } catch (err) {
+      this.chat.updateLastAssistant({
+        content: err instanceof Error ? err.message : 'Could not build the decomposed document.',
+        streaming: false,
+      });
+      return;
+    }
+
+    if (proposed.storiesAdded === 0) {
+      // Already fully covered — nothing to write or push. Surface it in chat and
+      // never open the review modal.
+      this.chat.updateLastAssistant({
+        content: 'This epic is already fully decomposed — no new stories to add.',
+        streaming: false,
+      });
+      await this.chat.persistMessage(
+        session.id,
+        'assistant',
+        'This epic is already fully decomposed — no new stories to add.',
+        null,
+      );
+      void this.chat.refreshSessions();
+      return;
+    }
+
+    // Step 5: compute the FLAT, stories-only items from the proposed content (ONLY
+    // the AI-tagged stories — never the epic/themes/prose) and open the combined
+    // review. The same flat extractor backs the eventual per-file execute, so the
+    // preview matches exactly what is pushed.
+    const items = buildTaskItemsFromContent(relPath, proposed.content);
+    this.chat.updateLastAssistant({
+      content:
+        `Proposed **${proposed.storiesAdded}** new ` +
+        `${proposed.storiesAdded === 1 ? 'story' : 'stories'} for \`${relPath}\`. ` +
+        `Review and confirm in the combined dialog.`,
+      streaming: false,
+    });
+    await this.chat.persistMessage(
+      session.id,
+      'assistant',
+      `Proposed ${proposed.storiesAdded} new ${proposed.storiesAdded === 1 ? 'story' : 'stories'} for ${relPath}.`,
+      null,
+    );
+    void this.chat.refreshSessions();
+
+    const sessionId = session.id;
+    this.ui.openCombinedPushReview({
+      filePath: relPath,
+      items,
+      summary: {
+        storiesAdded: proposed.storiesAdded,
+        sectionCreated: proposed.sectionCreated,
+      },
+      // Step 6: write-then-push. Write FIRST (FileChangeService's edit path runs
+      // the three-way-merge / conflict guard so a concurrent edit is never silently
+      // clobbered), so the doc stays the source of truth for any later re-push.
+      // THEN push the EXACT in-memory `items` we already previewed — NOT a disk
+      // re-read. Re-reading would re-extract through the file readers and could
+      // diverge from the preview (an apply-time merge / EOL transform reshaping the
+      // written content, or — for a degraded routing — the whole-vault converter
+      // dropping the structured description/open-questions/risks). Pushing the
+      // previewed items guarantees Linear == preview == doc. Idempotency is
+      // unchanged: each item's `localId` is its `sf:id` marker id, so a re-run
+      // UPDATES rather than duplicates via `sync_links`.
+      onApprove: async (onProgress) => {
+        const before = await this.fileChange.resolveBeforeContent(relPath);
+        await this.fileChange.apply({
+          sessionId,
+          relPath,
+          changeType: 'edit',
+          beforeContent: before,
+          afterContent: proposed.content,
+        });
+        // Forward the modal's live-progress sink so the push fills in a per-item
+        // list as it runs (TER-37 live progress).
+        return this.sync.executePushFromItems(connection.connectionId, items, onProgress);
+      },
+    });
+  }
+
+  /** The user-visible message recorded for a decompose turn. */
+  private decomposeUserMessage(userIntent: string): string {
+    const intent = userIntent.trim();
+    return intent.length > 0
+      ? `Decompose & push this file. ${intent}`
+      : 'Decompose & push this file.';
+  }
+
+  /**
+   * The scope for a decompose turn: pin the active file so the model sees the full
+   * epic it must decompose. Mirrors the force-edit scope the old flow used.
+   */
+  private decomposeScope(relPath: string): ContextScope {
+    const scope = this.chat.contextScope();
+    return {
+      ...scope,
+      includeActiveFile: true,
+      files: scope.files.includes(relPath) ? scope.files : [...scope.files, relPath],
+    };
+  }
+
+  /**
+   * The system instructions for a decompose turn: the structured-output prompt
+   * plus the titles of the stories already tagged in the file, so the model
+   * proposes only NEW stories (re-runs add, never duplicate).
+   */
+  private decomposeInstructions(existingStoryTitles: string[]): string {
+    if (existingStoryTitles.length === 0) {
+      return `${DECOMPOSE_STORIES_PROMPT}\n\nEXISTING STORIES: (none yet — propose the full decomposition.)`;
+    }
+    const list = existingStoryTitles.map((t) => `- ${t}`).join('\n');
+    return `${DECOMPOSE_STORIES_PROMPT}\n\nEXISTING STORIES (do NOT duplicate these):\n${list}`;
   }
 
   /**
@@ -1004,6 +1293,66 @@ function slugify(input: string): string {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 80) || 'untitled';
+}
+
+/**
+ * Parses the model's `{ "stories": [...] }` response into {@link ProposedStory}[],
+ * tolerating the model wrapping the JSON in prose / a code fence the way
+ * `parseProposal` does (extract the first `{…}` object). Each story is coerced to
+ * the expected shape; malformed entries are dropped. Returns `[]` for an
+ * unparsable response or an explicit empty `stories` array.
+ */
+export function parseStoriesResponse(raw: string): ProposedStory[] {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return [];
+
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    const match = trimmed.match(/\{[\s\S]*\}/);
+    if (match) {
+      try {
+        parsed = JSON.parse(match[0]);
+      } catch {
+        parsed = null;
+      }
+    }
+  }
+  if (parsed === null || typeof parsed !== 'object') return [];
+
+  const storiesRaw = (parsed as { stories?: unknown }).stories;
+  if (!Array.isArray(storiesRaw)) return [];
+
+  const out: ProposedStory[] = [];
+  for (const entry of storiesRaw) {
+    if (typeof entry !== 'object' || entry === null) continue;
+    const e = entry as Record<string, unknown>;
+    const title = typeof e['title'] === 'string' ? e['title'].trim() : '';
+    const role = typeof e['role'] === 'string' ? e['role'] : '';
+    const capability = typeof e['capability'] === 'string' ? e['capability'] : '';
+    const benefit = typeof e['benefit'] === 'string' ? e['benefit'] : '';
+    const description = typeof e['description'] === 'string' ? e['description'] : '';
+    // A story needs SOMETHING to title it — a plain title or, failing that, an
+    // "As a …"-derivable capability. An entry with neither is too empty to render.
+    if (title.length === 0 && capability.trim().length === 0) continue;
+    out.push({
+      title,
+      role,
+      capability,
+      benefit,
+      description,
+      acceptanceCriteria: stringArray(e['acceptanceCriteria']),
+      openQuestions: stringArray(e['openQuestions']),
+      risks: stringArray(e['risks']),
+    });
+  }
+  return out;
+}
+
+/** Coerces an unknown JSON value into a string[] — drops non-string entries; `[]` when not an array. */
+function stringArray(raw: unknown): string[] {
+  return Array.isArray(raw) ? raw.filter((c): c is string => typeof c === 'string') : [];
 }
 
 /**

@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { executePush, type PushExecutionDeps } from '../../../electron/sync/executor';
+import {
+  executePush,
+  type PushExecutionDeps,
+  type ItemProgressEvent,
+} from '../../../electron/sync/executor';
 import type {
   IAdapter,
   ExternalItemResult,
@@ -579,5 +583,76 @@ describe('executePush — Epic container membership (TER-20)', () => {
     // The feature's parent (the skipped epic) IS its container, so no parent link.
     expect(adapter.links).toHaveLength(0);
     expect(result.results.find((r) => r.localId === 'f1')?.linked).toBe(true);
+  });
+});
+
+describe('executePush — live per-item progress (TER-37)', () => {
+  /** Build deps with a progress capture on top of the standard in-memory deps. */
+  function progressDeps(adapter: IAdapter): {
+    deps: PushExecutionDeps;
+    events: ItemProgressEvent[];
+  } {
+    const events: ItemProgressEvent[] = [];
+    const { deps } = fakeDeps(adapter);
+    return { events, deps: { ...deps, onItemProgress: (ev) => events.push(ev) } };
+  }
+
+  it('emits start then done for every item, in plan order, carrying its result', async () => {
+    const a = item({ localId: 'a', level: 'epic' });
+    const b = item({ localId: 'b', level: 'feature' });
+    const c = item({ localId: 'c', level: 'story' });
+    const adapter = fakeAdapter();
+    const { deps, events } = progressDeps(adapter);
+
+    const result = await executePush(
+      plan([diff(a, 'create'), diff(b, 'update'), diff(c, 'skip')]),
+      CONNECTION_ID,
+      deps,
+    );
+
+    // start/done pair per item, in plan order, start always before its done.
+    expect(events.map((e) => `${e.phase}:${e.localId}`)).toEqual([
+      'start:a',
+      'done:a',
+      'start:b',
+      'done:b',
+      'start:c',
+      'done:c',
+    ]);
+
+    // Each `done` carries the same per-item result the resolved PushResult holds.
+    for (const r of result.results) {
+      const done = events.find((e) => e.phase === 'done' && e.localId === r.localId);
+      expect(done?.phase).toBe('done');
+      if (done?.phase === 'done') expect(done.result).toEqual(r);
+    }
+
+    // The decision rides along on both phases (create / update / skip).
+    const startA = events.find((e) => e.phase === 'start' && e.localId === 'a');
+    expect(startA?.decision).toBe('create');
+    expect(events.find((e) => e.phase === 'start' && e.localId === 'b')?.decision).toBe('update');
+    expect(events.find((e) => e.phase === 'start' && e.localId === 'c')?.decision).toBe('skip');
+  });
+
+  it('emits a `done` for a failed item too (every terminal site is covered)', async () => {
+    const boom = item({ localId: 'boom' });
+    const adapter = fakeAdapter({ failCreate: new Set(['boom']) });
+    const { deps, events } = progressDeps(adapter);
+
+    await executePush(plan([diff(boom, 'create')]), CONNECTION_ID, deps);
+
+    const done = events.find((e) => e.phase === 'done' && e.localId === 'boom');
+    expect(done?.phase).toBe('done');
+    if (done?.phase === 'done') expect(done.result.status).toBe('failed');
+  });
+
+  it('is a no-op when no callback is supplied (original behavior preserved)', async () => {
+    const a = item({ localId: 'a' });
+    const adapter = fakeAdapter();
+    const { deps } = fakeDeps(adapter); // no onItemProgress
+
+    // Simply must not throw and must still produce the result.
+    const result = await executePush(plan([diff(a, 'create')]), CONNECTION_ID, deps);
+    expect(result.created).toBe(1);
   });
 });

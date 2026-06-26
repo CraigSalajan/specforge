@@ -5,12 +5,16 @@ import { EMPTY_CONTEXT_SCOPE, type AiErrorInfo } from '../../shared/types';
 import { IpcService } from '../../core/ipc.service';
 import { SettingsService } from '../../core/settings.service';
 import { VaultService } from '../../core/vault.service';
+import { EditorBufferService } from '../../core/editor-buffer.service';
+import { EditorSelectionService } from '../../core/editor-selection.service';
 import { AiProviderService } from './providers/ai-provider.service';
 import { RetrievalService } from './providers/retrieval.service';
 import { ChatService, type UiChatMessage } from './chat.service';
 import { FileChangeService } from './file-change.service';
 import { ToolRegistryService } from './tools/tool-registry.service';
 import { SkillRegistryService } from './skills/skill-registry.service';
+import { SyncService } from '../../core/sync.service';
+import { UiStateService } from '../../core/ui-state.service';
 import type {
   ChatChunk,
   ChatMessage,
@@ -19,6 +23,7 @@ import type {
 } from './providers/chat.provider';
 import { AiHarnessError } from './providers/ai-harness-error';
 import { AiOrchestratorService, type ProposalOutcome } from './ai-orchestrator.service';
+import type { CanonicalItem } from '../../../../electron/sync/canonical-item';
 
 /**
  * One scripted model round: either a plain chunk sequence, or a sequence that
@@ -180,6 +185,8 @@ describe('AiOrchestratorService.runWithTools', () => {
         { provide: RetrievalService, useValue: { retrieve: async () => [] } },
         { provide: ChatService, useValue: chatStub },
         { provide: FileChangeService, useValue: {} },
+        { provide: SyncService, useValue: {} },
+        { provide: UiStateService, useValue: {} },
         // Without this stub the real root-provided registry is constructed
         // against the bare SettingsService stub above; `enabled()` then throws
         // (settings.skillsEnabled is undefined) and the orchestrator aborts
@@ -536,6 +543,8 @@ describe('AiOrchestratorService.run (non-tool streaming path)', () => {
         { provide: RetrievalService, useValue: { retrieve: async () => [] } },
         { provide: ChatService, useValue: chatStub },
         { provide: FileChangeService, useValue: {} },
+        { provide: SyncService, useValue: {} },
+        { provide: UiStateService, useValue: {} },
         {
           provide: SkillRegistryService,
           useValue: {
@@ -624,5 +633,357 @@ describe('AiOrchestratorService.run (non-tool streaming path)', () => {
     expect(last.content).toBe('Plain answer.');
     const persisted = persistCalls.filter((c) => c.role === 'assistant').pop();
     expect(persisted).toEqual({ role: 'assistant', content: 'Plain answer.', reasoning: null });
+  });
+});
+
+/**
+ * TER-37 (reworked) — `/decompose-stories` is the COMBINED decompose-and-push
+ * action. The AI authors a STRUCTURED story list, those stories are rendered into
+ * the doc tagged with stable `sf:id` markers, and the push comes from those
+ * ID-tagged stories — behind ONE combined review. Gated so it never touches the
+ * model when there is no active file, no enabled Linear connection, or the
+ * provider is unconfigured.
+ */
+describe('AiOrchestratorService.decomposeAndPushActiveFile (TER-37)', () => {
+  const ENABLED_LINEAR = { provider: 'linear', enabled: true, connectionId: 'linear-1' };
+
+  /** A chatComplete-capable provider returning a fixed structured JSON payload. */
+  class FakeCompleteProvider {
+    completeCalls = 0;
+    /** The messages the last chatComplete() call was handed (for prompt assertions). */
+    lastMessages: ChatMessage[] = [];
+    constructor(private readonly json: string) {}
+    chat(): AsyncIterable<ChatChunk> {
+      return (async function* () {
+        yield { delta: '', done: true } as ChatChunk;
+      })();
+    }
+    async chatComplete(messages: ChatMessage[]): Promise<{ content: string; reasoning: null }> {
+      this.completeCalls += 1;
+      this.lastMessages = messages.map((m) => ({ ...m }));
+      return { content: this.json, reasoning: null };
+    }
+  }
+
+  const STORIES_JSON = JSON.stringify({
+    stories: [
+      {
+        title: 'Log in with email',
+        role: 'returning user',
+        capability: 'log in with email and password',
+        benefit: 'I can access my workspace',
+        acceptanceCriteria: ['Valid credentials land on the dashboard.', 'Invalid credentials show an error.'],
+      },
+    ],
+  });
+
+  function setup(opts: {
+    activeFilePath: string | null;
+    isConfigured?: boolean;
+    connections?: Array<{ provider: string; enabled: boolean; connectionId: string }>;
+    completeJson?: string;
+    existingContent?: string;
+  }): {
+    orchestrator: AiOrchestratorService;
+    provider: FakeCompleteProvider;
+    setErrors: Array<string | null>;
+    combinedReviews: Array<Parameters<UiStateService['openCombinedPushReview']>[0]>;
+    applyCalls: Array<{ relPath?: string; afterContent?: string | null }>;
+    executeFromItemsCalls: Array<{ connectionId: string; items: CanonicalItem[] }>;
+    executePushCalls: Array<{ connectionId: string; filePath?: string }>;
+  } {
+    const messagesSig = signal<UiChatMessage[]>([]);
+    const setErrors: Array<string | null> = [];
+    const combinedReviews: Array<Parameters<UiStateService['openCombinedPushReview']>[0]> = [];
+    const applyCalls: Array<{ relPath?: string; afterContent?: string | null }> = [];
+    const executeFromItemsCalls: Array<{ connectionId: string; items: CanonicalItem[] }> = [];
+    const executePushCalls: Array<{ connectionId: string; filePath?: string }> = [];
+    const provider = new FakeCompleteProvider(opts.completeJson ?? STORIES_JSON);
+
+    const chatStub = {
+      activeSession: () => ({ id: 7 }),
+      createSession: async () => ({ id: 7 }),
+      contextScope: () => ({ ...EMPTY_CONTEXT_SCOPE }),
+      messages: messagesSig.asReadonly(),
+      streaming: () => false,
+      appendLocal: (m: UiChatMessage) => messagesSig.update((cur) => [...cur, m]),
+      updateLastAssistant: (patch: Partial<UiChatMessage>) =>
+        messagesSig.update((cur) => {
+          if (cur.length === 0) return cur;
+          const last = cur[cur.length - 1];
+          if (last.role !== 'assistant') return cur;
+          return [...cur.slice(0, -1), { ...last, ...patch }];
+        }),
+      setStreaming: () => undefined,
+      setError: (e: string | null) => {
+        setErrors.push(e);
+      },
+      setTurnError: () => undefined,
+      persistMessage: async () => null,
+      refreshSessions: async () => undefined,
+    } as unknown as ChatService;
+
+    const providerStub = {
+      isConfigured: () => opts.isConfigured ?? true,
+      chat: provider,
+    } as unknown as AiProviderService;
+
+    TestBed.configureTestingModule({
+      providers: [
+        AiOrchestratorService,
+        ToolRegistryService,
+        {
+          provide: IpcService,
+          useValue: { readFile: async () => opts.existingContent ?? '# Auth\n\nEpic.' },
+        },
+        {
+          provide: SettingsService,
+          useValue: {
+            aiMaxContextChars: () => 8000,
+            aiTopK: () => 5,
+            aiToolsEnabled: () => false,
+            disabledTools: () => [],
+            connectionsForVault: () => opts.connections ?? [ENABLED_LINEAR],
+          },
+        },
+        {
+          provide: VaultService,
+          useValue: {
+            vaultPath: () => '/vault',
+            activeFilePath: () => opts.activeFilePath,
+          },
+        },
+        { provide: EditorBufferService, useValue: { flushIfDirty: async () => undefined } },
+        { provide: EditorSelectionService, useValue: { selection: () => null } },
+        { provide: AiProviderService, useValue: providerStub },
+        { provide: RetrievalService, useValue: { retrieve: async () => [] } },
+        { provide: ChatService, useValue: chatStub },
+        {
+          provide: FileChangeService,
+          useValue: {
+            resolveBeforeContent: async () => opts.existingContent ?? '# Auth\n\nEpic.',
+            apply: async (input: { relPath?: string; afterContent?: string | null }) => {
+              applyCalls.push(input);
+              return { absPath: '/vault/prd/auth.md' };
+            },
+          },
+        },
+        {
+          provide: SyncService,
+          useValue: {
+            // The combined approve must push the in-memory items, NOT a disk re-read,
+            // so this is the method the fix calls (executePush would re-read disk).
+            executePushFromItems: async (connectionId: string, items: CanonicalItem[]) => {
+              executeFromItemsCalls.push({ connectionId, items });
+              return { results: [], created: items.length, updated: 0, skipped: 0, failed: 0 };
+            },
+            executePush: async (connectionId: string, filePath?: string) => {
+              executePushCalls.push({ connectionId, filePath });
+              return { results: [], created: 1, updated: 0, skipped: 0, failed: 0 };
+            },
+          },
+        },
+        {
+          provide: UiStateService,
+          useValue: {
+            openCombinedPushReview: (req: Parameters<UiStateService['openCombinedPushReview']>[0]) => {
+              combinedReviews.push(req);
+            },
+          },
+        },
+        {
+          provide: SkillRegistryService,
+          useValue: { enabled: () => [], find: () => undefined } as unknown as SkillRegistryService,
+        },
+      ],
+    });
+
+    const orchestrator = TestBed.inject(AiOrchestratorService);
+    return {
+      orchestrator,
+      provider,
+      setErrors,
+      combinedReviews,
+      applyCalls,
+      executeFromItemsCalls,
+      executePushCalls,
+    };
+  }
+
+  beforeEach(() => {
+    TestBed.resetTestingModule();
+  });
+
+  it('happy path: builds proposed content + opens the combined review (no immediate write/push)', async () => {
+    const ctx = setup({ activeFilePath: '/vault/prd/auth.md' });
+
+    await ctx.orchestrator.decomposeAndPushActiveFile('focus on roles');
+
+    expect(ctx.provider.completeCalls).toBe(1);
+    // The combined review opened with the proposed items + doc-save summary.
+    expect(ctx.combinedReviews).toHaveLength(1);
+    const review = ctx.combinedReviews[0];
+    expect(review.filePath).toBe('prd/auth.md');
+    expect(review.summary.storiesAdded).toBe(1);
+    // The push set is FLAT + stories-only: EXACTLY the one tagged story, no epic /
+    // theme / "User Stories" heading items, and no parent links.
+    expect(review.items).toHaveLength(1);
+    expect(review.items.every((i) => i.level === 'story' && i.parentLocalId === undefined)).toBe(true);
+    // The item title is the SHORT title now; the "As a …" statement moved into the
+    // composed description body.
+    expect(review.items[0].title).toBe('Log in with email');
+    expect(review.items[0].description).toContain(
+      'As a returning user, I want log in with email and password, so that I can access my workspace',
+    );
+    // Nothing is written or pushed until approval.
+    expect(ctx.applyCalls).toHaveLength(0);
+    expect(ctx.executeFromItemsCalls).toHaveLength(0);
+    expect(ctx.executePushCalls).toHaveLength(0);
+  });
+
+  it('feeds the model the FULL document as context plus the already-tagged story titles', async () => {
+    const existingContent = [
+      '# Auth feature',
+      '',
+      '## Background',
+      '',
+      'A unique sentinel paragraph that must reach the model verbatim.',
+      '',
+      '## User Stories',
+      '',
+      '### Existing story already covered <!-- sf:id existing1 -->',
+    ].join('\n');
+    const ctx = setup({ activeFilePath: '/vault/prd/auth.md', existingContent });
+
+    await ctx.orchestrator.decomposeAndPushActiveFile('');
+
+    // The full doc (including the background prose) is pinned into the system
+    // message, NOT a truncated or heading-only slice.
+    const system = ctx.provider.lastMessages.find((m) => m.role === 'system')!;
+    expect(system.content).toContain('A unique sentinel paragraph that must reach the model verbatim.');
+    // The full-doc decomposition prompt is present (told it's the FULL feature
+    // context, and to derive stories from understanding it, not the headings).
+    expect(system.content).toContain('the full context of the feature we want to build');
+    expect(system.content).toContain('NOT from the');
+    expect(system.content).toContain("document's headings");
+    // The already-tagged story's title is listed so the model won't duplicate it.
+    expect(system.content).toContain('Existing story already covered');
+  });
+
+  it('approve writes the doc THEN pushes the previewed IN-MEMORY items (not a disk re-read)', async () => {
+    const ctx = setup({ activeFilePath: '/vault/prd/auth.md' });
+
+    await ctx.orchestrator.decomposeAndPushActiveFile('');
+    const review = ctx.combinedReviews[0];
+
+    const result = await review.onApprove();
+
+    // Doc written exactly once (edit) with the proposed content as the source of truth.
+    expect(ctx.applyCalls).toHaveLength(1);
+    expect(ctx.applyCalls[0].relPath).toBe('prd/auth.md');
+
+    // The push runs from the EXACT items the review previewed — NOT a disk re-read
+    // via executePush(connectionId, filePath), which would re-extract through the
+    // file readers and could diverge from the preview.
+    expect(ctx.executePushCalls).toHaveLength(0);
+    expect(ctx.executeFromItemsCalls).toHaveLength(1);
+    expect(ctx.executeFromItemsCalls[0].connectionId).toBe('linear-1');
+    // The very items array the review carried is pushed verbatim — same reference.
+    expect(ctx.executeFromItemsCalls[0].items).toBe(review.items);
+    expect(result.created).toBe(1);
+  });
+
+  // REPRODUCTION (TER-37 bug): a fully-structured story (statement + description +
+  // AC + open questions + risks) must reach the push with its FULL CanonicalItem
+  // `description` and `criteria` — not the title+criteria-only shape the whole-vault
+  // converter produces. The combined execute pushes the previewed in-memory items,
+  // so the items that actually reach the push carry every structured field.
+  it('pushes the FULL structured CanonicalItem (statement+description+open questions+risks) on approve', async () => {
+    const structuredJson = JSON.stringify({
+      stories: [
+        {
+          title: 'Reset password',
+          role: 'locked-out user',
+          capability: 'reset my password',
+          benefit: 'I regain access',
+          description: 'Covers the email reset link and its expiry window.',
+          acceptanceCriteria: ['A reset link is emailed.'],
+          openQuestions: ['Should the link be single-use?'],
+          risks: ['Reset emails may land in spam.'],
+        },
+      ],
+    });
+    const ctx = setup({ activeFilePath: '/vault/prd/auth.md', completeJson: structuredJson });
+
+    await ctx.orchestrator.decomposeAndPushActiveFile('');
+    const review = ctx.combinedReviews[0];
+    await review.onApprove();
+
+    // The executed plan operates over the previewed items, not a disk re-read.
+    expect(ctx.executePushCalls).toHaveLength(0);
+    expect(ctx.executeFromItemsCalls).toHaveLength(1);
+    const [pushed] = ctx.executeFromItemsCalls[0].items;
+
+    // Title is the short heading title; the "As a …" statement lives in the body.
+    expect(pushed.title).toBe('Reset password');
+    // The FULL structured description reaches the push — every section, in order.
+    expect(pushed.description).toContain(
+      'As a locked-out user, I want reset my password, so that I regain access',
+    );
+    expect(pushed.description).toContain('Covers the email reset link and its expiry window.');
+    expect(pushed.description).toContain('**Open questions**');
+    expect(pushed.description).toContain('- Should the link be single-use?');
+    expect(pushed.description).toContain('**Risks**');
+    expect(pushed.description).toContain('- Reset emails may land in spam.');
+    // AC stays on `criteria` (the adapter folds it into its checklist), NOT in the body.
+    expect(pushed.criteria).toEqual(['A reset link is emailed.']);
+    expect(pushed.description).not.toContain('A reset link is emailed.');
+  });
+
+  it('empty {stories:[]} → no doc changes, no review modal', async () => {
+    const ctx = setup({
+      activeFilePath: '/vault/prd/auth.md',
+      completeJson: JSON.stringify({ stories: [] }),
+    });
+
+    await ctx.orchestrator.decomposeAndPushActiveFile('');
+
+    expect(ctx.provider.completeCalls).toBe(1);
+    expect(ctx.combinedReviews).toHaveLength(0);
+    expect(ctx.applyCalls).toHaveLength(0);
+    expect(ctx.executeFromItemsCalls).toHaveLength(0);
+    expect(ctx.executePushCalls).toHaveLength(0);
+  });
+
+  it('errors and never calls the model when no file is active', async () => {
+    const ctx = setup({ activeFilePath: null });
+
+    await ctx.orchestrator.decomposeAndPushActiveFile('');
+
+    expect(ctx.provider.completeCalls).toBe(0);
+    expect(ctx.combinedReviews).toHaveLength(0);
+    expect(ctx.setErrors).toContain('Open a markdown file to decompose into stories.');
+  });
+
+  it('errors and never calls the model when there is no enabled Linear connection', async () => {
+    const ctx = setup({ activeFilePath: '/vault/prd/auth.md', connections: [] });
+
+    await ctx.orchestrator.decomposeAndPushActiveFile('');
+
+    expect(ctx.provider.completeCalls).toBe(0);
+    expect(ctx.combinedReviews).toHaveLength(0);
+    expect(
+      ctx.setErrors.some((e) => (e ?? '').includes('No enabled Linear connection')),
+    ).toBe(true);
+  });
+
+  it('errors (no model call) when the provider is unconfigured', async () => {
+    const ctx = setup({ activeFilePath: '/vault/prd/auth.md', isConfigured: false });
+
+    await ctx.orchestrator.decomposeAndPushActiveFile('');
+
+    expect(ctx.provider.completeCalls).toBe(0);
+    expect(ctx.combinedReviews).toHaveLength(0);
+    expect(ctx.setErrors).toContain('No API key configured. Open Settings to add one.');
   });
 });

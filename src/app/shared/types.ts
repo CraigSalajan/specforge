@@ -6,7 +6,8 @@ import type {
 } from '../../../electron/sync/adapter';
 import type { Connection } from '../../../electron/sync/connection';
 import type { PushPreviewTree } from '../../../electron/sync/preview';
-import type { PushResult } from '../../../electron/sync/executor';
+import type { PushResult, ItemProgressEvent } from '../../../electron/sync/executor';
+import type { CanonicalItem } from '../../../electron/sync/canonical-item';
 
 export type { LinearProject, LinearTeam } from '../../../electron/sync/adapter';
 
@@ -629,6 +630,14 @@ export type SyncExecutePushResult =
   | { ok: false; error: AiErrorInfo };
 
 /**
+ * TER-37 live-progress event: an executor {@link ItemProgressEvent} stamped with
+ * the renderer-generated `pushId` so the renderer can demux a stream of events
+ * against the push it actually started (and ignore a stale/overlapping push's).
+ * Carried over the `SyncPushProgress` event channel.
+ */
+export type SyncPushProgressEvent = ItemProgressEvent & { pushId: string };
+
+/**
  * TER-31 discovery envelopes. The two discovery channels (list-teams,
  * list-projects) travel their failures as data — same reason as the AI/sync
  * handlers above — reusing the shared {@link AiErrorInfo} vocabulary.
@@ -736,8 +745,33 @@ export interface SpecForgeApi {
 
   // TER-30: sync engine surface (only connectionId/vaultPath cross the boundary)
   syncTestConnection: (connectionId: string) => Promise<SyncTestConnectionResult>;
-  syncBuildPreview: (connectionId: string) => Promise<SyncBuildPreviewResult>;
-  syncExecutePush: (connectionId: string) => Promise<SyncExecutePushResult>;
+  syncBuildPreview: (connectionId: string, filePath?: string) => Promise<SyncBuildPreviewResult>;
+  // TER-37: preview from renderer-computed, not-yet-written canonical items (the
+  // combined decompose-and-push review). The items are non-secret; idempotency is
+  // still resolved main-side against the connection's persisted SyncLinks.
+  syncPreviewFromItems: (
+    connectionId: string,
+    items: CanonicalItem[],
+  ) => Promise<SyncBuildPreviewResult>;
+  // TER-37 (live progress): an optional renderer-generated `pushId` correlates the
+  // per-item progress events main streams over `onSyncPushProgress` with this push.
+  syncExecutePush: (
+    connectionId: string,
+    filePath?: string,
+    pushId?: string,
+  ) => Promise<SyncExecutePushResult>;
+  // TER-37: execute the push from the SAME in-memory items the combined review
+  // previewed (the apply half of `syncPreviewFromItems`), so what lands in Linear is
+  // the full structured doc, never a disk re-read reshaped by the whole-vault converter.
+  syncExecutePushFromItems: (
+    connectionId: string,
+    items: CanonicalItem[],
+    pushId?: string,
+  ) => Promise<SyncExecutePushResult>;
+  // TER-37 (live progress): subscribe to per-item push progress; returns an
+  // unsubscribe. Events are stamped with the `pushId` the renderer passed to the
+  // execute call so it can demux its own push from any overlapping one.
+  onSyncPushProgress: (cb: (evt: SyncPushProgressEvent) => void) => () => void;
   syncConnectionList: (vaultPath: string) => Promise<Connection[]>;
 
   // TER-31: team/project discovery. The raw PAT crosses for discovery ONLY (the

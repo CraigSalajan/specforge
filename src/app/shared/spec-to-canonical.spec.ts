@@ -1,5 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import * as path from 'node:path';
 import {
+  buildCanonicalItemsForVault,
+  buildTaskItemsForFile,
+  buildTaskItemsFromContent,
   specToCanonicalItems,
   type SpecDoc,
 } from '../../../electron/sync/spec-to-canonical';
@@ -229,6 +235,141 @@ tags:
   });
 });
 
+describe('specToCanonicalItems — sf:id markers (TER-37)', () => {
+  it('uses an H3 story marker id as the localId and strips the marker from the title', () => {
+    const md = `# Epic <!-- sf:id epic1 -->
+
+## Sign-in <!-- sf:id theme1 -->
+
+### As a user, I want to log in, so that I work <!-- sf:id storyA -->
+
+- Acceptance criteria:
+  - It works.
+`;
+    const items = specToCanonicalItems([doc('prd/auth.md', md)]);
+    const map = byId(items);
+
+    // Each level's localId IS its marker id (not a relPath/anchor derivation).
+    expect(map.has('epic1')).toBe(true);
+    expect(map.has('theme1')).toBe(true);
+    expect(map.has('storyA')).toBe(true);
+
+    // The marker is stripped from every emitted title.
+    expect(map.get('epic1')!.title).toBe('Epic');
+    expect(map.get('theme1')!.title).toBe('Sign-in');
+    expect(map.get('storyA')!.title).toBe('As a user, I want to log in, so that I work');
+
+    // Parent links use marker ids end-to-end.
+    expect(map.get('theme1')!.parentLocalId).toBe('epic1');
+    expect(map.get('storyA')!.parentLocalId).toBe('theme1');
+    expect(map.get('storyA')!.criteria).toEqual(['It works.']);
+
+    // No relPath/anchor-derived ids leak in when markers are present.
+    expect(map.has('prd/auth.md')).toBe(false);
+    expect(map.has('prd/auth.md#sign-in')).toBe(false);
+  });
+
+  it('falls back to the existing derivation when a heading has NO marker', () => {
+    const md = `# Epic
+
+## Sign-in <!-- sf:id theme1 -->
+
+### A capability with a marker <!-- sf:id storyA -->
+
+- Acceptance criteria:
+  - It works.
+`;
+    const items = specToCanonicalItems([doc('prd/auth.md', md)]);
+    const map = byId(items);
+
+    // Unmarked epic → relPath-derived id; marked theme/story → marker ids.
+    expect(map.has('prd/auth.md')).toBe(true);
+    expect(map.get('prd/auth.md')!.level).toBe('epic');
+    expect(map.has('theme1')).toBe(true);
+    expect(map.get('theme1')!.parentLocalId).toBe('prd/auth.md');
+    expect(map.has('storyA')).toBe(true);
+    expect(map.get('storyA')!.parentLocalId).toBe('theme1');
+  });
+
+  it('keeps a MARKED H3 story even when an "As a …" bullet line coexists under the same feature', () => {
+    // A hand-written "As a …" bullet alongside a builder-added marked H3 story
+    // under the same theme: the marked H3 carries explicit identity and must NOT
+    // be dropped (otherwise its SyncLink orphans and the push re-creates it).
+    const md = `# Epic <!-- sf:id epic1 -->
+
+## Sign-in <!-- sf:id theme1 -->
+
+- As a user, I want to log in, so that I work.
+  - Acceptance criteria:
+    - It works.
+
+### As a returning user, I want to stay signed in, so that I avoid re-auth <!-- sf:id storyB -->
+
+- Acceptance criteria:
+  - The session persists.
+`;
+    const items = specToCanonicalItems([doc('prd/auth.md', md)]);
+    const stories = items.filter((i) => i.level === 'story');
+    // BOTH stories are emitted under the one feature.
+    expect(stories).toHaveLength(2);
+    expect(stories.map((s) => s.localId)).toContain('storyB');
+    expect(stories.every((s) => s.parentLocalId === 'theme1')).toBe(true);
+    // The marked H3 keeps its marker id + stripped title + its own criteria.
+    const marked = stories.find((s) => s.localId === 'storyB')!;
+    expect(marked.title).toBe('As a returning user, I want to stay signed in, so that I avoid re-auth');
+    expect(marked.criteria).toEqual(['The session persists.']);
+  });
+
+  it('leaves an UNMARKED H3 in the feature description when "As a …" lines coexist (unchanged)', () => {
+    // Backward-compat: without a marker, a coexisting H3 stays inert prose in the
+    // feature description — it is NOT lifted into a story.
+    const md = `# Epic
+
+## Feature
+
+### A heading that is not a story
+
+- As a user, I want a thing, so that I benefit.
+  - Acceptance criteria:
+    - The thing happens.
+`;
+    const items = specToCanonicalItems([doc('prd/u.md', md)]);
+    const stories = items.filter((i) => i.level === 'story');
+    expect(stories).toHaveLength(1);
+    const feature = items.find((i) => i.level === 'feature')!;
+    expect(feature.description).toContain('A heading that is not a story');
+  });
+
+  it('keeps the SAME localId when a marked heading is renamed or reordered', () => {
+    const original = `# Epic <!-- sf:id e -->
+
+## Theme one <!-- sf:id t1 -->
+
+### As a user, I want A, so that X <!-- sf:id s1 -->
+
+## Theme two <!-- sf:id t2 -->
+
+### As a user, I want B, so that Y <!-- sf:id s2 -->
+`;
+    // Rename headings AND swap the two theme blocks; ids must be unchanged.
+    const renamedReordered = `# Renamed epic <!-- sf:id e -->
+
+## Theme TWO renamed <!-- sf:id t2 -->
+
+### As an admin, I want B revised, so that Y <!-- sf:id s2 -->
+
+## Theme ONE renamed <!-- sf:id t1 -->
+
+### As an admin, I want A revised, so that X <!-- sf:id s1 -->
+`;
+    const idsOf = (md: string) =>
+      new Set(specToCanonicalItems([doc('prd/x.md', md)]).map((i) => i.localId));
+
+    expect(idsOf(renamedReordered)).toEqual(idsOf(original));
+    expect(idsOf(original)).toEqual(new Set(['e', 't1', 's1', 't2', 's2']));
+  });
+});
+
 describe('specToCanonicalItems — tags', () => {
   it('attaches frontmatter tags (array) to the epic only', () => {
     const md = `---
@@ -412,5 +553,225 @@ describe('planPush integration (AC)', () => {
         expect(position.get(parent)!).toBeLessThan(position.get(d.item.localId)!);
       }
     }
+  });
+});
+
+/**
+ * `buildTaskItemsForFile` (TER-37, reworked) is the FLAT, stories-only file-scoped
+ * reader for the per-file push: read one markdown file (any folder) and emit ONLY
+ * its AI-tagged stories (`sf:id` markers) — never the epic, themes, or untagged
+ * background/goals/context prose. This is the deliberate divergence from the
+ * whole-vault Push button (which still parses the entire heading structure).
+ * Exercised against a real tmp-dir vault (cleaned up per test) since the function's
+ * whole job is the fs read + flat extraction.
+ */
+describe('buildTaskItemsForFile (TER-37 — flat, stories-only)', () => {
+  let root: string;
+
+  // A realistic feature doc: an epic, BACKGROUND/GOALS prose, and three tagged
+  // stories under a plain `## User Stories` section. Only the three tagged stories
+  // should ever push.
+  const PAYMENTS = `# Payments <!-- sf:id epic1 -->
+
+How customers pay.
+
+## Background
+
+Context the team already agreed on. NOT a story.
+
+## Goals
+
+- Reduce checkout friction.
+
+## User Stories
+
+### Pay with a card <!-- sf:id story-card -->
+
+- Acceptance criteria:
+  - A valid card is charged and the order confirms.
+  - A declined card shows a recoverable error.
+
+### Save a card for later <!-- sf:id story-save -->
+
+- Acceptance criteria:
+  - A saved card appears at next checkout.
+
+### Refund a payment <!-- sf:id story-refund -->
+`;
+
+  beforeEach(() => {
+    root = mkdtempSync(path.join(tmpdir(), 'specforge-ter37-'));
+    mkdirSync(path.join(root, 'prd'), { recursive: true });
+    writeFileSync(path.join(root, 'prd', 'payments.md'), PAYMENTS, 'utf-8');
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('emits EXACTLY the tagged stories — no epic, themes, or background/goals headings', () => {
+    const items = buildTaskItemsForFile(root, 'prd/payments.md');
+
+    // Three flat stories, nothing else — the epic + Background + Goals + the plain
+    // `## User Stories` heading are all dropped (the key regression for the bug).
+    expect(items).toHaveLength(3);
+    expect(items.every((i) => i.level === 'story')).toBe(true);
+    expect(items.every((i) => i.parentLocalId === undefined)).toBe(true);
+    expect(items.map((i) => i.localId)).toEqual(['story-card', 'story-save', 'story-refund']);
+    expect(items.map((i) => i.title)).toEqual([
+      'Pay with a card',
+      'Save a card for later',
+      'Refund a payment',
+    ]);
+  });
+
+  it('attaches each story’s acceptance criteria (or none when absent)', () => {
+    const items = buildTaskItemsForFile(root, 'prd/payments.md');
+    const byLocal = new Map(items.map((i) => [i.localId, i] as const));
+    expect(byLocal.get('story-card')!.criteria).toEqual([
+      'A valid card is charged and the order confirms.',
+      'A declined card shows a recoverable error.',
+    ]);
+    expect(byLocal.get('story-save')!.criteria).toEqual(['A saved card appears at next checkout.']);
+    // A tagged story with no criteria list carries none.
+    expect(byLocal.get('story-refund')!.criteria).toBeUndefined();
+  });
+
+  it('story localIds are the marker ids, so a re-run UPDATES rather than duplicates', () => {
+    // The flat per-file path and the whole-vault converter both anchor a marked
+    // story on its marker id, so the two never duplicate the same story.
+    const fileItems = buildTaskItemsForFile(root, 'prd/payments.md');
+    const vaultStories = buildCanonicalItemsForVault(root).filter((i) => i.level === 'story');
+    const fileIds = new Set(fileItems.map((i) => i.localId));
+    for (const story of vaultStories) {
+      expect(fileIds.has(story.localId)).toBe(true);
+    }
+  });
+
+  it('works on a markdown file in any folder (no /prd restriction)', () => {
+    mkdirSync(path.join(root, 'notes'), { recursive: true });
+    writeFileSync(path.join(root, 'notes', 'idea.md'), PAYMENTS, 'utf-8');
+
+    const items = buildTaskItemsForFile(root, 'notes/idea.md');
+    expect(items.map((i) => i.localId)).toEqual(['story-card', 'story-save', 'story-refund']);
+  });
+
+  it('returns [] for a missing file rather than throwing', () => {
+    expect(buildTaskItemsForFile(root, 'prd/does-not-exist.md')).toEqual([]);
+  });
+
+  it('returns [] for a file with no tagged stories (only prose / untagged headings)', () => {
+    writeFileSync(
+      path.join(root, 'prd', 'prose.md'),
+      '# Just an epic\n\n## Background\n\nNo tagged stories here.\n',
+      'utf-8',
+    );
+    expect(buildTaskItemsForFile(root, 'prd/prose.md')).toEqual([]);
+  });
+
+  // The `/push-file` path (no-AI re-push of a disk doc that already has structured
+  // tagged stories) must yield items with the FULL structured `description` —
+  // statement + description + open questions + risks — not title+criteria only.
+  it('carries the FULL structured description for a tagged story on disk (push-file path)', () => {
+    const structured = [
+      '# Auth <!-- sf:id epic1 -->',
+      '',
+      '## User Stories',
+      '',
+      '### Reset password <!-- sf:id story-reset -->',
+      '',
+      'As a locked-out user, I want reset my password, so that I regain access',
+      '',
+      'Covers the email reset link and its expiry window.',
+      '',
+      '- Acceptance criteria:',
+      '  - A reset link is emailed.',
+      '- Open questions:',
+      '  - Should the link be single-use?',
+      '- Risks:',
+      '  - Reset emails may land in spam.',
+      '',
+    ].join('\n');
+    writeFileSync(path.join(root, 'prd', 'auth.md'), structured, 'utf-8');
+
+    const [item] = buildTaskItemsForFile(root, 'prd/auth.md');
+    expect(item.localId).toBe('story-reset');
+    expect(item.title).toBe('Reset password');
+    // The composed description carries the statement + description + open questions
+    // + risks — exactly what the renderer previews and the combined push sends.
+    expect(item.description).toContain(
+      'As a locked-out user, I want reset my password, so that I regain access',
+    );
+    expect(item.description).toContain('Covers the email reset link and its expiry window.');
+    expect(item.description).toContain('**Open questions**');
+    expect(item.description).toContain('- Should the link be single-use?');
+    expect(item.description).toContain('**Risks**');
+    expect(item.description).toContain('- Reset emails may land in spam.');
+    // AC stays on `criteria` for the adapter checklist, never in the body.
+    expect(item.criteria).toEqual(['A reset link is emailed.']);
+    expect(item.description).not.toContain('A reset link is emailed.');
+  });
+});
+
+/**
+ * Routing-guard lock (TER-37 bug): the whole-vault converter
+ * ({@link specToCanonicalItems}, reached only by the explicit no-filePath Push
+ * button) is FLAT-dropping for stories — it emits a story as `{title, criteria}`
+ * only, LOSING the structured description (statement/description/open-questions/
+ * risks). This is precisely why the combined `/decompose-stories` execute must NOT
+ * re-plan from disk through this converter, and why a per-file execute must never
+ * silently fall back to it. This test pins that lossy behavior so the routing guard
+ * can never quietly route a structured push through here.
+ */
+describe('specToCanonicalItems — whole-vault converter DROPS structured story fields (routing-guard lock)', () => {
+  const STRUCTURED_DOC = `# Auth <!-- sf:id epic1 -->
+
+## User Stories
+
+### Reset password <!-- sf:id story-reset -->
+
+As a locked-out user, I want reset my password, so that I regain access
+
+Covers the email reset link and its expiry window.
+
+- Acceptance criteria:
+  - A reset link is emailed.
+- Open questions:
+  - Should the link be single-use?
+- Risks:
+  - Reset emails may land in spam.
+`;
+
+  it('no story from the whole-vault converter carries the structured open-questions/risks body', () => {
+    const stories = specToCanonicalItems([doc('prd/auth.md', STRUCTURED_DOC)]).filter(
+      (i) => i.level === 'story',
+    );
+
+    // Whatever the converter recognizes as stories here, NONE carries the structured
+    // body (open questions / risks) — that data is dropped on the floor. This is the
+    // exact loss the combined push avoids by pushing the previewed in-memory items.
+    expect(stories.length).toBeGreaterThan(0);
+    for (const story of stories) {
+      expect(story.description ?? '').not.toContain('**Open questions**');
+      expect(story.description ?? '').not.toContain('**Risks**');
+    }
+  });
+
+  it('the per-file FLAT builder KEEPS the structured body the whole-vault converter drops', () => {
+    // Same marker id from BOTH paths (the idempotency anchor), but only the per-file
+    // FLAT builder — which the per-file reader and the renderer preview share —
+    // carries the structured statement / description / open questions / risks.
+    const wholeVaultMarked = specToCanonicalItems([doc('prd/auth.md', STRUCTURED_DOC)]).find(
+      (i) => i.localId === 'story-reset',
+    );
+    const [flat] = buildTaskItemsFromContent('prd/auth.md', STRUCTURED_DOC);
+
+    // The marked story id survives in both paths…
+    expect(flat.localId).toBe('story-reset');
+    if (wholeVaultMarked) expect(wholeVaultMarked.localId).toBe('story-reset');
+    // …but only the per-file builder keeps the structured body.
+    expect(flat.description).toContain('As a locked-out user');
+    expect(flat.description).toContain('**Open questions**');
+    expect(flat.description).toContain('**Risks**');
   });
 });

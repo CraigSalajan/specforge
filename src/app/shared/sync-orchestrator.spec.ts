@@ -365,3 +365,68 @@ describe('createLinearAdapterBuilder — production adapter builder (AC #2)', ()
     );
   });
 });
+
+/**
+ * TER-37 — per-file push scope: `planPushForConnection`/`runSyncPush` thread an
+ * optional `filePath` straight into `sourceCanonicalItems`, so the file-scoped
+ * source can return just that file's items. Omitting `filePath` must call the
+ * source with `undefined`, leaving the whole-vault path behavior-identical.
+ */
+describe('filePath threading into sourceCanonicalItems (TER-37)', () => {
+  /** Deps whose `sourceCanonicalItems` records each (vaultPath, filePath) call. */
+  function recordingDeps(items: CanonicalItem[]): {
+    deps: SyncOrchestratorDeps;
+    sourceCalls: Array<{ vaultPath: string; filePath?: string }>;
+  } {
+    const sourceCalls: Array<{ vaultPath: string; filePath?: string }> = [];
+    const conn = connection();
+    return {
+      sourceCalls,
+      deps: {
+        resolveVaultRoot: () => VAULT_PATH,
+        readConnection: (_vaultPath, connectionId) =>
+          connectionId === conn.connectionId ? conn : undefined,
+        sourceCanonicalItems: (vaultPath, filePath) => {
+          sourceCalls.push({ vaultPath, filePath });
+          return items;
+        },
+        listLinks: () => [],
+        writeLink: () => undefined,
+        buildAdapter: () => fakeAdapter(),
+        now: () => FIXED_NOW,
+      },
+    };
+  }
+
+  it('planPushForConnection forwards filePath into the item source', () => {
+    const { deps, sourceCalls } = recordingDeps([item({ localId: 'prd/x.md' })]);
+
+    planPushForConnection(CONNECTION_ID, deps, 'prd/x.md');
+
+    expect(sourceCalls).toEqual([{ vaultPath: VAULT_PATH, filePath: 'prd/x.md' }]);
+  });
+
+  it('planPushForConnection passes filePath=undefined when omitted (whole-vault)', () => {
+    const { deps, sourceCalls } = recordingDeps([item({ localId: 'a' })]);
+
+    planPushForConnection(CONNECTION_ID, deps);
+
+    expect(sourceCalls).toEqual([{ vaultPath: VAULT_PATH, filePath: undefined }]);
+  });
+
+  it('runSyncPush forwards filePath into the item source', async () => {
+    const { deps, sourceCalls } = recordingDeps([item({ localId: 'prd/y.md' })]);
+
+    await runSyncPush(CONNECTION_ID, deps, () => true, 'prd/y.md');
+
+    expect(sourceCalls).toEqual([{ vaultPath: VAULT_PATH, filePath: 'prd/y.md' }]);
+  });
+
+  it('runSyncPush passes filePath=undefined when omitted (whole-vault)', async () => {
+    const { deps, sourceCalls } = recordingDeps([item({ localId: 'a' })]);
+
+    await runSyncPush(CONNECTION_ID, deps);
+
+    expect(sourceCalls).toEqual([{ vaultPath: VAULT_PATH, filePath: undefined }]);
+  });
+});

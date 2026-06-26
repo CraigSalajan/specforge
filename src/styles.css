@@ -60,6 +60,35 @@ html, body {
 .prose-ai th, .prose-ai td { border: 1px solid var(--color-border-subtle); padding: 0.3em 0.6em; }
 .prose-ai th { background: var(--color-surface-3); }
 
+/* ── Inline spinner (push live-progress, TER-37) ─────────────────────────
+   The codebase had no spinner before this; authored here (an exception
+   alongside .prose-ai / .cm-editor) because a token-driven Tailwind utility
+   can't express the keyframe. A 14px ring: a faint track with one indigo arc.
+
+   Motion is NEVER the only signal — every spinner is paired with a textual
+   state ("Creating…") inside a role="status" row, so a reduced-motion or
+   screen-reader user reads the state without the spin. Under reduced motion
+   the ring stops (the global reduce reset below freezes the animation), so we
+   drop the contrast between track and arc to render a calm, complete static
+   ring instead of a frozen one-sided arc that reads as "stuck". */
+.sf-spinner {
+  display: inline-block;
+  width: 0.875rem;
+  height: 0.875rem;
+  border-radius: 9999px;
+  border: 2px solid var(--color-border-strong);
+  border-top-color: var(--color-accent);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .sf-spinner { animation: sf-spin 0.7s linear infinite; }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* No spin: render a complete, calm ring (all sides the accent) rather than a
+     frozen partial arc, so the static state still reads as deliberate. */
+  .sf-spinner { border-color: var(--color-accent); animation: none; }
+}
+@keyframes sf-spin { to { transform: rotate(360deg); } }
+
 /* ── CodeMirror live-markdown editor theming ─────────────────────────────
    codemirror-live-markdown styles markdown inline via .cm-header-1..6 +
    .cm-heading-line (headings), .cm-strong / .cm-emphasis / .cm-strikethrough,

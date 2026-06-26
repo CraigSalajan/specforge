@@ -39,9 +39,11 @@ import type {
   SyncExecutePushResult,
   SyncListProjectsResult,
   SyncListTeamsResult,
+  SyncPushProgressEvent,
   SyncTestConnectionResult,
 } from '../shared/types';
 import type { Connection } from '../../../electron/sync/connection';
+import type { CanonicalItem } from '../../../electron/sync/canonical-item';
 
 @Injectable({ providedIn: 'root' })
 export class IpcService {
@@ -193,12 +195,40 @@ export class IpcService {
     return this.requireApi().syncTestConnection(connectionId);
   }
 
-  syncBuildPreview(connectionId: string): Promise<SyncBuildPreviewResult> {
-    return this.requireApi().syncBuildPreview(connectionId);
+  syncBuildPreview(connectionId: string, filePath?: string): Promise<SyncBuildPreviewResult> {
+    return this.requireApi().syncBuildPreview(connectionId, filePath);
   }
 
-  syncExecutePush(connectionId: string): Promise<SyncExecutePushResult> {
-    return this.requireApi().syncExecutePush(connectionId);
+  syncPreviewFromItems(
+    connectionId: string,
+    items: CanonicalItem[],
+  ): Promise<SyncBuildPreviewResult> {
+    return this.requireApi().syncPreviewFromItems(connectionId, items);
+  }
+
+  syncExecutePush(
+    connectionId: string,
+    filePath?: string,
+    pushId?: string,
+  ): Promise<SyncExecutePushResult> {
+    return this.requireApi().syncExecutePush(connectionId, filePath, pushId);
+  }
+
+  syncExecutePushFromItems(
+    connectionId: string,
+    items: CanonicalItem[],
+    pushId?: string,
+  ): Promise<SyncExecutePushResult> {
+    return this.requireApi().syncExecutePushFromItems(connectionId, items, pushId);
+  }
+
+  /**
+   * Subscribe to per-item push progress (TER-37). Returns an unsubscribe; mirrors
+   * {@link onAiStreamChunk}. Events are demuxed by `pushId` upstream in
+   * {@link SyncService}, not here.
+   */
+  onSyncPushProgress(cb: (evt: SyncPushProgressEvent) => void): () => void {
+    return this.requireApi().onSyncPushProgress(cb);
   }
 
   syncConnectionList(vaultPath: string): Promise<Connection[]> {
