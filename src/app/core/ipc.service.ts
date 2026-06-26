@@ -354,4 +354,10 @@ export class IpcService {
   exportPdf(payload: ExportPdfPayload): Promise<ExportPdfResult> {
     return this.requireApi().exportPdf(payload);
   }
+
+  // Shell: open a validated http(s) URL in the system browser. The main process
+  // validates the scheme, so callers may pass externalUrls straight through.
+  openExternal(url: string): Promise<void> {
+    return this.requireApi().openExternal(url);
+  }
 }

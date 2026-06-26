@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
  * Unit tests for the at-rest secret encryption seam (TER-28 widens it to the
@@ -51,6 +51,15 @@ beforeEach(() => {
   safeStorageMock.decryptString.mockClear();
 });
 
+// The unit-test builder bundles every spec into one shared module graph, so the
+// `electron` mock that secure-settings.ts binds at import time is a singleton across
+// spec files. Leaving `isEncryptionAvailable` returning false here would make a sibling
+// spec (connection-secrets.spec) store secrets as plaintext and fail. Restore the
+// available-default after each test so the override never outlives this file.
+afterEach(() => {
+  safeStorageMock.isEncryptionAvailable.mockReturnValue(true);
+});
+
 describe('isSecretSettingKey / isConnectionSecretKey', () => {
   it('treats both the bare and per-connection secret keys as secret', () => {
     expect(isSecretSettingKey('ai.apiKey')).toBe(true);
@@ -88,7 +97,7 @@ describe('encryptSettingValue / decryptSettingValue', () => {
   });
 
   it('passes through as plaintext when OS encryption is unavailable', () => {
-    safeStorageMock.isEncryptionAvailable.mockReturnValue(false);
+    safeStorageMock.isEncryptionAvailable.mockReturnValueOnce(false);
     expect(encryptSettingValue(CONN_PAT_KEY, 'lin_api_secret')).toBe('lin_api_secret');
     expect(safeStorageMock.encryptString).not.toHaveBeenCalled();
   });
@@ -135,7 +144,7 @@ describe('migratePlaintextSecrets', () => {
   });
 
   it('is a no-op when OS encryption is unavailable', () => {
-    safeStorageMock.isEncryptionAvailable.mockReturnValue(false);
+    safeStorageMock.isEncryptionAvailable.mockReturnValueOnce(false);
     backing.set(CONN_PAT_KEY, 'plain-pat');
 
     migratePlaintextSecrets(store);
